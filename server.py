@@ -628,6 +628,18 @@ def webhook():
     """
     data = request.get_json(silent=True)
     if not data:
+        # Try extracting JSON from a plain text message
+        # Format: "readable text | {...json...}"
+        raw = request.get_data(as_text=True)
+        import re
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if match:
+            import json as json_lib
+            try:
+                data = json_lib.loads(match.group())
+            except Exception:
+                pass
+    if not data:
         log.warning("Received non-JSON or empty payload")
         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
 
