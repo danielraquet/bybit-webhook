@@ -685,6 +685,9 @@ def webhook():
 
         set_leverage(symbol, LEVERAGE)
 
+        # Auto-cancel any pending opposite orders on this symbol
+        auto_cancel_opposite(symbol, side)
+
         info        = get_instrument_info(symbol)
         price_scale = info["price_scale"]
         entry_str   = f"{entry:.{price_scale}f}"
@@ -762,6 +765,59 @@ def manual_poll():
         return jsonify({"status": "ok", "message": "Poll complete"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/cancel/<symbol>", methods=["POST"])
+def cancel_orders(symbol):
+    """Cancel all pending orders for a symbol — useful when rotating assets."""
+    symbol = symbol.upper()
+    try:
+        resp = session.cancel_all_orders(category="linear", symbol=symbol)
+        ret_code = resp.get("retCode", -1)
+        if ret_code == 0:
+            log.info(f"Cancelled all orders for {symbol}")
+            with get_db() as conn:
+                conn.execute("""
+                    UPDATE trades SET status = 'skipped', notes = 'Manually cancelled'
+                    WHERE symbol = ? AND status = 'open'
+                """, (symbol,))
+                conn.commit()
+            return jsonify({"status": "ok", "cancelled": symbol}), 200
+        else:
+            return jsonify({"status": "error", "message": resp.get("retMsg")}), 400
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def auto_cancel_opposite(symbol: str, new_side: str):
+    """
+    When a new setup fires, cancel any pending unfilled orders on the same
+    symbol in the OPPOSITE direction.
+    e.g. new Bull setup → cancel any pending Sell limit orders on that symbol.
+    """
+    try:
+        resp  = session.get_open_orders(category="linear", symbol=symbol)
+        orders = resp.get("result", {}).get("list", [])
+        opposite = "Sell" if new_side == "Buy" else "Buy"
+
+        for order in orders:
+            if order.get("side") == opposite:
+                order_id = order.get("orderId")
+                session.cancel_order(
+                    category="linear",
+                    symbol=symbol,
+                    orderId=order_id
+                )
+                log.info(f"Auto-cancelled opposite {opposite} order {order_id} for {symbol}")
+                with get_db() as conn:
+                    conn.execute("""
+                        UPDATE trades SET status = 'skipped',
+                        notes = 'Auto-cancelled — opposite setup fired'
+                        WHERE order_id = ? AND status = 'open'
+                    """, (order_id,))
+                    conn.commit()
+    except Exception as e:
+        log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
 
 
 @app.route("/journal")
