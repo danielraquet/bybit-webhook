@@ -40,12 +40,18 @@ log = logging.getLogger(__name__)
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
 API_KEY        = os.getenv("BYBIT_API_KEY",    "")
 API_SECRET     = os.getenv("BYBIT_API_SECRET", "")
-TESTNET        = os.getenv("TESTNET", "true").lower() == "true"   # ALWAYS test first!
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET",   "")               # Optional extra security
-BALANCE_PCT    = float(os.getenv("BALANCE_PCT", "2.0"))           # % of balance per trade
-MAX_TRADES     = int(os.getenv("MAX_TRADES",    "3"))             # Max simultaneous trades
-LEVERAGE       = int(os.getenv("LEVERAGE",      "5"))             # Leverage per symbol
-ENABLED        = os.getenv("ENABLED", "true").lower() == "true"  # Master on/off switch
+TESTNET        = os.getenv("TESTNET", "true").lower() == "true"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+def get_config():
+    """Read config fresh from environment on every call — picks up Railway variable changes."""
+    return {
+        "enabled":     os.getenv("ENABLED",     "true").lower() == "true",
+        "balance_pct": float(os.getenv("BALANCE_PCT", "2.0")),
+        "max_trades":  int(os.getenv("MAX_TRADES",    "3")),
+        "leverage":    int(os.getenv("LEVERAGE",      "5")),
+        "poll_interval": int(os.getenv("POLL_INTERVAL", "300")),
+    }
 
 app = Flask(__name__)
 
@@ -450,7 +456,7 @@ def set_leverage(symbol: str, leverage: int):
         pass  # Already set or not supported — not critical
 
 
-def calculate_qty(symbol: str, entry: float, balance_pct: float) -> float:
+def calculate_qty(symbol: str, entry: float, balance_pct: float, leverage: int) -> float:
     """
     Calculate order quantity based on % of available balance.
     qty = (balance * pct/100 * leverage) / entry_price
@@ -461,7 +467,7 @@ def calculate_qty(symbol: str, entry: float, balance_pct: float) -> float:
         return 0.0
 
     info       = get_instrument_info(symbol)
-    notional   = balance * (balance_pct / 100.0) * LEVERAGE
+    notional   = balance * (balance_pct / 100.0) * leverage
     raw_qty    = notional / entry
     qty        = round_to_step(raw_qty, info["qty_step"])
 
@@ -473,11 +479,9 @@ def calculate_qty(symbol: str, entry: float, balance_pct: float) -> float:
     return qty
 
 
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))  # seconds, default 5 min
-
 def poll_closed_trades():
     """
-    Background thread — runs every POLL_INTERVAL seconds.
+    Background thread — runs every poll_interval seconds.
     Checks Bybit order history for any open journal entries that have
     now been filled, cancelled, or had their SL/TP triggered.
     """
@@ -486,7 +490,7 @@ def poll_closed_trades():
             _check_closed_trades()
         except Exception as e:
             log.error(f"Poller error: {e}")
-        time.sleep(POLL_INTERVAL)
+        time.sleep(get_config()["poll_interval"])
 
 
 def _check_closed_trades():
@@ -629,8 +633,11 @@ def webhook():
 
     log.info(f"Received alert: {data}")
 
+    # ── Read config fresh — picks up any Railway variable changes ─────────────
+    cfg = get_config()
+
     # ── Master on/off switch ──────────────────────────────────────────────────
-    if not ENABLED:
+    if not cfg["enabled"]:
         log.info("Server is DISABLED — alert received but no order placed")
         return jsonify({"status": "disabled", "message": "Server is disabled — no order placed"}), 200
 
@@ -660,8 +667,8 @@ def webhook():
         open_positions = get_open_positions()
         log.info(f"Open positions: {open_positions}")
 
-        if symbol not in open_positions and len(open_positions) >= MAX_TRADES:
-            msg = f"Max trades ({MAX_TRADES}) reached — skipping {symbol}"
+        if symbol not in open_positions and len(open_positions) >= cfg["max_trades"]:
+            msg = f"Max trades ({cfg['max_trades']}) reached — skipping {symbol}"
             log.warning(msg)
             log_order_skipped(symbol, side, entry, sl, tp, msg)
             return jsonify({"status": "skipped", "message": msg}), 200
@@ -679,11 +686,11 @@ def webhook():
             log_order_skipped(symbol, side, entry, sl, tp, msg)
             return jsonify({"status": "skipped", "message": msg}), 200
 
-        qty = calculate_qty(symbol, entry, BALANCE_PCT)
+        qty = calculate_qty(symbol, entry, cfg["balance_pct"], cfg["leverage"])
         if qty <= 0:
             return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
 
-        set_leverage(symbol, LEVERAGE)
+        set_leverage(symbol, cfg["leverage"])
 
         # Auto-cancel any pending opposite orders on this symbol
         auto_cancel_opposite(symbol, side)
@@ -741,19 +748,21 @@ def webhook():
 
 @app.route("/status", methods=["GET"])
 def status():
-    """Health check — shows open positions and balance."""
+    """Health check — shows current config, open positions and balance."""
+    cfg       = get_config()
     positions = get_open_positions()
     balance   = get_available_balance()
     return jsonify({
         "status":          "running",
-        "enabled":         ENABLED,
+        "enabled":         cfg["enabled"],
         "testnet":         TESTNET,
         "open_positions":  positions,
         "position_count":  len(positions),
-        "max_trades":      MAX_TRADES,
+        "max_trades":      cfg["max_trades"],
         "balance_usdt":    balance,
-        "balance_pct":     BALANCE_PCT,
-        "leverage":        LEVERAGE,
+        "balance_pct":     cfg["balance_pct"],
+        "leverage":        cfg["leverage"],
+        "poll_interval":   cfg["poll_interval"],
     })
 
 
@@ -838,9 +847,10 @@ def journal_data():
 
 
 if __name__ == "__main__":
+    cfg = get_config()
     log.info(f"Starting webhook server — testnet={TESTNET}")
-    log.info(f"Config: {BALANCE_PCT}% per trade, max {MAX_TRADES} trades, {LEVERAGE}x leverage")
-    log.info(f"Poller: checking closed trades every {POLL_INTERVAL}s")
+    log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
+    log.info(f"Poller: checking closed trades every {cfg['poll_interval']}s")
 
     # Start background poller thread
     poller = threading.Thread(target=poll_closed_trades, daemon=True)
