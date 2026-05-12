@@ -407,6 +407,7 @@ def get_available_balance() -> float:
     """Return available USDT balance."""
     try:
         resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        log.info(f"Balance API response: {resp}")  # temporary debug log
         coins = resp.get("result", {}).get("list", [{}])[0].get("coin", [])
         for coin in coins:
             if coin.get("coin") == "USDT":
@@ -420,6 +421,7 @@ def get_available_balance() -> float:
                             continue
         # Fallback — try CONTRACT account type
         resp2 = session.get_wallet_balance(accountType="CONTRACT", coin="USDT")
+        log.info(f"Contract balance response: {resp2}")  # temporary debug log
         coins2 = resp2.get("result", {}).get("list", [{}])[0].get("coin", [])
         for coin in coins2:
             if coin.get("coin") == "USDT":
