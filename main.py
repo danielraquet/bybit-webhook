@@ -56,24 +56,19 @@ def get_config():
 
 app = Flask(__name__)
 
-# ─── TRADE LOCK — prevents race conditions when alerts arrive simultaneously ───
+# ─── TRADE LOCK ───────────────────────────────────────────────────────────────
 trade_lock = threading.Lock()
 
-# ─── START POLLER THREAD — runs whether started via gunicorn or directly ──────
+# ─── START POLLER AT MODULE LEVEL — works with both gunicorn and direct run ───
 def _start_poller():
-    poller = threading.Thread(target=poll_closed_trades, daemon=True)
-    poller.start()
-    log.info("Background poller thread started")
+    try:
+        poller = threading.Thread(target=poll_closed_trades, daemon=True)
+        poller.start()
+        log.info("Background poller thread started")
+    except Exception as e:
+        log.error(f"Failed to start poller: {e}")
 
-# Use Flask's first-request hook to start poller (works with gunicorn)
-_poller_started = False
-
-@app.before_request
-def start_poller_once():
-    global _poller_started
-    if not _poller_started:
-        _poller_started = True
-        _start_poller()
+_start_poller()
 
 # ─── JOURNAL DASHBOARD HTML ───────────────────────────────────────────────────
 JOURNAL_HTML = """
