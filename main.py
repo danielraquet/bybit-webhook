@@ -59,17 +59,6 @@ app = Flask(__name__)
 # ─── TRADE LOCK ───────────────────────────────────────────────────────────────
 trade_lock = threading.Lock()
 
-# ─── START POLLER AT MODULE LEVEL — works with both gunicorn and direct run ───
-def _start_poller():
-    try:
-        poller = threading.Thread(target=poll_closed_trades, daemon=True)
-        poller.start()
-        log.info("Background poller thread started")
-    except Exception as e:
-        log.error(f"Failed to start poller: {e}")
-
-_start_poller()
-
 # ─── JOURNAL DASHBOARD HTML ───────────────────────────────────────────────────
 JOURNAL_HTML = """
 <!DOCTYPE html>
@@ -636,6 +625,19 @@ def _check_closed_pnl(trade):
         log.error(f"Error checking closed PnL for {symbol}: {e}")
 
 
+# ─── POLLER STARTER — defined here so poll_closed_trades is already defined ───
+def _start_poller():
+    try:
+        poller = threading.Thread(target=poll_closed_trades, daemon=True)
+        poller.start()
+        log.info("Background poller thread started")
+    except Exception as e:
+        log.error(f"Failed to start poller: {e}")
+
+# Start poller immediately — all functions defined by this point
+_start_poller()
+
+
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 @app.route("/debug", methods=["POST", "GET"])
@@ -950,5 +952,6 @@ if __name__ == "__main__":
     cfg = get_config()
     log.info(f"Starting webhook server — testnet={TESTNET}")
     log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
+    _start_poller()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
