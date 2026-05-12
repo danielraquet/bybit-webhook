@@ -738,6 +738,7 @@ def webhook():
     order_type    = data.get("orderType", "Limit")   # "Market" or "Limit"
     cancel_bars   = int(data.get("cancelAfterBars", 0))  # 0 = never auto-cancel
     source        = data.get("source",    "unknown")
+    log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp}")
 
     if not all([symbol, side, entry, sl, tp]):
         msg = f"Missing required fields — got: {data}"
