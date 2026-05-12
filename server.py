@@ -15,6 +15,7 @@ Set the webhook URL in TradingView to: http://YOUR_SERVER:5000/webhook
 """
 
 import os
+import re
 import logging
 import threading
 import time
@@ -628,17 +629,17 @@ def webhook():
     """
     data = request.get_json(silent=True)
     if not data:
-        # Try extracting JSON from a plain text message
-        # Format: "readable text | {...json...}"
+        # Try extracting JSON from plain text — format: "readable text | {...json...}"
         raw = request.get_data(as_text=True)
-        import re
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        log.info(f"Raw payload received: {repr(raw[:500])}")  # log first 500 chars
+        import re, json as json_lib
+        match = re.search(r'\{[^{}]*\}', raw)  # non-greedy, finds first complete JSON object
         if match:
-            import json as json_lib
             try:
                 data = json_lib.loads(match.group())
-            except Exception:
-                pass
+                log.info(f"Extracted JSON: {data}")
+            except Exception as e:
+                log.warning(f"JSON parse failed: {e} — raw match: {repr(match.group())}")
     if not data:
         log.warning("Received non-JSON or empty payload")
         return jsonify({"status": "error", "message": "Invalid JSON"}), 400
@@ -659,7 +660,10 @@ def webhook():
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
 
     # ── Parse payload ─────────────────────────────────────────────────────────
-    symbol        = data.get("symbol", "").upper().replace("/", "").replace("-", "")
+    symbol        = data.get("symbol", "").upper()
+    # Clean TradingView suffixes — .P (perpetual), .PS, USDT.P etc
+    symbol        = re.sub(r'\.(P|PS|PERP)$', '', symbol)
+    symbol        = symbol.replace("/", "").replace("-", "").replace(".", "")
     side          = data.get("side",      "")
     entry         = float(data.get("entry",  0))
     sl            = float(data.get("sl",     0))
