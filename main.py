@@ -407,27 +407,26 @@ def get_available_balance() -> float:
     """Return available USDT balance."""
     try:
         resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-        log.info(f"Balance API response: {resp}")  # temporary debug log
-        coins = resp.get("result", {}).get("list", [{}])[0].get("coin", [])
+        result = resp.get("result", {}).get("list", [{}])[0]
+        # Try account-level total equity first
+        for field in ["totalAvailableBalance", "totalEquity", "totalWalletBalance"]:
+            val = result.get(field, "")
+            if val and val != "":
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    continue
+        # Try coin-level fields
+        coins = result.get("coin", [])
         for coin in coins:
             if coin.get("coin") == "USDT":
-                # Try multiple fields — Bybit returns different fields depending on account type
-                for field in ["availableToWithdraw", "walletBalance", "availableToBorrow", "equity"]:
+                for field in ["walletBalance", "equity", "availableToWithdraw"]:
                     val = coin.get(field, "")
-                    if val != "" and val is not None:
+                    if val and val != "":
                         try:
                             return float(val)
                         except (ValueError, TypeError):
                             continue
-        # Fallback — try CONTRACT account type
-        resp2 = session.get_wallet_balance(accountType="CONTRACT", coin="USDT")
-        log.info(f"Contract balance response: {resp2}")  # temporary debug log
-        coins2 = resp2.get("result", {}).get("list", [{}])[0].get("coin", [])
-        for coin in coins2:
-            if coin.get("coin") == "USDT":
-                val = coin.get("availableToWithdraw", "") or coin.get("walletBalance", "")
-                if val:
-                    return float(val)
         return 0.0
     except Exception as e:
         log.error(f"Error fetching balance: {e}")
@@ -625,6 +624,28 @@ def _check_closed_pnl(trade):
 
     except Exception as e:
         log.error(f"Error checking closed PnL for {symbol}: {e}")
+
+
+def auto_cancel_opposite(symbol: str, new_side: str):
+    """Cancel any pending orders in the opposite direction on this symbol."""
+    try:
+        resp     = session.get_open_orders(category="linear", symbol=symbol)
+        orders   = resp.get("result", {}).get("list", [])
+        opposite = "Sell" if new_side == "Buy" else "Buy"
+        for order in orders:
+            if order.get("side") == opposite:
+                order_id = order.get("orderId")
+                session.cancel_order(category="linear", symbol=symbol, orderId=order_id)
+                log.info(f"Auto-cancelled opposite {opposite} order {order_id} for {symbol}")
+                with get_db() as conn:
+                    conn.execute("""
+                        UPDATE trades SET status = 'skipped',
+                        notes = 'Auto-cancelled — opposite setup fired'
+                        WHERE order_id = ? AND status = 'open'
+                    """, (order_id,))
+                    conn.commit()
+    except Exception as e:
+        log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
 
 
 # ─── POLLER STARTER — defined here so poll_closed_trades is already defined ───
