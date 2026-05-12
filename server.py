@@ -659,11 +659,14 @@ def webhook():
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
 
     # ── Parse payload ─────────────────────────────────────────────────────────
-    symbol = data.get("symbol", "").upper().replace("/", "").replace("-", "")
-    side   = data.get("side",   "")    # "Buy" or "Sell"
-    entry  = float(data.get("entry", 0))
-    sl     = float(data.get("sl",    0))
-    tp     = float(data.get("tp",    0))
+    symbol        = data.get("symbol", "").upper().replace("/", "").replace("-", "")
+    side          = data.get("side",      "")
+    entry         = float(data.get("entry",  0))
+    sl            = float(data.get("sl",     0))
+    tp            = float(data.get("tp",     0))
+    order_type    = data.get("orderType", "Limit")   # "Market" or "Limit"
+    cancel_bars   = int(data.get("cancelAfterBars", 0))  # 0 = never auto-cancel
+    source        = data.get("source",    "unknown")
 
     if not all([symbol, side, entry, sl, tp]):
         msg = f"Missing required fields — got: {data}"
@@ -715,29 +718,40 @@ def webhook():
         qty_str     = str(qty)
 
         try:
-            resp = session.place_order(
-                category="linear",
-                symbol=symbol,
-                side=side,
-                orderType="Limit",
-                qty=qty_str,
-                price=entry_str,
-                stopLoss=sl_str,
-                takeProfit=tp_str,
-                slTriggerBy="LastPrice",
-                tpTriggerBy="LastPrice",
-                timeInForce="GTC",
-                reduceOnly=False,
-                closeOnTrigger=False,
+            order_params = dict(
+                category     = "linear",
+                symbol       = symbol,
+                side         = side,
+                orderType    = order_type,
+                qty          = qty_str,
+                stopLoss     = sl_str,
+                takeProfit   = tp_str,
+                slTriggerBy  = "LastPrice",
+                tpTriggerBy  = "LastPrice",
+                timeInForce  = "IOC" if order_type == "Market" else "GTC",
+                reduceOnly   = False,
+                closeOnTrigger = False,
             )
+            # Only include price for limit orders
+            if order_type == "Limit":
+                order_params["price"] = entry_str
+
+            resp = session.place_order(**order_params)
 
             ret_code = resp.get("retCode", -1)
             if ret_code == 0:
                 order_id = resp.get("result", {}).get("orderId", "?")
-                log.info(f"✅ Order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
-                # Log to journal
-                log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
-                                 source=data.get("source", "fib"))
+                log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
+                log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source)
+                # Schedule auto-cancel for limit orders only
+                if order_type == "Limit" and cancel_bars > 0:
+                    cancel_time = time.time() + cancel_bars * _get_bar_seconds()
+                    threading.Thread(
+                        target=_auto_cancel_after,
+                        args=(symbol, order_id, cancel_time),
+                        daemon=True
+                    ).start()
+                    log.info(f"Auto-cancel scheduled for {symbol} {order_id} after {cancel_bars} bars")
                 return jsonify({
                     "status":   "ok",
                     "symbol":   symbol,
@@ -810,7 +824,35 @@ def cancel_orders(symbol):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-def auto_cancel_opposite(symbol: str, new_side: str):
+def _get_bar_seconds() -> int:
+    """Estimate bar duration in seconds from timeframe.period sent in alert.
+    Falls back to 60s (1 min) if unknown."""
+    # We don't have the TF here so use a configurable default
+    return int(os.getenv("BAR_SECONDS", "180"))   # default 3 min bars
+
+
+def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
+    """Wait until cancel_at timestamp then cancel the order if still unfilled."""
+    wait = max(0, cancel_at - time.time())
+    time.sleep(wait)
+    try:
+        # Check if still open
+        resp = session.get_open_orders(category="linear", symbol=symbol, orderId=order_id)
+        orders = resp.get("result", {}).get("list", [])
+        if orders:
+            session.cancel_order(category="linear", symbol=symbol, orderId=order_id)
+            log.info(f"⏱ Auto-cancelled unfilled limit order {order_id} for {symbol}")
+            with get_db() as conn:
+                conn.execute("""
+                    UPDATE trades SET status = 'skipped',
+                    notes = 'Auto-cancelled — unfilled after bar timeout'
+                    WHERE order_id = ? AND status = 'open'
+                """, (order_id,))
+                conn.commit()
+        else:
+            log.info(f"Auto-cancel check: {symbol} {order_id} already filled or closed")
+    except Exception as e:
+        log.error(f"Auto-cancel error for {symbol} {order_id}: {e}")
     """
     When a new setup fires, cancel any pending unfilled orders on the same
     symbol in the OPPOSITE direction.
