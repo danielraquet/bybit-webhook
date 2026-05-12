@@ -57,8 +57,23 @@ def get_config():
 app = Flask(__name__)
 
 # ─── TRADE LOCK — prevents race conditions when alerts arrive simultaneously ───
-# Only one alert is processed at a time — others wait their turn
 trade_lock = threading.Lock()
+
+# ─── START POLLER THREAD — runs whether started via gunicorn or directly ──────
+def _start_poller():
+    poller = threading.Thread(target=poll_closed_trades, daemon=True)
+    poller.start()
+    log.info("Background poller thread started")
+
+# Use Flask's first-request hook to start poller (works with gunicorn)
+_poller_started = False
+
+@app.before_request
+def start_poller_once():
+    global _poller_started
+    if not _poller_started:
+        _poller_started = True
+        _start_poller()
 
 # ─── JOURNAL DASHBOARD HTML ───────────────────────────────────────────────────
 JOURNAL_HTML = """
@@ -411,7 +426,22 @@ def get_available_balance() -> float:
         coins = resp.get("result", {}).get("list", [{}])[0].get("coin", [])
         for coin in coins:
             if coin.get("coin") == "USDT":
-                return float(coin.get("availableToWithdraw", 0))
+                # Try multiple fields — Bybit returns different fields depending on account type
+                for field in ["availableToWithdraw", "walletBalance", "availableToBorrow", "equity"]:
+                    val = coin.get(field, "")
+                    if val != "" and val is not None:
+                        try:
+                            return float(val)
+                        except (ValueError, TypeError):
+                            continue
+        # Fallback — try CONTRACT account type
+        resp2 = session.get_wallet_balance(accountType="CONTRACT", coin="USDT")
+        coins2 = resp2.get("result", {}).get("list", [{}])[0].get("coin", [])
+        for coin in coins2:
+            if coin.get("coin") == "USDT":
+                val = coin.get("availableToWithdraw", "") or coin.get("walletBalance", "")
+                if val:
+                    return float(val)
         return 0.0
     except Exception as e:
         log.error(f"Error fetching balance: {e}")
