@@ -955,10 +955,5 @@ if __name__ == "__main__":
     cfg = get_config()
     log.info(f"Starting webhook server — testnet={TESTNET}")
     log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
-    log.info(f"Poller: checking closed trades every {cfg['poll_interval']}s")
-
-    # Start background poller thread
-    poller = threading.Thread(target=poll_closed_trades, daemon=True)
-    poller.start()
-
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
