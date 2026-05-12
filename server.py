@@ -613,6 +613,21 @@ def _check_closed_pnl(trade):
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
+@app.route("/debug", methods=["POST", "GET"])
+def debug():
+    """Echo back exactly what was received — use to diagnose webhook issues."""
+    raw      = request.get_data(as_text=True)
+    headers  = dict(request.headers)
+    json_data = request.get_json(silent=True)
+    log.info(f"DEBUG endpoint hit — raw: {repr(raw[:1000])}")
+    return jsonify({
+        "raw_body":       raw[:1000],
+        "content_type":   request.content_type,
+        "parsed_json":    json_data,
+        "headers":        {k: v for k, v in headers.items() if k in ["Content-Type", "User-Agent", "X-Forwarded-For"]},
+    }), 200
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """
@@ -627,22 +642,24 @@ def webhook():
         "tp":      83800.0
     }
     """
-    data = request.get_json(silent=True)
+    data = request.get_json(silent=True, force=True)  # force=True ignores Content-Type
     if not data:
-        # Try extracting JSON from plain text — format: "readable text | {...json...}"
         raw = request.get_data(as_text=True)
-        log.info(f"Raw payload received: {repr(raw[:500])}")  # log first 500 chars
-        import re, json as json_lib
-        match = re.search(r'\{[^{}]*\}', raw)  # non-greedy, finds first complete JSON object
-        if match:
+        log.info(f"Raw payload received: {repr(raw[:500])}")
+        import json as json_lib
+        # Find the last { ... } block in the message
+        start = raw.rfind('{')
+        end   = raw.rfind('}')
+        if start != -1 and end != -1 and end > start:
             try:
-                data = json_lib.loads(match.group())
+                data = json_lib.loads(raw[start:end+1])
                 log.info(f"Extracted JSON: {data}")
             except Exception as e:
-                log.warning(f"JSON parse failed: {e} — raw match: {repr(match.group())}")
+                log.warning(f"JSON parse failed: {e} — attempted: {repr(raw[start:end+1][:200])}")
     if not data:
-        log.warning("Received non-JSON or empty payload")
-        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
+        raw = request.get_data(as_text=True)
+        log.info(f"Non-JSON alert received (notification only, no order): {repr(raw[:200])}")
+        return jsonify({"status": "ok", "message": "Notification received — no order placed"}), 200
 
     log.info(f"Received alert: {data}")
 
