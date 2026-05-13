@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, render_template_string
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 from journal import (log_order_placed, log_order_skipped, log_trade_closed,
-                     get_all_trades, get_stats, get_db)
+                     get_all_trades, get_stats, get_db, ph)
 
 load_dotenv()
 
@@ -550,7 +550,7 @@ def _check_closed_trades():
                     # Update actual entry price if different from limit
                     with get_db() as conn:
                         conn.execute(
-                            "UPDATE trades SET entry = ? WHERE order_id = ?",
+                            "UPDATE trades SET entry = " + ph() + " WHERE order_id = " + ph(),
                             (avg_price, order_id)
                         )
                         conn.commit()
@@ -563,7 +563,7 @@ def _check_closed_trades():
                 # Order was cancelled before fill — mark as skipped
                 with get_db() as conn:
                     conn.execute(
-                        "UPDATE trades SET status = 'skipped', notes = ? WHERE order_id = ?",
+                        "UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(),
                         (f"Order {order_status.lower()} on exchange", order_id)
                     )
                     conn.commit()
@@ -641,7 +641,7 @@ def auto_cancel_opposite(symbol: str, new_side: str):
                     conn.execute("""
                         UPDATE trades SET status = 'skipped',
                         notes = 'Auto-cancelled — opposite setup fired'
-                        WHERE order_id = ? AND status = 'open'
+                        WHERE order_id = " + ph() + " AND status = 'open'
                     """, (order_id,))
                     conn.commit()
     except Exception as e:
@@ -886,7 +886,7 @@ def cancel_orders(symbol):
             with get_db() as conn:
                 conn.execute("""
                     UPDATE trades SET status = 'skipped', notes = 'Manually cancelled'
-                    WHERE symbol = ? AND status = 'open'
+                    WHERE symbol = " + ph() + " AND status = 'open'
                 """, (symbol,))
                 conn.commit()
             return jsonify({"status": "ok", "cancelled": symbol}), 200
@@ -918,7 +918,7 @@ def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
                 conn.execute("""
                     UPDATE trades SET status = 'skipped',
                     notes = 'Auto-cancelled — unfilled after bar timeout'
-                    WHERE order_id = ? AND status = 'open'
+                    WHERE order_id = " + ph() + " AND status = 'open'
                 """, (order_id,))
                 conn.commit()
         else:
@@ -948,7 +948,7 @@ def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
                     conn.execute("""
                         UPDATE trades SET status = 'skipped',
                         notes = 'Auto-cancelled — opposite setup fired'
-                        WHERE order_id = ? AND status = 'open'
+                        WHERE order_id = " + ph() + " AND status = 'open'
                     """, (order_id,))
                     conn.commit()
     except Exception as e:
