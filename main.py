@@ -512,9 +512,9 @@ def poll_closed_trades():
 def _check_closed_trades():
     """Find open journal entries and check if Bybit has closed them."""
     with get_db() as conn:
-        open_trades = conn.execute(
-            "SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL")
+            open_trades = cur.fetchall()
 
     if not open_trades:
         return
@@ -535,8 +535,22 @@ def _check_closed_trades():
             orders = resp.get("result", {}).get("list", [])
 
             if not orders:
-                # Also check closed PnL in case SL/TP was triggered
-                _check_closed_pnl(trade)
+                # Order not in history — check if it's still in open orders
+                open_resp = session.get_open_orders(category="linear", symbol=symbol, orderId=order_id)
+                open_orders = open_resp.get("result", {}).get("list", [])
+                if not open_orders:
+                    # Not open and not in history — must be cancelled or filled
+                    # Check closed PnL first
+                    _check_closed_pnl(trade)
+                    # If still showing as open after PnL check, mark as cancelled
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
+                            row = cur.fetchone()
+                            if row and (row[0] == "open"):
+                                cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
+                                log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
+                        conn.commit()
                 continue
 
             order = orders[0]
@@ -549,10 +563,8 @@ def _check_closed_trades():
                 if avg_price > 0 and trade["entry"] != avg_price:
                     # Update actual entry price if different from limit
                     with get_db() as conn:
-                        conn.execute(
-                            "UPDATE trades SET entry = " + ph() + " WHERE order_id = " + ph(),
-                            (avg_price, order_id)
-                        )
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET entry = " + ph() + " WHERE order_id = " + ph(), (avg_price, order_id))
                         conn.commit()
                     log.info(f"Updated entry price for {symbol} {order_id}: {avg_price}")
 
@@ -562,10 +574,8 @@ def _check_closed_trades():
             elif order_status in ("Cancelled", "Rejected", "Deactivated"):
                 # Order was cancelled before fill — mark as skipped
                 with get_db() as conn:
-                    conn.execute(
-                        "UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(),
-                        (f"Order {order_status.lower()} on exchange", order_id)
-                    )
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(), (f"Order {order_status.lower()} on exchange", order_id))
                     conn.commit()
                 log.info(f"Order {order_id} {symbol} was {order_status} — updated journal")
 
@@ -638,11 +648,8 @@ def auto_cancel_opposite(symbol: str, new_side: str):
                 session.cancel_order(category="linear", symbol=symbol, orderId=order_id)
                 log.info(f"Auto-cancelled opposite {opposite} order {order_id} for {symbol}")
                 with get_db() as conn:
-                    conn.execute("""
-                        UPDATE trades SET status = 'skipped',
-                        notes = 'Auto-cancelled — opposite setup fired'
-                        WHERE order_id = " + ph() + " AND status = 'open'
-                    """, (order_id,))
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE trades SET status = 'skipped', notes = 'Auto-cancelled — opposite setup fired' WHERE order_id = " + ph() + " AND status = 'open'", (order_id,))
                     conn.commit()
     except Exception as e:
         log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
@@ -874,6 +881,19 @@ def manual_poll():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/journal/fix", methods=["POST"])
+def fix_journal():
+    """
+    Manually fix stale 'open' journal entries by checking Bybit.
+    Use this when a trade shows as open in journal but is closed/cancelled on Bybit.
+    """
+    try:
+        _check_closed_trades()
+        return jsonify({"status": "ok", "message": "Journal fix complete — check /journal"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/cancel/<symbol>", methods=["POST"])
 def cancel_orders(symbol):
     """Cancel all pending orders for a symbol — useful when rotating assets."""
@@ -884,10 +904,8 @@ def cancel_orders(symbol):
         if ret_code == 0:
             log.info(f"Cancelled all orders for {symbol}")
             with get_db() as conn:
-                conn.execute("""
-                    UPDATE trades SET status = 'skipped', notes = 'Manually cancelled'
-                    WHERE symbol = " + ph() + " AND status = 'open'
-                """, (symbol,))
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Manually cancelled' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
                 conn.commit()
             return jsonify({"status": "ok", "cancelled": symbol}), 200
         else:
@@ -915,20 +933,19 @@ def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
             session.cancel_order(category="linear", symbol=symbol, orderId=order_id)
             log.info(f"⏱ Auto-cancelled unfilled limit order {order_id} for {symbol}")
             with get_db() as conn:
-                conn.execute("""
-                    UPDATE trades SET status = 'skipped',
-                    notes = 'Auto-cancelled — unfilled after bar timeout'
-                    WHERE order_id = " + ph() + " AND status = 'open'
-                """, (order_id,))
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Auto-cancelled — unfilled after bar timeout' WHERE order_id = " + ph() + " AND status = 'open'", (order_id,))
                 conn.commit()
         else:
             log.info(f"Auto-cancel check: {symbol} {order_id} already filled or closed")
     except Exception as e:
         log.error(f"Auto-cancel error for {symbol} {order_id}: {e}")
+
+
+def auto_cancel_opposite(symbol: str, new_side: str):
     """
     When a new setup fires, cancel any pending unfilled orders on the same
     symbol in the OPPOSITE direction.
-    e.g. new Bull setup → cancel any pending Sell limit orders on that symbol.
     """
     try:
         resp  = session.get_open_orders(category="linear", symbol=symbol)
@@ -945,11 +962,8 @@ def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
                 )
                 log.info(f"Auto-cancelled opposite {opposite} order {order_id} for {symbol}")
                 with get_db() as conn:
-                    conn.execute("""
-                        UPDATE trades SET status = 'skipped',
-                        notes = 'Auto-cancelled — opposite setup fired'
-                        WHERE order_id = " + ph() + " AND status = 'open'
-                    """, (order_id,))
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE trades SET status = 'skipped', notes = 'Auto-cancelled — opposite setup fired' WHERE order_id = " + ph() + " AND status = 'open'", (order_id,))
                     conn.commit()
     except Exception as e:
         log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
@@ -958,18 +972,26 @@ def _auto_cancel_after(symbol: str, order_id: str, cancel_at: float):
 @app.route("/journal")
 def journal():
     """Trading journal dashboard."""
-    trades = get_all_trades(200)
-    stats  = get_stats()
-    return render_template_string(JOURNAL_HTML, trades=trades, stats=stats)
+    try:
+        trades = get_all_trades(200)
+        stats  = get_stats()
+        return render_template_string(JOURNAL_HTML, trades=trades, stats=stats)
+    except Exception as e:
+        log.error(f"Journal error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/data")
 def journal_data():
     """JSON endpoint for journal data."""
-    return jsonify({
-        "trades": get_all_trades(200),
-        "stats":  get_stats()
-    })
+    try:
+        return jsonify({
+            "trades": get_all_trades(200),
+            "stats":  get_stats()
+        })
+    except Exception as e:
+        log.error(f"Journal data error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 if __name__ == "__main__":
