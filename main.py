@@ -760,8 +760,9 @@ def webhook():
     tp            = float(data.get("tp",     0))
     order_type    = data.get("orderType", "Limit")   # "Market" or "Limit"
     cancel_bars   = int(data.get("cancelAfterBars", 0))  # 0 = never auto-cancel
+    bar_seconds   = int(data.get("barSeconds", os.getenv("BAR_SECONDS", "180")))  # from alert, fallback to env
     source        = data.get("source",    "unknown")
-    log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp}")
+    log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds}")
 
     if not all([symbol, side, entry, sl, tp]):
         msg = f"Missing required fields — got: {data}"
@@ -840,13 +841,13 @@ def webhook():
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source)
                 # Schedule auto-cancel for limit orders only
                 if order_type == "Limit" and cancel_bars > 0:
-                    cancel_time = time.time() + cancel_bars * _get_bar_seconds()
+                    cancel_time = time.time() + cancel_bars * bar_seconds
                     threading.Thread(
                         target=_auto_cancel_after,
                         args=(symbol, order_id, cancel_time),
                         daemon=True
                     ).start()
-                    log.info(f"Auto-cancel scheduled for {symbol} {order_id} after {cancel_bars} bars")
+                    log.info(f"Auto-cancel scheduled for {symbol} {order_id} after {cancel_bars} bars × {bar_seconds}s = {cancel_bars * bar_seconds}s")
                 return jsonify({
                     "status":   "ok",
                     "symbol":   symbol,
