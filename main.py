@@ -23,7 +23,7 @@ from flask import Flask, request, jsonify, render_template_string
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 from journal import (log_order_placed, log_order_skipped, log_trade_closed,
-                     get_all_trades, get_stats, get_db, ph)
+                     get_all_trades, get_stats, get_db, ph, DATABASE_URL)
 
 load_dotenv()
 
@@ -511,10 +511,17 @@ def poll_closed_trades():
 
 def _check_closed_trades():
     """Find open journal entries and check if Bybit has closed them."""
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL")
-            open_trades = cur.fetchall()
+    if DATABASE_URL:
+        import psycopg2.extras
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL")
+                open_trades = [dict(r) for r in cur.fetchall()]
+    else:
+        with get_db() as conn:
+            open_trades = [dict(r) for r in conn.execute(
+                "SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
+            ).fetchall()]
 
     if not open_trades:
         return
@@ -544,12 +551,21 @@ def _check_closed_trades():
                     _check_closed_pnl(trade)
                     # If still showing as open after PnL check, mark as cancelled
                     with get_db() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
-                            row = cur.fetchone()
-                            if row and (row[0] == "open"):
-                                cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
-                                log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
+                        if DATABASE_URL:
+                            import psycopg2.extras
+                            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                                cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
+                                row = cur.fetchone()
+                                if row and row["status"] == "open":
+                                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
+                                    log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
+                        else:
+                            with conn.cursor() as cur:
+                                cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
+                                row = cur.fetchone()
+                                if row and row[0] == "open":
+                                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
+                                    log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
                         conn.commit()
                 continue
 
