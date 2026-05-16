@@ -842,11 +842,10 @@ def webhook():
         open_orders = get_open_orders(symbol)
         if open_orders:
             if source == "ob" and order_type == "Limit":
-                # New OB detected — cancel existing pending limit order and replace with new one
+                # New OB detected — cancel existing pending limit and replace with new one
                 log.info(f"New OB for {symbol} — cancelling {len(open_orders)} existing order(s) and replacing")
                 try:
                     session.cancel_all_orders(category="linear", symbol=symbol)
-                    # Mark old orders as skipped in journal
                     with get_db() as conn:
                         with conn.cursor() as cur:
                             cur.execute("UPDATE trades SET status = 'skipped', notes = 'Replaced by new OB limit order' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
@@ -855,6 +854,19 @@ def webhook():
                 except Exception as e:
                     log.error(f"Error cancelling orders for {symbol}: {e}")
                     return jsonify({"status": "error", "message": f"Failed to cancel existing orders: {e}"}), 500
+            elif source == "ob" and order_type == "Market":
+                # Zone entered quickly — cancel the pending limit order placed at detection
+                # then place market order to ensure we get in
+                log.info(f"OB zone entered for {symbol} — cancelling pending limit, placing market order")
+                try:
+                    session.cancel_all_orders(category="linear", symbol=symbol)
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET status = 'skipped', notes = 'Cancelled — market order placed on zone entry' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
+                        conn.commit()
+                except Exception as e:
+                    log.error(f"Error cancelling limit before market order for {symbol}: {e}")
+                    # Continue anyway — place market order even if cancel fails
             else:
                 msg = f"Already have open order(s) for {symbol} — skipping"
                 log.warning(msg)
