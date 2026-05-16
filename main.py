@@ -808,7 +808,10 @@ def webhook():
     cancel_bars   = int(data.get("cancelAfterBars", 0))  # 0 = never auto-cancel
     bar_seconds   = int(data.get("barSeconds", os.getenv("BAR_SECONDS", "180")))  # from alert, fallback to env
     source        = data.get("source",    "unknown")
-    log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds}")
+    test_mode     = str(data.get("testMode",     "false")).lower() == "true"
+    test_bal_pct  = float(data.get("testBalancePct",  0.1))
+    test_leverage = int(data.get("testLeverage", 2))
+    log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds} testMode={test_mode}")
 
     if not all([symbol, side, entry, sl, tp]):
         msg = f"Missing required fields — got: {data}"
@@ -858,11 +861,20 @@ def webhook():
                 log_order_skipped(symbol, side, entry, sl, tp, msg)
                 return jsonify({"status": "skipped", "message": msg}), 200
 
-        qty = calculate_qty(symbol, entry, cfg["balance_pct"], cfg["leverage"])
+        # Use test params if test mode — no main order, just tiny test order
+        if test_mode:
+            actual_bal_pct  = test_bal_pct
+            actual_leverage = test_leverage
+            log.info(f"🧪 Test mode ON — using {test_bal_pct}% balance × {test_leverage}x leverage")
+        else:
+            actual_bal_pct  = cfg["balance_pct"]
+            actual_leverage = cfg["leverage"]
+
+        qty = calculate_qty(symbol, entry, actual_bal_pct, actual_leverage)
         if qty <= 0:
             return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
 
-        set_leverage(symbol, cfg["leverage"])
+        set_leverage(symbol, actual_leverage)
 
         # Auto-cancel any pending opposite orders on this symbol
         auto_cancel_opposite(symbol, side)
@@ -899,7 +911,7 @@ def webhook():
             if ret_code == 0:
                 order_id = resp.get("result", {}).get("orderId", "?")
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
-                log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source)
+                log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source + ("_test" if test_mode else ""))
                 # Schedule auto-cancel for limit orders only
                 if order_type == "Limit" and cancel_bars > 0:
                     cancel_time = time.time() + cancel_bars * bar_seconds
@@ -909,6 +921,7 @@ def webhook():
                         daemon=True
                     ).start()
                     log.info(f"Auto-cancel scheduled for {symbol} {order_id} after {cancel_bars} bars × {bar_seconds}s = {cancel_bars * bar_seconds}s")
+
                 return jsonify({
                     "status":   "ok",
                     "symbol":   symbol,
@@ -918,6 +931,7 @@ def webhook():
                     "sl":       sl_str,
                     "tp":       tp_str,
                     "order_id": order_id,
+                    "test_mode": test_mode,
                 }), 200
             else:
                 msg = resp.get("retMsg", "Unknown error")
