@@ -238,39 +238,39 @@ JOURNAL_HTML = """
 <div class="stats">
   <div class="stat">
     <div class="stat-label">Total Trades</div>
-    <div class="stat-value">{{ stats.total_closed }}</div>
+    <div class="stat-value" id="stat-total">{{ stats.total_closed }}</div>
   </div>
   <div class="stat">
     <div class="stat-label">Win Rate</div>
-    <div class="stat-value {{ 'green' if stats.win_rate >= 50 else 'red' }}">
+    <div class="stat-value" id="stat-wr" class="{{ 'green' if stats.win_rate >= 50 else 'red' }}">
       {{ stats.win_rate }}%
     </div>
   </div>
   <div class="stat">
     <div class="stat-label">Wins / Losses</div>
     <div class="stat-value">
-      <span style="color:var(--green)">{{ stats.wins }}</span>
+      <span style="color:var(--green)" id="stat-wins">{{ stats.wins }}</span>
       <span style="color:var(--dim);font-size:16px"> / </span>
-      <span style="color:var(--red)">{{ stats.losses }}</span>
+      <span style="color:var(--red)" id="stat-losses">{{ stats.losses }}</span>
     </div>
   </div>
   <div class="stat">
     <div class="stat-label">Total PnL</div>
-    <div class="stat-value {{ 'green' if stats.total_pnl >= 0 else 'red' }}">
+    <div class="stat-value" id="stat-pnl" class="{{ 'green' if stats.total_pnl >= 0 else 'red' }}">
       {{ '+' if stats.total_pnl >= 0 else '' }}{{ stats.total_pnl }} USDT
     </div>
   </div>
   <div class="stat">
     <div class="stat-label">Avg Win</div>
-    <div class="stat-value green">+{{ stats.avg_win }} USDT</div>
+    <div class="stat-value green" id="stat-avg-win">+{{ stats.avg_win }} USDT</div>
   </div>
   <div class="stat">
     <div class="stat-label">Avg Loss</div>
-    <div class="stat-value red">{{ stats.avg_loss }} USDT</div>
+    <div class="stat-value red" id="stat-avg-loss">{{ stats.avg_loss }} USDT</div>
   </div>
   <div class="stat">
     <div class="stat-label">Open Now</div>
-    <div class="stat-value blue" style="color:var(--blue)">{{ stats.open_count }}</div>
+    <div class="stat-value" style="color:var(--blue)" id="stat-open">{{ stats.open_count }}</div>
   </div>
 </div>
 
@@ -281,6 +281,11 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="filterTable('skipped', this)">Skipped</button>
   <button class="filter-btn" onclick="filterTable('tp', this)">TP Hit</button>
   <button class="filter-btn" onclick="filterTable('sl', this)">SL Hit</button>
+  <span style="margin:0 8px;color:var(--dim)">|</span>
+  <button class="filter-btn" onclick="filterTable('src:ob', this)">OB</button>
+  <button class="filter-btn" onclick="filterTable('src:fib', this)">FIB</button>
+  <button class="filter-btn" onclick="filterTable('src:fibob', this)">FIBOB</button>
+  <button class="filter-btn" onclick="filterTable('src:manual', this)">Manual</button>
 </div>
 
 <div class="table-wrap">
@@ -308,7 +313,7 @@ JOURNAL_HTML = """
     </thead>
     <tbody>
       {% for t in trades %}
-      <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}">
+      <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}" data-source="{{ t.source or '' }}">
         <td class="dim">{{ t.id }}</td>
         <td style="color:var(--white);font-weight:500">{{ t.symbol }}</td>
         <td>
@@ -359,13 +364,54 @@ function filterTable(filter, btn) {
   document.querySelectorAll('#journal-table tbody tr').forEach(row => {
     const status  = row.dataset.status;
     const outcome = row.dataset.outcome;
+    const source  = row.dataset.source;
     let show = false;
-    if (filter === 'all')     show = true;
-    else if (filter === 'tp') show = outcome === 'tp';
-    else if (filter === 'sl') show = outcome === 'sl';
-    else                      show = status === filter;
+    if (filter === 'all')               show = true;
+    else if (filter === 'tp')           show = outcome === 'tp';
+    else if (filter === 'sl')           show = outcome === 'sl';
+    else if (filter.startsWith('src:')) show = source === filter.slice(4);
+    else                                show = status === filter;
     row.style.display = show ? '' : 'none';
   });
+  updateStats();
+}
+
+function updateStats() {
+  const rows = document.querySelectorAll('#journal-table tbody tr');
+  let total = 0, wins = 0, losses = 0, totalPnl = 0;
+  let winPnls = [], lossPnls = [], openCount = 0;
+
+  rows.forEach(row => {
+    if (row.style.display === 'none') return;
+    const status  = row.dataset.status;
+    const outcome = row.dataset.outcome;
+    const cells   = row.querySelectorAll('td');
+    const pnlText = cells[9] ? cells[9].innerText.trim() : '';
+    const pnl     = parseFloat(pnlText) || 0;
+
+    if (status === 'closed') {
+      total++;
+      if (outcome === 'tp') { wins++; if (pnl) winPnls.push(pnl); }
+      if (outcome === 'sl') { losses++; if (pnl) lossPnls.push(pnl); }
+      totalPnl += pnl;
+    }
+    if (status === 'open') openCount++;
+  });
+
+  const wr     = total > 0 ? Math.round(wins / total * 100) : 0;
+  const avgWin  = winPnls.length  > 0 ? (winPnls.reduce((a,b)=>a+b,0)  / winPnls.length).toFixed(2)  : 0;
+  const avgLoss = lossPnls.length > 0 ? (lossPnls.reduce((a,b)=>a+b,0) / lossPnls.length).toFixed(2) : 0;
+
+  document.getElementById('stat-total').innerText    = total;
+  document.getElementById('stat-wr').innerText       = wr + '%';
+  document.getElementById('stat-wr').className       = 'stat-value ' + (wr >= 50 ? 'green' : 'red');
+  document.getElementById('stat-wins').innerText     = wins;
+  document.getElementById('stat-losses').innerText   = losses;
+  document.getElementById('stat-pnl').innerText      = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(2) + ' USDT';
+  document.getElementById('stat-pnl').className      = 'stat-value ' + (totalPnl >= 0 ? 'green' : 'red');
+  document.getElementById('stat-avg-win').innerText  = '+' + avgWin + ' USDT';
+  document.getElementById('stat-avg-loss').innerText = avgLoss + ' USDT';
+  document.getElementById('stat-open').innerText     = openCount;
 }
 </script>
 </body>
