@@ -66,14 +66,19 @@ def _col_letter(n: int) -> str:
 
 
 def _next_row(service) -> int:
-    """Find the next empty row in the Trading Journal tab."""
+    """Find the next empty row by checking Entry Date/Time column (B)."""
     try:
         result = service.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
-            range=f"'{SHEET_TAB}'!A{DATA_START_ROW}:A"
+            range=f"'{SHEET_TAB}'!B{DATA_START_ROW}:B"
         ).execute()
         values = result.get("values", [])
-        return DATA_START_ROW + len(values)
+        # Find last non-empty row
+        last_filled = 0
+        for i, row in enumerate(values):
+            if row and row[0]:
+                last_filled = i
+        return DATA_START_ROW + last_filled + (1 if last_filled > 0 or values else 0)
     except Exception as e:
         log.error(f"Error finding next row: {e}")
         return DATA_START_ROW
