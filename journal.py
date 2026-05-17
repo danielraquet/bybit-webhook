@@ -17,7 +17,11 @@ if DATABASE_URL:
     import psycopg2.extras
 
     def get_db():
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        try:
+            conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        except Exception:
+            # Some Supabase connection strings already include sslmode
+            conn = psycopg2.connect(DATABASE_URL)
         return conn
 
     def init_db():
@@ -39,23 +43,26 @@ if DATABASE_URL:
                         outcome     TEXT,
                         order_id    TEXT,
                         source      TEXT,
+                        timeframe   TEXT,
                         opened_at   TEXT    NOT NULL,
                         closed_at   TEXT,
                         notes       TEXT
                     )
                 """)
+            # Add timeframe column if not exists (migration for existing tables)
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
             conn.commit()
         log.info("PostgreSQL journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib"):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO trades
-                        (symbol, side, status, qty, entry, sl, tp, order_id, source, opened_at)
-                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s)
+                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, opened_at)
+                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (symbol, side, qty, entry, sl, tp, order_id, source,
+                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe,
                       datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
                 row_id = cur.fetchone()[0]
             conn.commit()
@@ -176,6 +183,7 @@ else:
                     outcome     TEXT,
                     order_id    TEXT,
                     source      TEXT,
+                    timeframe   TEXT,
                     opened_at   TEXT    NOT NULL,
                     closed_at   TEXT,
                     notes       TEXT
@@ -184,13 +192,13 @@ else:
             conn.commit()
         log.info("SQLite journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib"):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None):
         with get_db() as conn:
             cur = conn.execute("""
                 INSERT INTO trades
-                    (symbol, side, status, qty, entry, sl, tp, order_id, source, opened_at)
-                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, side, qty, entry, sl, tp, order_id, source,
+                    (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, opened_at)
+                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe,
                   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit()
             return cur.lastrowid
