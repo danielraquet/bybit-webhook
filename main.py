@@ -297,6 +297,7 @@ JOURNAL_HTML = """
         <th>#</th>
         <th>Symbol</th>
         <th>Side</th>
+        <th>TF</th>
         <th>Status</th>
         <th>Qty</th>
         <th>Entry</th>
@@ -322,6 +323,7 @@ JOURNAL_HTML = """
             {{ t.side }}
           </span>
         </td>
+        <td class="dim">{{ t.timeframe if t.timeframe else '—' }}</td>
         <td>
           <span class="badge badge-{{ t.status }}">{{ t.status }}</span>
         </td>
@@ -945,7 +947,9 @@ def webhook():
             if ret_code == 0:
                 order_id = resp.get("result", {}).get("orderId", "?")
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
-                log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source + ("_test" if test_mode else ""))
+                log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
+                                 source=source + ("_test" if test_mode else ""),
+                                 timeframe=gsheets._bar_seconds_to_tf(bar_seconds))
                 # Push to Google Sheets if configured
                 if gsheets.is_configured():
                     sheet_row = gsheets.push_trade_opened(
