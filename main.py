@@ -903,6 +903,7 @@ def webhook():
             actual_bal_pct  = cfg["balance_pct"]
             actual_leverage = cfg["leverage"]
 
+        trade_balance = get_available_balance()  # store for Google Sheets
         qty = calculate_qty(symbol, entry, actual_bal_pct, actual_leverage)
         if qty <= 0:
             return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
@@ -950,7 +951,7 @@ def webhook():
                     sheet_row = gsheets.push_trade_opened(
                         symbol=symbol, side=side, qty=qty, entry=entry,
                         sl=sl, tp=tp, leverage=actual_leverage,
-                        balance=balance, source=source,
+                        balance=trade_balance, source=source,
                         bar_seconds=bar_seconds, order_id=order_id
                     )
                     # Store sheet row in journal for later update on close
