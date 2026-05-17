@@ -20,7 +20,8 @@ COL_SR_NO        = 2   # B
 COL_ENTRY_DT     = 3   # C
 COL_ACCOUNT      = 4   # D
 COL_EXCHANGE     = 5   # E
-COL_START_BAL    = 6   # F
+COL_CURRENCY     = 6   # F — static "$"
+COL_START_BAL    = 7   # G
 COL_SIDE         = 8   # H
 COL_PAIR         = 9   # I
 COL_QTY          = 10  # J
@@ -30,7 +31,7 @@ COL_TP           = 13  # M
 COL_TIMEFRAME    = 14  # N
 COL_LEVERAGE     = 15  # O
 COL_STRATEGY     = 16  # P
-# Q=1R, R=empty, S=Required Margin, T=Position Size — all auto-calculated by sheet
+# Q onwards = auto-calculated by sheet
 COL_EXIT_DT      = 28  # AB
 COL_EXIT_QTY     = 29  # AC
 COL_EXIT_PRICE   = 30  # AD
@@ -120,9 +121,10 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
 
         row_data[COL_SR_NO      - 1] = row - DATA_START_ROW + 1
         row_data[COL_ENTRY_DT   - 1] = now
-        row_data[COL_ACCOUNT    - 1] = "Bybit Main"
+        row_data[COL_ACCOUNT    - 1] = "Trading"
         row_data[COL_EXCHANGE   - 1] = "Bybit"
-        row_data[COL_START_BAL  - 1] = round(balance, 2)
+        row_data[COL_CURRENCY   - 1] = "$"
+        row_data[COL_START_BAL  - 1] = 2500
         row_data[COL_SIDE       - 1] = "LONG" if side == "Buy" else "SHORT"
         row_data[COL_PAIR       - 1] = symbol
         row_data[COL_QTY        - 1] = qty
@@ -132,7 +134,7 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
         row_data[COL_TIMEFRAME  - 1] = tf_str
         row_data[COL_LEVERAGE   - 1] = leverage
         row_data[COL_STRATEGY   - 1] = source.upper()
-        # 1R, Required Margin, Position Size are auto-calculated by sheet formulas
+        # Calculated columns left empty for sheet formulas
 
         range_notation = f"'{SHEET_TAB}'!A{row}:{_col_letter(30)}{row}"
         service.spreadsheets().values().update(
