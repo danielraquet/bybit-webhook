@@ -16,23 +16,21 @@ SHEET_TAB      = "Trading Journal"
 DATA_START_ROW = 4  # first data row
 
 # Column mapping (1-indexed)
-COL_SR_NO        = 1   # A
-COL_ENTRY_DT     = 2   # B
-COL_ACCOUNT      = 3   # C
-COL_EXCHANGE     = 4   # D
-COL_START_BAL    = 5   # E
-COL_SIDE         = 7   # G
-COL_PAIR         = 8   # H
-COL_QTY          = 9   # I
-COL_ENTRY        = 10  # J
-COL_SL           = 11  # K
-COL_TP           = 12  # L
-COL_TIMEFRAME    = 13  # M
-COL_LEVERAGE     = 14  # N
-COL_STRATEGY     = 15  # O
-COL_1R           = 16  # P
-COL_REQ_MARGIN   = 17  # Q
-COL_POS_SIZE     = 19  # S
+COL_SR_NO        = 2   # B
+COL_ENTRY_DT     = 3   # C
+COL_ACCOUNT      = 4   # D
+COL_EXCHANGE     = 5   # E
+COL_START_BAL    = 6   # F
+COL_SIDE         = 8   # H
+COL_PAIR         = 9   # I
+COL_QTY          = 10  # J
+COL_ENTRY        = 11  # K
+COL_SL           = 12  # L
+COL_TP           = 13  # M
+COL_TIMEFRAME    = 14  # N
+COL_LEVERAGE     = 15  # O
+COL_STRATEGY     = 16  # P
+# Q=1R, R=empty, S=Required Margin, T=Position Size — all auto-calculated by sheet
 COL_EXIT_DT      = 28  # AB
 COL_EXIT_QTY     = 29  # AC
 COL_EXIT_PRICE   = 30  # AD
@@ -85,18 +83,18 @@ def _next_row(service) -> int:
 
 
 def _bar_seconds_to_tf(bar_seconds: int) -> str:
-    """Convert barSeconds to readable timeframe string."""
+    """Convert barSeconds to sheet timeframe format (M15, H1 etc)."""
     mapping = {
-        60:    "1m",
-        180:   "3m",
-        300:   "5m",
-        900:   "15m",
-        1800:  "30m",
-        3600:  "1H",
-        14400: "4H",
-        86400: "1D",
+        60:    "M1",
+        180:   "M3",
+        300:   "M5",
+        900:   "M15",
+        1800:  "M30",
+        3600:  "H1",
+        14400: "H4",
+        86400: "D1",
     }
-    return mapping.get(bar_seconds, f"{bar_seconds}s")
+    return mapping.get(bar_seconds, f"M{bar_seconds // 60}" if bar_seconds < 3600 else f"H{bar_seconds // 3600}")
 
 
 def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
@@ -114,15 +112,10 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
         row = _next_row(service)
 
         # Calculate derived values
-        direction  = 1 if side == "Buy" else -1
-        one_r      = abs(entry - sl) * qty
-        req_margin = round(entry * qty / leverage, 2) if leverage > 0 else 0
-        pos_size   = round(entry * qty, 2)
         tf_str     = _bar_seconds_to_tf(bar_seconds)
         now        = datetime.utcnow().strftime("%d/%m/%Y %H:%M")
 
-        # Build row data — 30 columns (A to AD)
-        # Empty strings for columns we skip
+        # Build row data — columns A to AD (30 cols), A is empty
         row_data = [""] * 30
 
         row_data[COL_SR_NO      - 1] = row - DATA_START_ROW + 1
@@ -130,7 +123,7 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
         row_data[COL_ACCOUNT    - 1] = "Bybit Main"
         row_data[COL_EXCHANGE   - 1] = "Bybit"
         row_data[COL_START_BAL  - 1] = round(balance, 2)
-        row_data[COL_SIDE       - 1] = side
+        row_data[COL_SIDE       - 1] = "LONG" if side == "Buy" else "SHORT"
         row_data[COL_PAIR       - 1] = symbol
         row_data[COL_QTY        - 1] = qty
         row_data[COL_ENTRY      - 1] = entry
@@ -139,9 +132,7 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
         row_data[COL_TIMEFRAME  - 1] = tf_str
         row_data[COL_LEVERAGE   - 1] = leverage
         row_data[COL_STRATEGY   - 1] = source.upper()
-        row_data[COL_1R         - 1] = round(one_r, 4)
-        row_data[COL_REQ_MARGIN - 1] = req_margin
-        row_data[COL_POS_SIZE   - 1] = pos_size
+        # 1R, Required Margin, Position Size are auto-calculated by sheet formulas
 
         range_notation = f"'{SHEET_TAB}'!A{row}:{_col_letter(30)}{row}"
         service.spreadsheets().values().update(
