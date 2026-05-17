@@ -24,6 +24,7 @@ from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
 from journal import (log_order_placed, log_order_skipped, log_trade_closed,
                      get_all_trades, get_stats, get_db, ph, DATABASE_URL)
+import sheets as gsheets
 
 load_dotenv()
 
@@ -692,6 +693,20 @@ def _check_closed_pnl(trade):
                 success = log_trade_closed(order_id, exit_price, outcome)
                 if success:
                     log.info(f"✅ Poller closed {symbol} {order_id} — {outcome.upper()} @ {exit_price}")
+                    # Update Google Sheets exit columns
+                    if gsheets.is_configured():
+                        try:
+                            # Get sheet row from notes field
+                            with get_db() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT notes, qty FROM trades WHERE order_id = " + ph(), (order_id,))
+                                    row = cur.fetchone()
+                            if row and row[0] and "sheet_row:" in str(row[0]):
+                                sheet_row = int(str(row[0]).split("sheet_row:")[1])
+                                qty_val   = float(row[1]) if row[1] else 0
+                                gsheets.push_trade_closed(sheet_row, exit_price, qty_val)
+                        except Exception as e:
+                            log.error(f"Google Sheets close update error: {e}")
                 break
 
     except Exception as e:
@@ -818,6 +833,12 @@ def webhook():
         log.error(msg)
         return jsonify({"status": "error", "message": msg}), 400
 
+    import math as _math
+    if any(_math.isnan(v) or _math.isinf(v) for v in [entry, sl, tp] if isinstance(v, float)):
+        msg = f"Invalid values (NaN/Inf) — entry={entry} sl={sl} tp={tp}"
+        log.error(msg)
+        return jsonify({"status": "error", "message": msg}), 400
+
     if side not in ("Buy", "Sell"):
         return jsonify({"status": "error", "message": f"Invalid side: {side}"}), 400
 
@@ -924,6 +945,23 @@ def webhook():
                 order_id = resp.get("result", {}).get("orderId", "?")
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source=source + ("_test" if test_mode else ""))
+                # Push to Google Sheets if configured
+                if gsheets.is_configured():
+                    sheet_row = gsheets.push_trade_opened(
+                        symbol=symbol, side=side, qty=qty, entry=entry,
+                        sl=sl, tp=tp, leverage=actual_leverage,
+                        balance=balance, source=source,
+                        bar_seconds=bar_seconds, order_id=order_id
+                    )
+                    # Store sheet row in journal for later update on close
+                    if sheet_row > 0:
+                        try:
+                            with get_db() as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("UPDATE trades SET notes = " + ph() + " WHERE order_id = " + ph(), (f"sheet_row:{sheet_row}", order_id))
+                                conn.commit()
+                        except Exception as e:
+                            log.error(f"Failed to store sheet row: {e}")
                 # Schedule auto-cancel for limit orders only
                 if order_type == "Limit" and cancel_bars > 0:
                     cancel_time = time.time() + cancel_bars * bar_seconds
