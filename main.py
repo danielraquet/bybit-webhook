@@ -365,27 +365,29 @@ JOURNAL_HTML = """
 
 <script>
 function runPoll(btn) {
+  const base = window.location.origin;
   btn.innerText = '⏳ Polling...';
   btn.disabled = true;
-  fetch('/poll', {method: 'POST'})
+  fetch(base + '/poll', {method: 'POST'})
     .then(r => r.json())
     .then(data => {
       btn.innerText = '✅ Done';
-      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.disabled = false; location.reload(); }, 1500);
+      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.disabled = false; location.reload(); }, 2000);
     })
-    .catch(() => { btn.innerText = '❌ Error'; btn.disabled = false; });
+    .catch(err => { btn.innerText = '❌ ' + err; btn.disabled = false; });
 }
 
 function runFix(btn) {
+  const base = window.location.origin;
   btn.innerText = '⏳ Fixing...';
   btn.disabled = true;
-  fetch('/journal/fix', {method: 'POST'})
+  fetch(base + '/journal/fix', {method: 'POST'})
     .then(r => r.json())
     .then(data => {
       btn.innerText = '✅ Done';
-      setTimeout(() => { btn.innerText = '🔧 Fix Stale'; btn.disabled = false; location.reload(); }, 1500);
+      setTimeout(() => { btn.innerText = '🔧 Fix Stale'; btn.disabled = false; location.reload(); }, 2000);
     })
-    .catch(() => { btn.innerText = '❌ Error'; btn.disabled = false; });
+    .catch(err => { btn.innerText = '❌ ' + err; btn.disabled = false; });
 }
 
 function filterTable(filter, btn) {
