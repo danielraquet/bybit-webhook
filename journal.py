@@ -139,10 +139,12 @@ if DATABASE_URL:
                 total     = len(closed)
                 wins      = sum(1 for t in closed if t["outcome"] == "tp")
                 losses    = sum(1 for t in closed if t["outcome"] == "sl")
-                total_pnl = sum(t["pnl"] or 0 for t in closed)
+                resolved  = [t for t in closed if t["outcome"] in ("tp", "sl")]
+                total     = len(resolved)
+                total_pnl = sum(t["pnl"] or 0 for t in resolved)
                 win_rate  = round(wins / total * 100, 1) if total > 0 else 0
-                avg_win   = sum(t["pnl"] for t in closed if t["outcome"] == "tp" and t["pnl"]) / wins if wins > 0 else 0
-                avg_loss  = sum(t["pnl"] for t in closed if t["outcome"] == "sl" and t["pnl"]) / losses if losses > 0 else 0
+                avg_win   = sum(t["pnl"] for t in resolved if t["outcome"] == "tp" and t["pnl"]) / wins if wins > 0 else 0
+                avg_loss  = sum(t["pnl"] for t in resolved if t["outcome"] == "sl" and t["pnl"]) / losses if losses > 0 else 0
                 cur.execute("SELECT COUNT(*) as count FROM trades WHERE status = 'open'")
                 open_count = cur.fetchone()["count"]
                 return {
@@ -276,7 +278,9 @@ else:
             total     = len(closed)
             wins      = sum(1 for t in closed if t["outcome"] == "tp")
             losses    = sum(1 for t in closed if t["outcome"] == "sl")
-            total_pnl = sum(t["pnl"] or 0 for t in closed)
+            resolved  = [t for t in closed if t["outcome"] in ("tp", "sl")]
+            total     = len(resolved)
+            total_pnl = sum(t["pnl"] or 0 for t in resolved)
             win_rate  = round(wins / total * 100, 1) if total > 0 else 0
             avg_win   = sum(t["pnl"] for t in closed if t["outcome"] == "tp" and t["pnl"]) / wins if wins > 0 else 0
             avg_loss  = sum(t["pnl"] for t in closed if t["outcome"] == "sl" and t["pnl"]) / losses if losses > 0 else 0
