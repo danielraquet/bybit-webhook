@@ -50,9 +50,10 @@ if DATABASE_URL:
                         notes       TEXT
                     )
                 """)
-            # Add timeframe column if not exists (migration for existing tables)
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
+                # Migrations — add columns if not exists for existing tables
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes TEXT")
             conn.commit()
         log.info("PostgreSQL journal initialised")
 
