@@ -44,6 +44,7 @@ if DATABASE_URL:
                         order_id    TEXT,
                         source      TEXT,
                         timeframe   TEXT,
+                        leverage    INTEGER,
                         opened_at   TEXT    NOT NULL,
                         closed_at   TEXT,
                         notes       TEXT
@@ -51,24 +52,25 @@ if DATABASE_URL:
                 """)
             # Add timeframe column if not exists (migration for existing tables)
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
             conn.commit()
         log.info("PostgreSQL journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO trades
-                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, opened_at)
-                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s)
+                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, opened_at)
+                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe,
+                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage,
                       datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
                 row_id = cur.fetchone()[0]
             conn.commit()
             return row_id
 
-    def log_trade_closed(order_id, exit_price, outcome):
+    def log_trade_closed(order_id, exit_price, outcome, realised_pnl=None):
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -79,16 +81,22 @@ if DATABASE_URL:
                 if not trade:
                     return False
 
-                entry = trade["entry"]
-                qty   = trade["qty"]
-                side  = trade["side"]
+                entry    = trade["entry"]
+                qty      = trade["qty"]
+                side     = trade["side"]
+                leverage = trade.get("leverage", 1) or 1
 
-                if side == "Buy":
+                # Use Bybit realised PnL if available, otherwise calculate
+                if realised_pnl is not None and realised_pnl != 0:
+                    pnl = realised_pnl
+                elif side == "Buy":
                     pnl = (exit_price - entry) * qty
-                    pnl_pct = ((exit_price - entry) / entry) * 100
                 else:
                     pnl = (entry - exit_price) * qty
-                    pnl_pct = ((entry - exit_price) / entry) * 100
+
+                # PnL % relative to margin used
+                margin  = (entry * qty / leverage) if leverage > 0 else entry * qty
+                pnl_pct = (pnl / margin * 100) if margin > 0 else 0
 
                 cur.execute("""
                     UPDATE trades SET
@@ -184,6 +192,7 @@ else:
                     order_id    TEXT,
                     source      TEXT,
                     timeframe   TEXT,
+                    leverage    INTEGER,
                     opened_at   TEXT    NOT NULL,
                     closed_at   TEXT,
                     notes       TEXT
@@ -192,18 +201,18 @@ else:
             conn.commit()
         log.info("SQLite journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None):
         with get_db() as conn:
             cur = conn.execute("""
                 INSERT INTO trades
-                    (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, opened_at)
-                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe,
+                    (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, opened_at)
+                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage,
                   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit()
             return cur.lastrowid
 
-    def log_trade_closed(order_id, exit_price, outcome):
+    def log_trade_closed(order_id, exit_price, outcome, realised_pnl=None):
         with get_db() as conn:
             trade = conn.execute(
                 "SELECT * FROM trades WHERE order_id = ? AND status = 'open'",
@@ -211,15 +220,23 @@ else:
             ).fetchone()
             if not trade:
                 return False
-            entry = trade["entry"]
-            qty   = trade["qty"]
-            side  = trade["side"]
-            if side == "Buy":
+            entry    = trade["entry"]
+            qty      = trade["qty"]
+            side     = trade["side"]
+            leverage = trade["leverage"] if trade["leverage"] else 1
+
+            # Use Bybit realised PnL if available, otherwise calculate
+            if realised_pnl is not None and realised_pnl != 0:
+                pnl = realised_pnl
+            elif side == "Buy":
                 pnl = (exit_price - entry) * qty
-                pnl_pct = ((exit_price - entry) / entry) * 100
             else:
                 pnl = (entry - exit_price) * qty
-                pnl_pct = ((entry - exit_price) / entry) * 100
+
+            # PnL % relative to margin used
+            margin  = (entry * qty / leverage) if leverage > 0 else entry * qty
+            pnl_pct = (pnl / margin * 100) if margin > 0 else 0
+
             conn.execute("""
                 UPDATE trades SET
                     status     = 'closed',
