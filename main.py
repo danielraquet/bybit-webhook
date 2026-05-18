@@ -389,14 +389,14 @@ function updateStats() {
     const status  = row.dataset.status;
     const outcome = row.dataset.outcome;
     const cells   = row.querySelectorAll('td');
-    const pnlText = cells[9] ? cells[9].innerText.trim() : '';
+    const pnlText = cells[10] ? cells[10].innerText.trim().replace('+','') : '';
     const pnl     = parseFloat(pnlText) || 0;
 
     if (status === 'closed') {
       total++;
-      if (outcome === 'tp') { wins++; if (pnl) winPnls.push(pnl); }
-      if (outcome === 'sl') { losses++; if (pnl) lossPnls.push(pnl); }
-      totalPnl += pnl;
+      if (outcome === 'tp') { wins++; winPnls.push(pnl); }
+      if (outcome === 'sl') { losses++; lossPnls.push(pnl); }
+      if (outcome === 'tp' || outcome === 'sl') totalPnl += pnl;
     }
     if (status === 'open') openCount++;
   });
