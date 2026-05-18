@@ -677,13 +677,15 @@ def _check_closed_pnl(trade):
                          exec_type in ("StopLoss", "TakeProfit", "Trade")))
 
             if is_match and exit_price > 0:
+                # Use Bybit's actual realised PnL if available
+                realised_pnl = float(record.get("closedPnl", 0) or 0)
+
                 # Determine outcome
                 if exec_type == "TakeProfit":
                     outcome = "tp"
                 elif exec_type == "StopLoss":
                     outcome = "sl"
                 else:
-                    # Determine by comparing exit to TP/SL
                     side = trade["side"]
                     tp   = trade["tp"]
                     sl   = trade["sl"]
@@ -692,7 +694,7 @@ def _check_closed_pnl(trade):
                     else:
                         outcome = "tp" if exit_price <= tp * 1.001 else "sl"
 
-                success = log_trade_closed(order_id, exit_price, outcome)
+                success = log_trade_closed(order_id, exit_price, outcome, realised_pnl=realised_pnl)
                 if success:
                     log.info(f"✅ Poller closed {symbol} {order_id} — {outcome.upper()} @ {exit_price}")
                     # Update Google Sheets exit columns
@@ -949,7 +951,8 @@ def webhook():
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
-                                 timeframe=gsheets._bar_seconds_to_tf(bar_seconds))
+                                 timeframe=gsheets._bar_seconds_to_tf(bar_seconds),
+                                 leverage=actual_leverage)
                 # Push to Google Sheets if configured
                 if gsheets.is_configured():
                     sheet_row = gsheets.push_trade_opened(
