@@ -660,21 +660,21 @@ def _check_closed_pnl(trade):
         resp = session.get_closed_pnl(
             category="linear",
             symbol=symbol,
-            limit=50,
+            limit=200,
         )
         records = resp.get("result", {}).get("list", [])
 
         for record in records:
-            # Match by orderId or by closeSize/closePrice proximity
             rec_order_id = record.get("orderId", "")
-            exec_type    = record.get("execType", "")    # "Trade", "StopLoss", "TakeProfit"
+            exec_type    = record.get("execType", "")
             exit_price   = float(record.get("avgExitPrice", 0) or record.get("exitPrice", 0))
             closed_size  = float(record.get("qty", 0))
 
-            # Match by order_id OR by symbol + size + approximate time
-            is_match = (rec_order_id == order_id or
-                        (abs(closed_size - trade["qty"]) < 0.0001 and
-                         exec_type in ("StopLoss", "TakeProfit", "Trade")))
+            # Prefer exact order ID match, fall back to size + exec type match
+            id_match   = rec_order_id == order_id
+            size_match = (abs(closed_size - float(trade["qty"] or 0)) < 0.0001 and
+                         exec_type in ("StopLoss", "TakeProfit"))
+            is_match   = id_match or size_match
 
             if is_match and exit_price > 0:
                 # Use Bybit's actual realised PnL if available
