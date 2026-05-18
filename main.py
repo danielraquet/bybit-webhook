@@ -287,6 +287,9 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="filterTable('src:fib', this)">FIB</button>
   <button class="filter-btn" onclick="filterTable('src:fibob', this)">FIBOB</button>
   <button class="filter-btn" onclick="filterTable('src:manual', this)">Manual</button>
+  <span style="margin:0 8px;color:var(--dim)">|</span>
+  <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
+  <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
 </div>
 
 <div class="table-wrap">
@@ -361,6 +364,30 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function runPoll(btn) {
+  btn.innerText = '⏳ Polling...';
+  btn.disabled = true;
+  fetch('/poll', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ Done';
+      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.disabled = false; location.reload(); }, 1500);
+    })
+    .catch(() => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
+function runFix(btn) {
+  btn.innerText = '⏳ Fixing...';
+  btn.disabled = true;
+  fetch('/journal/fix', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ Done';
+      setTimeout(() => { btn.innerText = '🔧 Fix Stale'; btn.disabled = false; location.reload(); }, 1500);
+    })
+    .catch(() => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
 function filterTable(filter, btn) {
   document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
