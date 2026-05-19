@@ -1313,22 +1313,83 @@ ANALYSIS_HTML = """
 
 </div>
 
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:16px">
+
 <div class="section">
-  <div class="section-title">Loss margin — how close were SL hits?</div>
+  <div class="section-title">Weekend vs Weekday</div>
   <table>
-    <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>Exit</th><th>Miss by</th><th>Miss %</th></tr>
+    <tr><th>Period</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_weekend %}
+    <tr>
+      <td>{{ r.key }}</td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">By day of week</div>
+  <table>
+    <tr><th>Day</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_day %}
+    <tr>
+      <td>{{ r.key[:3] }}</td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">By session (UTC)</div>
+  <table>
+    <tr><th>Session</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_session %}
+    <tr>
+      <td style="font-size:11px">{{ r.key }}</td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+</div>
+  <div style="font-size:11px;color:var(--dim);margin-bottom:8px">SL distance from entry. Under 0.5% is very tight for crypto — normal volatility can hit it. Ideal: 1-2% depending on timeframe.</div>
+  <table>
+    <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>SL dist %</th><th>RR set</th><th>Time in trade</th></tr>
     {% for r in sl_margins %}
     <tr>
       <td>{{ r.symbol }}</td>
       <td><span class="tag {{ 'tag-green' if r.side == 'Buy' else 'tag-red' }}">{{ 'L' if r.side == 'Buy' else 'S' }}</span></td>
       <td>{{ r.entry }}</td>
       <td>{{ r.sl }}</td>
-      <td>{{ r.exit }}</td>
-      <td style="color:var(--red)">{{ r.miss }}</td>
-      <td><span class="tag {{ 'tag-red' if r.miss_pct < 0.1 else 'tag-amber' }}">{{ '%.3f'|format(r.miss_pct) }}%</span></td>
+      <td><span class="tag {{ 'tag-red' if r.sl_dist_pct < 0.5 else 'tag-amber' if r.sl_dist_pct < 1.0 else 'tag-green' }}">{{ '%.3f'|format(r.sl_dist_pct) }}%</span></td>
+      <td>{{ r.rr }}×</td>
+      <td style="color:var(--dim)">{{ r.time_in }}</td>
     </tr>
     {% endfor %}
   </table>
+  <div style="margin-top:10px;font-size:11px;display:flex;gap:12px">
+    <span><span class="tag tag-red">red</span> &lt; 0.5% — very tight</span>
+    <span><span class="tag tag-amber">amber</span> 0.5–1.0% — borderline</span>
+    <span><span class="tag tag-green">green</span> &gt; 1.0% — healthy</span>
+  </div>
 </div>
 
 </body>
@@ -1398,25 +1459,41 @@ def _analyse_trades(trades):
     by_side   = [{"side":   r["key"], **r} for r in by_side_raw]
     by_tf     = [{"tf":     r["key"], **r} for r in by_tf_raw]
 
-    # SL margin analysis
+    # SL distance analysis — how tight was the SL relative to entry?
     sl_margins = []
     for t in losses:
-        entry = float(t.get("entry") or 0)
-        sl    = float(t.get("sl")    or 0)
-        exit_ = float(t.get("exit_price") or 0)
-        if entry > 0 and sl > 0 and exit_ > 0:
-            miss     = round(abs(exit_ - sl), 6)
-            miss_pct = round(miss / entry * 100, 4) if entry > 0 else 0
+        entry    = float(t.get("entry")      or 0)
+        sl       = float(t.get("sl")         or 0)
+        tp       = float(t.get("tp")         or 0)
+        exit_    = float(t.get("exit_price") or 0)
+        opened   = t.get("opened_at")        or ""
+        closed   = t.get("closed_at")        or ""
+        if entry > 0 and sl > 0:
+            sl_dist     = abs(entry - sl)
+            sl_dist_pct = round(sl_dist / entry * 100, 3)
+            tp_dist     = abs(tp - entry) if tp > 0 else 0
+            rr          = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0
+            # Time in trade
+            time_str = "—"
+            try:
+                from datetime import datetime
+                fmt  = "%Y-%m-%d %H:%M:%S"
+                t_in  = datetime.strptime(opened[:19], fmt)
+                t_out = datetime.strptime(closed[:19], fmt)
+                mins  = int((t_out - t_in).total_seconds() / 60)
+                time_str = f"{mins}m" if mins < 120 else f"{mins//60}h {mins%60}m"
+            except:
+                pass
             sl_margins.append({
-                "symbol":   t["symbol"],
-                "side":     t["side"],
-                "entry":    entry,
-                "sl":       sl,
-                "exit":     round(exit_, 6),
-                "miss":     miss,
-                "miss_pct": miss_pct,
+                "symbol":       t["symbol"],
+                "side":         t["side"],
+                "entry":        entry,
+                "sl":           sl,
+                "sl_dist_pct":  sl_dist_pct,
+                "rr":           rr,
+                "time_in":      time_str,
             })
-    sl_margins.sort(key=lambda x: x["miss_pct"])
+    sl_margins.sort(key=lambda x: x["sl_dist_pct"])
 
     # Auto insights
     insights = []
@@ -1433,9 +1510,10 @@ def _analyse_trades(trades):
             worse_wr = short_wr if long_wr > short_wr else long_wr
             insights.append(f"<strong>{better} trades significantly outperform {worse}</strong> ({long_wr if better == 'Long' else short_wr}% vs {worse_wr}% win rate). Consider disabling {worse.lower()} OB alerts.")
 
-        tight_sl = [t for t in sl_margins if t["miss_pct"] < 0.05]
+        tight_sl = [t for t in sl_margins if t["sl_dist_pct"] < 0.5]
         if len(tight_sl) > len(sl_margins) * 0.5:
-            insights.append(f"<strong>{len(tight_sl)}/{len(sl_margins)} SL hits were within 0.05% of entry</strong> — classic stop hunt pattern. Try increasing your SL ATR multiplier to give trades more breathing room.")
+            avg_dist = round(sum(t["sl_dist_pct"] for t in sl_margins) / len(sl_margins), 3) if sl_margins else 0
+            insights.append(f"<strong>{len(tight_sl)}/{len(sl_margins)} losses had SL within 0.5% of entry</strong> (avg {avg_dist}%). SL may be too tight — normal crypto volatility can trigger it. Consider widening the SL ATR multiplier.")
 
         if profit_factor > 0 and profit_factor < 1:
             breakeven_wr = round(1 / (1 + abs(avg_win / avg_loss)) * 100, 1) if avg_loss != 0 else 50
@@ -1449,21 +1527,85 @@ def _analyse_trades(trades):
         if not insights:
             insights.append(f"<strong>Not enough data yet</strong> — {total_closed} closed trades. Need 50+ for reliable conclusions.")
 
+    # Day of week and session analysis
+    from datetime import datetime as _dt
+    def get_day_session(opened_at):
+        try:
+            dt      = _dt.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+            day     = dt.strftime("%A")
+            hour    = dt.hour
+            if 0 <= hour < 8:    session = "Asian (00-08 UTC)"
+            elif 8 <= hour < 14: session = "European (08-14 UTC)"
+            elif 14 <= hour < 21:session = "US (14-21 UTC)"
+            else:                session = "Late/Night (21-24 UTC)"
+            is_weekend = dt.weekday() >= 5
+            day_order  = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
+            return day, session, is_weekend, day_order.index(day) if day in day_order else 99
+        except:
+            return "Unknown", "Unknown", False, 99
+
+    by_day_raw     = {}
+    by_session_raw = {}
+    wk_stats       = {"Weekend": {"wins":0,"losses":0,"pnl":0.0}, "Weekday": {"wins":0,"losses":0,"pnl":0.0}}
+
+    for t in closed:
+        pnl     = float(t.get("pnl") or 0)
+        outcome = t["outcome"]
+        day, session, is_weekend, d_order = get_day_session(t.get("opened_at") or "")
+
+        if day not in by_day_raw:
+            by_day_raw[day] = {"wins":0,"losses":0,"pnl":0.0,"order":d_order}
+        by_day_raw[day]["wins" if outcome=="tp" else "losses"] += 1
+        by_day_raw[day]["pnl"] += pnl
+
+        if session not in by_session_raw:
+            by_session_raw[session] = {"wins":0,"losses":0,"pnl":0.0}
+        by_session_raw[session]["wins" if outcome=="tp" else "losses"] += 1
+        by_session_raw[session]["pnl"] += pnl
+
+        key = "Weekend" if is_weekend else "Weekday"
+        wk_stats[key]["wins" if outcome=="tp" else "losses"] += 1
+        wk_stats[key]["pnl"] += pnl
+
+    def make_time_rows(raw, sort_key=None):
+        rows = []
+        for k, v in raw.items():
+            total = v["wins"] + v["losses"]
+            rows.append({"key":k,"wins":v["wins"],"losses":v["losses"],
+                         "wr":round(v["wins"]/total*100,1) if total>0 else 0,
+                         "pnl":round(v["pnl"],2),"total":total,"_order":v.get("order",0)})
+        rows.sort(key=sort_key or (lambda x: -x["total"]))
+        return rows
+
+    by_day     = make_time_rows(by_day_raw,     lambda x: x["_order"])
+    by_session = make_time_rows(by_session_raw)
+    by_weekend = make_time_rows(wk_stats,        lambda x: x["key"])
+
+    # Add weekend insight
+    for r in by_weekend:
+        if r["total"] >= 3 and r["key"] == "Weekend" and r["wr"] < 30:
+            insights.append(f"<strong>Weekend performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}). Consider pausing alerts on weekends (Sat/Sun UTC).")
+        if r["total"] >= 3 and r["key"] == "Weekday" and r["wr"] < 30:
+            insights.append(f"<strong>Weekday performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}).")
+
     return {
-        "total_closed": total_closed,
-        "total_open":   len(open_t),
-        "wr":           wr,
-        "total_pnl":    total_pnl,
-        "avg_win":      avg_win,
-        "avg_loss":     avg_loss,
+        "total_closed":  total_closed,
+        "total_open":    len(open_t),
+        "wr":            wr,
+        "total_pnl":     total_pnl,
+        "avg_win":       avg_win,
+        "avg_loss":      avg_loss,
         "profit_factor": profit_factor,
-        "expectancy":   expectancy,
-        "by_symbol":    by_symbol,
-        "by_source":    by_source,
-        "by_side":      by_side,
-        "by_tf":        by_tf,
-        "sl_margins":   sl_margins,
-        "insights":     insights,
+        "expectancy":    expectancy,
+        "by_symbol":     by_symbol,
+        "by_source":     by_source,
+        "by_side":       by_side,
+        "by_tf":         by_tf,
+        "by_day":        by_day,
+        "by_session":    by_session,
+        "by_weekend":    by_weekend,
+        "sl_margins":    sl_margins,
+        "insights":      insights,
     }
 
 
