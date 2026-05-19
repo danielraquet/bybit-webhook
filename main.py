@@ -231,6 +231,7 @@ JOURNAL_HTML = """
 <header>
   <h1>// TRADE JOURNAL</h1>
   <div style="display:flex;align-items:center;gap:16px;">
+    <a href="/analysis" style="color:var(--blue);font-size:12px;text-decoration:none;">📊 Analysis</a>
     <span id="last-update">updated just now</span>
     <button class="refresh" onclick="location.reload()">↻ refresh</button>
   </div>
@@ -1176,7 +1177,319 @@ def journal_data():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-if __name__ == "__main__":
+ANALYSIS_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trade Analysis</title>
+<style>
+  :root { --bg: #0f0f0f; --surface: #1a1a1a; --border: #2a2a2a; --text: #e8e8e8; --dim: #888; --green: #4caf50; --red: #ef5350; --blue: #42a5f5; --amber: #ffa726; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 13px; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 500; margin-bottom: 4px; }
+  .subtitle { color: var(--dim); font-size: 12px; margin-bottom: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 24px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .stat-label { color: var(--dim); font-size: 11px; margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 500; }
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .section-title { font-size: 13px; font-weight: 500; margin-bottom: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--dim); font-weight: 400; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .bar-wrap { background: var(--border); border-radius: 3px; height: 6px; width: 80px; display: inline-block; vertical-align: middle; margin-left: 6px; }
+  .bar { height: 6px; border-radius: 3px; }
+  .tag { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 500; }
+  .tag-green { background: rgba(76,175,80,0.15); color: var(--green); }
+  .tag-red { background: rgba(239,83,80,0.15); color: var(--red); }
+  .tag-amber { background: rgba(255,167,38,0.15); color: var(--amber); }
+  .nav { display: flex; gap: 12px; margin-bottom: 20px; }
+  .nav a { color: var(--dim); text-decoration: none; font-size: 12px; }
+  .nav a:hover { color: var(--text); }
+  .insight { background: rgba(66,165,245,0.08); border: 1px solid rgba(66,165,245,0.2); border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; font-size: 12px; line-height: 1.5; }
+  .insight strong { color: var(--blue); }
+</style>
+</head>
+<body>
+<div class="nav"><a href="/journal">← Journal</a><a href="/status">Status</a></div>
+<h1>// Trade Analysis</h1>
+<p class="subtitle">{{ total_closed }} closed trades · {{ total_open }} open · updated just now</p>
+
+<div class="grid">
+  <div class="stat"><div class="stat-label">Win rate</div><div class="stat-value" style="color:{{ 'var(--green)' if wr >= 40 else 'var(--red)' }}">{{ wr }}%</div></div>
+  <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" style="color:{{ 'var(--green)' if total_pnl >= 0 else 'var(--red)' }}">{{ '+' if total_pnl >= 0 else '' }}{{ '%.2f'|format(total_pnl) }}</div></div>
+  <div class="stat"><div class="stat-label">Avg win</div><div class="stat-value green">+{{ '%.2f'|format(avg_win) }}</div></div>
+  <div class="stat"><div class="stat-label">Avg loss</div><div class="stat-value red">{{ '%.2f'|format(avg_loss) }}</div></div>
+  <div class="stat"><div class="stat-label">Profit factor</div><div class="stat-value" style="color:{{ 'var(--green)' if profit_factor >= 1 else 'var(--red)' }}">{{ '%.2f'|format(profit_factor) }}</div></div>
+  <div class="stat"><div class="stat-label">Expectancy</div><div class="stat-value" style="color:{{ 'var(--green)' if expectancy >= 0 else 'var(--red)' }}">{{ '+' if expectancy >= 0 else '' }}{{ '%.3f'|format(expectancy) }}</div></div>
+</div>
+
+{% if insights %}
+<div class="section">
+  <div class="section-title">Insights</div>
+  {% for i in insights %}<div class="insight">{{ i|safe }}</div>{% endfor %}
+</div>
+{% endif %}
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+
+<div class="section">
+  <div class="section-title">By symbol</div>
+  <table>
+    <tr><th>Symbol</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_symbol %}
+    <tr>
+      <td>{{ r.symbol }}</td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>
+        {{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">By source</div>
+  <table>
+    <tr><th>Source</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_source %}
+    <tr>
+      <td><span class="tag {{ 'tag-green' if r.source == 'ob' else 'tag-amber' if r.source == 'fib' else 'tag-amber' }}">{{ r.source.upper() }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">By side</div>
+  <table>
+    <tr><th>Side</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_side %}
+    <tr>
+      <td><span class="tag {{ 'tag-green' if r.side == 'Buy' else 'tag-red' }}">{{ 'LONG' if r.side == 'Buy' else 'SHORT' }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
+  <div class="section-title">By timeframe</div>
+  <table>
+    <tr><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_tf %}
+    <tr>
+      <td>{{ r.tf or '—' }}</td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+</div>
+
+<div class="section">
+  <div class="section-title">Loss margin — how close were SL hits?</div>
+  <table>
+    <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>Exit</th><th>Miss by</th><th>Miss %</th></tr>
+    {% for r in sl_margins %}
+    <tr>
+      <td>{{ r.symbol }}</td>
+      <td><span class="tag {{ 'tag-green' if r.side == 'Buy' else 'tag-red' }}">{{ 'L' if r.side == 'Buy' else 'S' }}</span></td>
+      <td>{{ r.entry }}</td>
+      <td>{{ r.sl }}</td>
+      <td>{{ r.exit }}</td>
+      <td style="color:var(--red)">{{ r.miss }}</td>
+      <td><span class="tag {{ 'tag-red' if r.miss_pct < 0.1 else 'tag-amber' }}">{{ '%.3f'|format(r.miss_pct) }}%</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+</body>
+</html>
+"""
+
+
+def _analyse_trades(trades):
+    """Compute analysis metrics from trade list."""
+    closed = [t for t in trades if t.get("outcome") in ("tp", "sl")]
+    open_t = [t for t in trades if t.get("status") == "open"]
+
+    wins   = [t for t in closed if t["outcome"] == "tp"]
+    losses = [t for t in closed if t["outcome"] == "sl"]
+
+    total_closed = len(closed)
+    wr = round(len(wins) / total_closed * 100, 1) if total_closed > 0 else 0
+
+    win_pnls  = [float(t["pnl"] or 0) for t in wins  if t.get("pnl")]
+    loss_pnls = [float(t["pnl"] or 0) for t in losses if t.get("pnl")]
+
+    total_pnl  = round(sum(win_pnls) + sum(loss_pnls), 2)
+    avg_win    = round(sum(win_pnls)  / len(win_pnls),  2) if win_pnls  else 0
+    avg_loss   = round(sum(loss_pnls) / len(loss_pnls), 2) if loss_pnls else 0
+    gross_win  = sum(win_pnls)
+    gross_loss = abs(sum(loss_pnls))
+    profit_factor = round(gross_win / gross_loss, 2) if gross_loss > 0 else 0
+    wr_dec     = len(wins) / total_closed if total_closed > 0 else 0
+    expectancy = round(wr_dec * avg_win + (1 - wr_dec) * avg_loss, 3)
+
+    def group_stats(key_fn):
+        groups = {}
+        for t in closed:
+            k = key_fn(t)
+            if k not in groups:
+                groups[k] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            if t["outcome"] == "tp":
+                groups[k]["wins"] += 1
+            else:
+                groups[k]["losses"] += 1
+            groups[k]["pnl"] += float(t.get("pnl") or 0)
+        result = []
+        for k, v in sorted(groups.items(), key=lambda x: -(x[1]["wins"] + x[1]["losses"])):
+            total = v["wins"] + v["losses"]
+            result.append({
+                "key": k, "wins": v["wins"], "losses": v["losses"],
+                "wr": round(v["wins"] / total * 100, 1) if total > 0 else 0,
+                "pnl": round(v["pnl"], 2)
+            })
+        return result
+
+    by_symbol_raw = group_stats(lambda t: t["symbol"])
+    by_source_raw = group_stats(lambda t: (t.get("source") or "").replace("_test",""))
+    by_side_raw   = group_stats(lambda t: t["side"])
+    by_tf_raw     = group_stats(lambda t: t.get("timeframe") or "—")
+
+    def rename(rows, key="key"):
+        for r in rows:
+            r["symbol"] = r["key"]
+            r["source"] = r["key"]
+            r["side"]   = r["key"]
+            r["tf"]     = r["key"]
+        return rows
+
+    by_symbol = [{"symbol": r["key"], **r} for r in by_symbol_raw]
+    by_source = [{"source": r["key"], **r} for r in by_source_raw]
+    by_side   = [{"side":   r["key"], **r} for r in by_side_raw]
+    by_tf     = [{"tf":     r["key"], **r} for r in by_tf_raw]
+
+    # SL margin analysis
+    sl_margins = []
+    for t in losses:
+        entry = float(t.get("entry") or 0)
+        sl    = float(t.get("sl")    or 0)
+        exit_ = float(t.get("exit_price") or 0)
+        if entry > 0 and sl > 0 and exit_ > 0:
+            miss     = round(abs(exit_ - sl), 6)
+            miss_pct = round(miss / entry * 100, 4) if entry > 0 else 0
+            sl_margins.append({
+                "symbol":   t["symbol"],
+                "side":     t["side"],
+                "entry":    entry,
+                "sl":       sl,
+                "exit":     round(exit_, 6),
+                "miss":     miss,
+                "miss_pct": miss_pct,
+            })
+    sl_margins.sort(key=lambda x: x["miss_pct"])
+
+    # Auto insights
+    insights = []
+    if total_closed >= 5:
+        long_trades  = [t for t in closed if t["side"] == "Buy"]
+        short_trades = [t for t in closed if t["side"] == "Sell"]
+        long_wins    = len([t for t in long_trades  if t["outcome"] == "tp"])
+        short_wins   = len([t for t in short_trades if t["outcome"] == "tp"])
+        long_wr  = round(long_wins  / len(long_trades)  * 100, 1) if long_trades  else 0
+        short_wr = round(short_wins / len(short_trades) * 100, 1) if short_trades else 0
+        if abs(long_wr - short_wr) > 20:
+            better = "Long" if long_wr > short_wr else "Short"
+            worse  = "Short" if long_wr > short_wr else "Long"
+            worse_wr = short_wr if long_wr > short_wr else long_wr
+            insights.append(f"<strong>{better} trades significantly outperform {worse}</strong> ({long_wr if better == 'Long' else short_wr}% vs {worse_wr}% win rate). Consider disabling {worse.lower()} OB alerts.")
+
+        tight_sl = [t for t in sl_margins if t["miss_pct"] < 0.05]
+        if len(tight_sl) > len(sl_margins) * 0.5:
+            insights.append(f"<strong>{len(tight_sl)}/{len(sl_margins)} SL hits were within 0.05% of entry</strong> — classic stop hunt pattern. Try increasing your SL ATR multiplier to give trades more breathing room.")
+
+        if profit_factor > 0 and profit_factor < 1:
+            breakeven_wr = round(1 / (1 + abs(avg_win / avg_loss)) * 100, 1) if avg_loss != 0 else 50
+            insights.append(f"<strong>Profit factor {profit_factor} — unprofitable.</strong> With avg win {avg_win} and avg loss {avg_loss}, you need >{breakeven_wr}% win rate to break even.")
+
+        worst = sorted(by_symbol, key=lambda x: x["pnl"])[:2]
+        for w in worst:
+            if w["pnl"] < -1 and w["losses"] >= 3:
+                insights.append(f"<strong>{w['symbol']} is a consistent loser</strong> — {w['losses']} losses, {w['wins']} wins, {w['pnl']} USDT. Consider removing from watchlist.")
+
+        if not insights:
+            insights.append(f"<strong>Not enough data yet</strong> — {total_closed} closed trades. Need 50+ for reliable conclusions.")
+
+    return {
+        "total_closed": total_closed,
+        "total_open":   len(open_t),
+        "wr":           wr,
+        "total_pnl":    total_pnl,
+        "avg_win":      avg_win,
+        "avg_loss":     avg_loss,
+        "profit_factor": profit_factor,
+        "expectancy":   expectancy,
+        "by_symbol":    by_symbol,
+        "by_source":    by_source,
+        "by_side":      by_side,
+        "by_tf":        by_tf,
+        "sl_margins":   sl_margins,
+        "insights":     insights,
+    }
+
+
+@app.route("/analysis")
+def analysis():
+    """Trade analysis dashboard."""
+    try:
+        trades = get_all_trades(500)
+        data   = _analyse_trades(trades)
+        return render_template_string(ANALYSIS_HTML, **data)
+    except Exception as e:
+        log.error(f"Analysis error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/analysis/data")
+def analysis_data():
+    """JSON endpoint for analysis data."""
+    try:
+        trades = get_all_trades(500)
+        return jsonify(_analyse_trades(trades))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
     cfg = get_config()
     log.info(f"Starting webhook server — testnet={TESTNET}")
     log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
