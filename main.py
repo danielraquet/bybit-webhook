@@ -1462,36 +1462,34 @@ def _analyse_trades(trades):
     # SL distance analysis — how tight was the SL relative to entry?
     sl_margins = []
     for t in losses:
-        entry    = float(t.get("entry")      or 0)
-        sl       = float(t.get("sl")         or 0)
-        tp       = float(t.get("tp")         or 0)
-        exit_    = float(t.get("exit_price") or 0)
-        opened   = t.get("opened_at")        or ""
-        closed   = t.get("closed_at")        or ""
+        entry      = float(t.get("entry")      or 0)
+        sl         = float(t.get("sl")         or 0)
+        tp         = float(t.get("tp")         or 0)
+        opened_at  = t.get("opened_at")        or ""
+        closed_at  = t.get("closed_at")        or ""
         if entry > 0 and sl > 0:
             sl_dist     = abs(entry - sl)
             sl_dist_pct = round(sl_dist / entry * 100, 3)
             tp_dist     = abs(tp - entry) if tp > 0 else 0
             rr          = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 0
-            # Time in trade
             time_str = "—"
             try:
                 from datetime import datetime
-                fmt  = "%Y-%m-%d %H:%M:%S"
-                t_in  = datetime.strptime(opened[:19], fmt)
-                t_out = datetime.strptime(closed[:19], fmt)
+                fmt   = "%Y-%m-%d %H:%M:%S"
+                t_in  = datetime.strptime(opened_at[:19], fmt)
+                t_out = datetime.strptime(closed_at[:19], fmt)
                 mins  = int((t_out - t_in).total_seconds() / 60)
                 time_str = f"{mins}m" if mins < 120 else f"{mins//60}h {mins%60}m"
             except:
                 pass
             sl_margins.append({
-                "symbol":       t["symbol"],
-                "side":         t["side"],
-                "entry":        entry,
-                "sl":           sl,
-                "sl_dist_pct":  sl_dist_pct,
-                "rr":           rr,
-                "time_in":      time_str,
+                "symbol":      t["symbol"],
+                "side":        t["side"],
+                "entry":       entry,
+                "sl":          sl,
+                "sl_dist_pct": sl_dist_pct,
+                "rr":          rr,
+                "time_in":     time_str,
             })
     sl_margins.sort(key=lambda x: x["sl_dist_pct"])
 
@@ -1617,8 +1615,9 @@ def analysis():
         data   = _analyse_trades(trades)
         return render_template_string(ANALYSIS_HTML, **data)
     except Exception as e:
-        log.error(f"Analysis error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        import traceback
+        log.error(f"Analysis error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
 @app.route("/analysis/data")
@@ -1628,7 +1627,9 @@ def analysis_data():
         trades = get_all_trades(500)
         return jsonify(_analyse_trades(trades))
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        import traceback
+        log.error(f"Analysis data error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
 
