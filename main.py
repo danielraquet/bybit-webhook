@@ -684,13 +684,20 @@ def _check_closed_pnl(trade):
     """
     symbol   = trade["symbol"]
     order_id = trade["order_id"]
+    qty      = float(trade["qty"] or 0)
+    side     = trade["side"]
 
     try:
-        resp = session.get_closed_pnl(
-            category="linear",
-            symbol=symbol,
-            limit=200,
-        )
+        # First check if position is still open — if so no need to check PnL yet
+        pos_resp  = session.get_positions(category="linear", symbol=symbol)
+        positions = pos_resp.get("result", {}).get("list", [])
+        pos_open  = any(float(p.get("size", 0)) > 0 for p in positions)
+        if pos_open:
+            log.info(f"Position still open for {symbol} — skipping PnL check")
+            return
+
+        # Position closed — find the closing record in closed PnL
+        resp    = session.get_closed_pnl(category="linear", symbol=symbol, limit=200)
         records = resp.get("result", {}).get("list", [])
 
         for record in records:
@@ -698,26 +705,22 @@ def _check_closed_pnl(trade):
             exec_type    = record.get("execType", "")
             exit_price   = float(record.get("avgExitPrice", 0) or record.get("exitPrice", 0))
             closed_size  = float(record.get("qty", 0))
+            realised_pnl = float(record.get("closedPnl", 0) or 0)
 
-            # Prefer exact order ID match, fall back to size + exec type match
+            # Match by order ID, or by size (within 5%) + exec type
             id_match   = rec_order_id == order_id
-            size_match = (abs(closed_size - float(trade["qty"] or 0)) < 0.0001 and
-                         exec_type in ("StopLoss", "TakeProfit"))
+            size_match = (qty > 0 and abs(closed_size - qty) < qty * 0.05 and
+                         exec_type in ("StopLoss", "TakeProfit", "Trade"))
             is_match   = id_match or size_match
 
             if is_match and exit_price > 0:
-                # Use Bybit's actual realised PnL if available
-                realised_pnl = float(record.get("closedPnl", 0) or 0)
-
-                # Determine outcome
                 if exec_type == "TakeProfit":
                     outcome = "tp"
                 elif exec_type == "StopLoss":
                     outcome = "sl"
                 else:
-                    side = trade["side"]
-                    tp   = trade["tp"]
-                    sl   = trade["sl"]
+                    tp = float(trade["tp"] or 0)
+                    sl = float(trade["sl"] or 0)
                     if side == "Buy":
                         outcome = "tp" if exit_price >= tp * 0.999 else "sl"
                     else:
@@ -725,11 +728,9 @@ def _check_closed_pnl(trade):
 
                 success = log_trade_closed(order_id, exit_price, outcome, realised_pnl=realised_pnl)
                 if success:
-                    log.info(f"✅ Poller closed {symbol} {order_id} — {outcome.upper()} @ {exit_price}")
-                    # Update Google Sheets exit columns
+                    log.info(f"✅ Poller closed {symbol} {order_id} — {outcome.upper()} @ {exit_price} PnL={realised_pnl}")
                     if gsheets.is_configured():
                         try:
-                            # Get sheet row from notes field
                             with get_db() as conn:
                                 with conn.cursor() as cur:
                                     cur.execute("SELECT notes, qty FROM trades WHERE order_id = " + ph(), (order_id,))
@@ -740,7 +741,9 @@ def _check_closed_pnl(trade):
                                 gsheets.push_trade_closed(sheet_row, exit_price, qty_val)
                         except Exception as e:
                             log.error(f"Google Sheets close update error: {e}")
-                break
+                return
+
+        log.warning(f"No closed PnL record found for {symbol} {order_id} — will retry next poll")
 
     except Exception as e:
         log.error(f"Error checking closed PnL for {symbol}: {e}")
