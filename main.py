@@ -892,14 +892,53 @@ def webhook():
             return jsonify({"status": "skipped", "message": msg}), 200
 
         if symbol in open_positions:
-            msg = f"Already have open position in {symbol} — skipping"
-            log.warning(msg)
-            log_order_skipped(symbol, side, entry, sl, tp, msg)
-            return jsonify({"status": "skipped", "message": msg}), 200
+            # Check direction of existing position vs incoming order
+            try:
+                pos_resp   = session.get_positions(category="linear", symbol=symbol)
+                pos_list   = pos_resp.get("result", {}).get("list", [])
+                pos_side   = next((p.get("side") for p in pos_list if float(p.get("size", 0)) > 0), None)
+                same_dir   = (pos_side == "Buy" and side == "Buy") or (pos_side == "Sell" and side == "Sell")
+                if same_dir:
+                    msg = f"Already have open {pos_side} position in {symbol} — skipping same direction"
+                    log.warning(msg)
+                    log_order_skipped(symbol, side, entry, sl, tp, msg)
+                    return jsonify({"status": "skipped", "message": msg}), 200
+                else:
+                    # Opposite direction — cancel any pending limit orders and skip
+                    # Let the running trade complete at TP or SL
+                    open_orders = get_open_orders(symbol)
+                    if open_orders:
+                        session.cancel_all_orders(category="linear", symbol=symbol)
+                        log.info(f"Cancelled {len(open_orders)} pending {side} limit(s) for {symbol} — opposite {pos_side} position running, letting it complete")
+                    msg = f"Opposite position running for {symbol} ({pos_side}) — cancelled pending limit, skipping new {side} order"
+                    log.warning(msg)
+                    log_order_skipped(symbol, side, entry, sl, tp, msg)
+                    return jsonify({"status": "skipped", "message": msg}), 200
+            except Exception as e:
+                log.error(f"Error checking position direction for {symbol}: {e}")
+                msg = f"Already have open position in {symbol} — skipping"
+                log.warning(msg)
+                log_order_skipped(symbol, side, entry, sl, tp, msg)
+                return jsonify({"status": "skipped", "message": msg}), 200
 
         open_orders = get_open_orders(symbol)
         if open_orders:
-            if source == "ob" and order_type == "Limit":
+            # Check direction of existing pending order
+            existing_side = open_orders[0].get("side", "") if open_orders else ""
+            opposite_dir  = (existing_side == "Buy" and side == "Sell") or (existing_side == "Sell" and side == "Buy")
+
+            if opposite_dir:
+                # Opposite direction pending — cancel it and place new one
+                log.info(f"Cancelling opposite {existing_side} pending order for {symbol} — placing new {side} order")
+                try:
+                    session.cancel_all_orders(category="linear", symbol=symbol)
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET status = 'skipped', notes = 'Cancelled — opposite direction signal' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
+                        conn.commit()
+                except Exception as e:
+                    log.error(f"Error cancelling opposite order for {symbol}: {e}")
+            elif source == "ob" and order_type == "Limit":
                 # New OB detected — cancel existing pending limit and replace with new one
                 log.info(f"New OB for {symbol} — cancelling {len(open_orders)} existing order(s) and replacing")
                 try:
