@@ -232,6 +232,7 @@ JOURNAL_HTML = """
   <h1>// TRADE JOURNAL</h1>
   <div style="display:flex;align-items:center;gap:16px;">
     <a href="/analysis" style="color:var(--blue);font-size:12px;text-decoration:none;">📊 Analysis</a>
+    <a href="/recommendations" style="color:var(--blue);font-size:12px;text-decoration:none;">🎯 Recommendations</a>
     <span id="last-update">updated just now</span>
     <button class="refresh" onclick="location.reload()">↻ refresh</button>
   </div>
@@ -1790,8 +1791,246 @@ def _analyse_trades(trades):
     }
 
 
-@app.route("/analysis")
-def analysis():
+RECOMMENDATIONS_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Alert Recommendations</title>
+<style>
+  :root { --bg:#0f0f0f;--surface:#1a1a1a;--border:#2a2a2a;--text:#e8e8e8;--dim:#888;--green:#4caf50;--red:#ef5350;--blue:#42a5f5;--amber:#ffa726;--purple:#ce93d8; }
+  * { box-sizing:border-box;margin:0;padding:0; }
+  body { background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:24px; }
+  h1 { font-size:18px;font-weight:500;margin-bottom:4px; }
+  .subtitle { color:var(--dim);font-size:12px;margin-bottom:24px; }
+  .nav { display:flex;gap:12px;margin-bottom:20px; }
+  .nav a { color:var(--dim);text-decoration:none;font-size:12px; }
+  .nav a:hover { color:var(--text); }
+  .section { background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px; }
+  .section-title { font-size:13px;font-weight:500;margin-bottom:12px;color:var(--dim);text-transform:uppercase;letter-spacing:0.05em; }
+  table { width:100%;border-collapse:collapse; }
+  th { text-align:left;color:var(--dim);font-weight:400;font-size:11px;padding:4px 8px;border-bottom:1px solid var(--border); }
+  td { padding:7px 8px;border-bottom:1px solid var(--border); }
+  tr:last-child td { border-bottom:none; }
+  .green { color:var(--green); }
+  .red { color:var(--red); }
+  .tag { display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600; }
+  .tag-green  { background:rgba(76,175,80,0.15);color:var(--green); }
+  .tag-red    { background:rgba(239,83,80,0.15);color:var(--red); }
+  .tag-amber  { background:rgba(255,167,38,0.15);color:var(--amber); }
+  .tag-blue   { background:rgba(66,165,245,0.15);color:var(--blue); }
+  .tag-purple { background:rgba(206,147,216,0.15);color:var(--purple); }
+  .bar-wrap { background:var(--border);border-radius:3px;height:6px;width:60px;display:inline-block;vertical-align:middle;margin-left:6px; }
+  .bar { height:6px;border-radius:3px; }
+  .rec-row { display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border); }
+  .rec-row:last-child { border-bottom:none; }
+  .rec-num  { width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;flex-shrink:0; }
+  .rec-num.active { background:rgba(76,175,80,0.2);color:var(--green); }
+  .rec-num.pause  { background:rgba(239,83,80,0.15);color:var(--red); }
+  .rec-body { flex:1; }
+  .rec-title { font-size:13px;font-weight:500;margin-bottom:2px; }
+  .rec-sub   { font-size:11px;color:var(--dim); }
+  .rec-badge { margin-left:auto;text-align:right;flex-shrink:0; }
+  .updated   { font-size:11px;color:var(--dim);margin-bottom:16px; }
+  .empty { color:var(--dim);font-size:12px;padding:12px 0; }
+  .confidence { font-size:10px;padding:2px 6px;border-radius:3px;font-weight:500; }
+  .conf-high   { background:rgba(76,175,80,0.2);color:var(--green); }
+  .conf-medium { background:rgba(255,167,38,0.2);color:var(--amber); }
+  .conf-low    { background:rgba(239,83,80,0.15);color:var(--red); }
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/journal">← Journal</a>
+  <a href="/analysis">📊 Analysis</a>
+  <a href="/recommendations">🔄 Refresh</a>
+</div>
+<h1>// Alert Recommendations</h1>
+<p class="subtitle">Based on {{ total }} closed trades · Last updated {{ updated }}</p>
+<p class="updated">Minimum {{ min_trades }} trades required per combination · Sorted by win rate then PnL</p>
+
+<div class="section">
+  <div class="section-title">✅ Run these alerts</div>
+  {% if active %}
+  {% for r in active %}
+  <div class="rec-row">
+    <div class="rec-num active">{{ loop.index }}</div>
+    <div class="rec-body">
+      <div class="rec-title">
+        {{ r.symbol }}
+        <span class="tag tag-blue" style="margin-left:4px">{{ r.tf }}</span>
+        <span class="tag {{ 'tag-green' if r.source == 'ob' else 'tag-amber' if r.source == 'fib' else 'tag-purple' }}" style="margin-left:2px">{{ r.source.upper() }}</span>
+        <span class="confidence {{ r.conf_class }}" style="margin-left:4px">{{ r.confidence }}</span>
+      </div>
+      <div class="rec-sub">{{ r.wins }}W / {{ r.losses }}L · Avg win {{ r.avg_win }} · Avg loss {{ r.avg_loss }} · PnL {{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }} USDT</div>
+    </div>
+    <div class="rec-badge">
+      <div style="font-size:18px;font-weight:500;color:var(--green)">{{ r.wr }}%</div>
+      <div style="font-size:10px;color:var(--dim)">{{ r.total }} trades</div>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="empty">No combinations with enough data yet — need {{ min_trades }}+ trades per combo.</p>
+  {% endif %}
+</div>
+
+<div class="section">
+  <div class="section-title">⏸️ Pause or review these</div>
+  {% if pause %}
+  {% for r in pause %}
+  <div class="rec-row">
+    <div class="rec-num pause">{{ loop.index }}</div>
+    <div class="rec-body">
+      <div class="rec-title">
+        {{ r.symbol }}
+        <span class="tag tag-blue" style="margin-left:4px">{{ r.tf }}</span>
+        <span class="tag tag-red" style="margin-left:2px">{{ r.source.upper() }}</span>
+      </div>
+      <div class="rec-sub">{{ r.wins }}W / {{ r.losses }}L · PnL {{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }} USDT · Reason: {{ r.reason }}</div>
+    </div>
+    <div class="rec-badge">
+      <div style="font-size:18px;font-weight:500;color:var(--red)">{{ r.wr }}%</div>
+      <div style="font-size:10px;color:var(--dim)">{{ r.total }} trades</div>
+    </div>
+  </div>
+  {% endfor %}
+  {% else %}
+  <p class="empty">No underperforming combinations found.</p>
+  {% endif %}
+</div>
+
+<div class="section">
+  <div class="section-title">📋 All combinations ranked</div>
+  <table>
+    <tr><th>Symbol</th><th>TF</th><th>Source</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th><th>Confidence</th></tr>
+    {% for r in all_combos %}
+    <tr>
+      <td>{{ r.symbol }}</td>
+      <td><span class="tag tag-blue">{{ r.tf }}</span></td>
+      <td><span class="tag {{ 'tag-green' if r.source == 'ob' else 'tag-amber' if r.source == 'fib' else 'tag-purple' }}">{{ r.source.upper() }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>
+        {{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+      <td><span class="confidence {{ r.conf_class }}">{{ r.confidence }}</span></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+</body>
+</html>
+"""
+
+
+def _build_recommendations(trades, min_trades=3):
+    from datetime import datetime as _dt
+
+    closed = [t for t in trades if t.get("outcome") in ("tp", "sl")]
+
+    # Group by symbol + tf + source
+    groups = {}
+    for t in closed:
+        sym = t.get("symbol", "?")
+        tf  = t.get("timeframe") or "—"
+        src = (t.get("source") or "").replace("_test", "")
+        key = (sym, tf, src)
+        if key not in groups:
+            groups[key] = {"wins": 0, "losses": 0, "pnl": 0.0,
+                           "win_pnls": [], "loss_pnls": []}
+        pnl = float(t.get("pnl") or 0)
+        if t["outcome"] == "tp":
+            groups[key]["wins"]  += 1
+            groups[key]["win_pnls"].append(pnl)
+        else:
+            groups[key]["losses"] += 1
+            groups[key]["loss_pnls"].append(pnl)
+        groups[key]["pnl"] += pnl
+
+    rows = []
+    for (sym, tf, src), v in groups.items():
+        total = v["wins"] + v["losses"]
+        if total < min_trades:
+            continue
+        wr       = round(v["wins"] / total * 100, 1)
+        avg_win  = round(sum(v["win_pnls"])  / len(v["win_pnls"]),  2) if v["win_pnls"]  else 0
+        avg_loss = round(sum(v["loss_pnls"]) / len(v["loss_pnls"]), 2) if v["loss_pnls"] else 0
+        pnl      = round(v["pnl"], 2)
+
+        # Confidence based on sample size
+        if total >= 10:
+            conf_class = "conf-high";   confidence = "High confidence"
+        elif total >= 5:
+            conf_class = "conf-medium"; confidence = "Medium confidence"
+        else:
+            conf_class = "conf-low";    confidence = "Low confidence"
+
+        rows.append({
+            "symbol": sym, "tf": tf, "source": src,
+            "wins": v["wins"], "losses": v["losses"],
+            "total": total, "wr": wr, "pnl": pnl,
+            "avg_win": f"+{avg_win}", "avg_loss": str(avg_loss),
+            "conf_class": conf_class, "confidence": confidence,
+        })
+
+    # Sort by WR desc, then PnL desc
+    rows.sort(key=lambda x: (-x["wr"], -x["pnl"]))
+
+    # Split active vs pause
+    # Active: WR >= 40% AND PnL >= 0
+    # Pause: WR < 35% OR PnL < -1
+    active, pause = [], []
+    for r in rows:
+        if r["wr"] >= 40 and r["pnl"] >= 0:
+            active.append(r)
+        elif r["wr"] < 35 or r["pnl"] < -1:
+            reasons = []
+            if r["wr"] < 35:
+                reasons.append(f"WR only {r['wr']}%")
+            if r["pnl"] < -1:
+                reasons.append(f"losing {r['pnl']} USDT")
+            r["reason"] = ", ".join(reasons)
+            pause.append(r)
+
+    return {
+        "active":     active,
+        "pause":      pause,
+        "all_combos": rows,
+        "total":      len(closed),
+        "min_trades": min_trades,
+        "updated":    _dt.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    }
+
+
+@app.route("/recommendations")
+def recommendations():
+    """Daily alert recommendation page."""
+    try:
+        trades = get_all_trades(500)
+        data   = _build_recommendations(trades)
+        return render_template_string(RECOMMENDATIONS_HTML, **data)
+    except Exception as e:
+        import traceback
+        log.error(f"Recommendations error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/recommendations/data")
+def recommendations_data():
+    """JSON recommendations endpoint."""
+    try:
+        trades = get_all_trades(500)
+        return jsonify(_build_recommendations(trades))
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
     """Trade analysis dashboard."""
     try:
         trades = get_all_trades(500)
