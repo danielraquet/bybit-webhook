@@ -2212,12 +2212,12 @@ def _bt_stats(results):
 
 
 def _bt_save(symbol, timeframe, stats):
-    conn, db = get_db()
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    now  = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     sets = json.dumps({"rr":BT_RR_RATIO,"sl_buf":BT_SL_BUF_ATR,
                         "min_impulse":BT_MIN_IMPULSE,"lookback":BT_LOOKBACK_DAYS})
     try:
-        if db == "pg":
+        if DATABASE_URL:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS backtest_results (
@@ -2335,8 +2335,8 @@ def _start_backtest_scheduler():
 
     """Fetch backtest results from DB, sorted by win_rate desc."""
     try:
-        conn, db = get_db()
-        if db == "pg":
+        conn = get_db()
+        if DATABASE_URL:
             import psycopg2.extras
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
@@ -2349,14 +2349,17 @@ def _start_backtest_scheduler():
                 rows = [dict(r) for r in cur.fetchall()]
         else:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT symbol, timeframe, source, wins, losses, total,
-                       win_rate, total_pnl, avg_win, avg_loss,
-                       profit_factor, expectancy, max_dd, run_at
-                FROM backtest_results
-                ORDER BY win_rate DESC, total DESC
-            """)
-            rows = [dict(r) for r in cur.fetchall()]
+            try:
+                cur.execute("""
+                    SELECT symbol, timeframe, source, wins, losses, total,
+                           win_rate, total_pnl, avg_win, avg_loss,
+                           profit_factor, expectancy, max_dd, run_at
+                    FROM backtest_results
+                    ORDER BY win_rate DESC, total DESC
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+            except Exception:
+                rows = []
         conn.close()
         return rows
     except Exception as e:
@@ -2367,8 +2370,8 @@ def _start_backtest_scheduler():
 def _get_backtest_results():
     """Fetch backtest results from DB sorted by win_rate desc."""
     try:
-        conn, db = get_db()
-        if db == "pg":
+        conn = get_db()
+        if DATABASE_URL:
             import psycopg2.extras
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
@@ -2381,14 +2384,17 @@ def _get_backtest_results():
                 rows = [dict(r) for r in cur.fetchall()]
         else:
             cur = conn.cursor()
-            cur.execute("""
-                SELECT symbol, timeframe, source, wins, losses, total,
-                       win_rate, total_pnl, avg_win, avg_loss,
-                       profit_factor, expectancy, max_dd, run_at
-                FROM backtest_results
-                ORDER BY win_rate DESC, total DESC
-            """)
-            rows = [dict(r) for r in cur.fetchall()]
+            try:
+                cur.execute("""
+                    SELECT symbol, timeframe, source, wins, losses, total,
+                           win_rate, total_pnl, avg_win, avg_loss,
+                           profit_factor, expectancy, max_dd, run_at
+                    FROM backtest_results
+                    ORDER BY win_rate DESC, total DESC
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+            except Exception:
+                rows = []
         conn.close()
         return rows
     except Exception as e:
