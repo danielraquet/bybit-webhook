@@ -19,6 +19,8 @@ import re
 import logging
 import threading
 import time
+import json
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
 from pybit.unified_trading import HTTP
 from dotenv import load_dotenv
@@ -1845,10 +1847,24 @@ RECOMMENDATIONS_HTML = """
   <a href="/journal">← Journal</a>
   <a href="/analysis">📊 Analysis</a>
   <a href="/recommendations">🔄 Refresh</a>
+  <button onclick="runBacktest(this)" style="background:rgba(66,165,245,0.15);color:var(--blue);border:1px solid rgba(66,165,245,0.3);border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer;">▶ Run Backtest</button>
 </div>
 <h1>// Alert Recommendations</h1>
 <p class="subtitle">Based on {{ total }} closed trades · Last updated {{ updated }}</p>
-<p class="updated">Minimum {{ min_trades }} trades required per combination · Sorted by win rate then PnL</p>
+<p class="updated">Minimum {{ min_trades }} trades required per combination · Sorted by win rate then PnL · Backtest: {{ bt_status }}</p>
+<script>
+function runBacktest(btn) {
+  btn.innerText = '⏳ Running...';
+  btn.disabled = true;
+  fetch('/backtest/run', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      btn.innerText = d.status === 'already_running' ? '⏳ Already running' : '✅ Started';
+      setTimeout(() => { btn.innerText = '▶ Run Backtest'; btn.disabled = false; }, 3000);
+    })
+    .catch(() => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+</script>
 
 <div class="section">
   <div class="section-title">✅ Run these alerts</div>
@@ -1922,6 +1938,33 @@ RECOMMENDATIONS_HTML = """
     {% endfor %}
   </table>
 </div>
+
+{% if bt_available %}
+<div class="section">
+  <div class="section-title">🤖 Backtest Results — OB Strategy ({{ bt_updated }})</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:10px">{{ bt_rows|length }} combinations · Last 90 days · Simulated entries at OB detection</p>
+  <table>
+    <tr><th>Symbol</th><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PF</th><th>Expectancy</th><th>Max DD</th></tr>
+    {% for r in bt_rows %}
+    <tr style="{{ 'opacity:0.5' if r.win_rate < 30 else '' }}">
+      <td>{{ r.symbol }}</td>
+      <td><span class="tag tag-blue">{{ r.timeframe }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.win_rate }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.win_rate }}%;background:{{ '#4caf50' if r.win_rate >= 50 else '#ffa726' if r.win_rate >= 35 else '#ef5350' }};"></span></span></td>
+      <td style="color:{{ 'var(--green)' if r.profit_factor >= 1 else 'var(--red)' }}">{{ '%.2f'|format(r.profit_factor) }}</td>
+      <td style="color:{{ 'var(--green)' if r.expectancy >= 0 else 'var(--red)' }}">{{ '+' if r.expectancy >= 0 else '' }}{{ '%.3f'|format(r.expectancy) }}R</td>
+      <td style="color:var(--amber)">{{ '%.1f'|format(r.max_dd) }}R</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% else %}
+<div class="section">
+  <div class="section-title">🤖 Backtest Results</div>
+  <p style="font-size:12px;color:var(--dim)">No backtest data yet. Trigger the Railway cron job or run <code>python backtest.py</code> locally to generate results.</p>
+</div>
+{% endif %}
 
 </body>
 </html>
@@ -2007,12 +2050,350 @@ def _build_recommendations(trades, min_trades=3):
     }
 
 
-@app.route("/recommendations")
-def recommendations():
+
+# ─── BACKTEST ENGINE ──────────────────────────────────────────────────────────
+BT_RR_RATIO      = float(os.getenv("BT_RR_RATIO",    "2.0"))
+BT_SL_BUF_ATR    = float(os.getenv("BT_SL_BUF_ATR",  "0.5"))
+BT_ATR_LEN       = int(os.getenv("BT_ATR_LEN",        "14"))
+BT_MIN_IMPULSE   = float(os.getenv("BT_MIN_IMPULSE",  "1.3"))
+BT_MIN_OB_SIZE   = float(os.getenv("BT_MIN_OB_SIZE",  "0.8"))
+BT_ENTRY_OFFSET  = float(os.getenv("BT_ENTRY_OFFSET", "0.0"))
+BT_LOOKBACK_DAYS = int(os.getenv("BT_LOOKBACK_DAYS",  "90"))
+BT_MIN_TRADES    = int(os.getenv("BT_MIN_TRADES",     "10"))
+BT_SYMBOLS       = os.getenv("BT_SYMBOLS",
+    "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,"
+    "ADAUSDT,AVAXUSDT,DOTUSDT,LINKUSDT,NEARUSDT,"
+    "ATOMUSDT,KASUSDT,ONDOUSDT,RENDERUSDT,SEIUSDT,"
+    "VETUSDT,XLMUSDT,TRXUSDT,POLUSDT,BNBUSDT"
+).split(",")
+BT_TIMEFRAMES = {"3":"M3","5":"M5","15":"M15","30":"M30","60":"H1","240":"H4"}
+
+_bt_running   = False
+_bt_last_run  = None
+_bt_status    = "Never run"
+
+
+def _bt_fetch_klines(symbol, interval, days):
+    end_ms   = int(time.time() * 1000)
+    start_ms = end_ms - days * 24 * 3600 * 1000
+    all_bars = []
+    cursor   = end_ms
+    while True:
+        try:
+            resp = session.get_kline(category="linear", symbol=symbol,
+                                     interval=interval, start=start_ms,
+                                     end=cursor, limit=1000)
+            bars = resp.get("result", {}).get("list", [])
+            if not bars:
+                break
+            bars = list(reversed(bars))
+            all_bars = bars + all_bars
+            oldest = int(bars[0][0])
+            if oldest <= start_ms:
+                break
+            cursor = oldest - 1
+            time.sleep(0.05)
+        except Exception as e:
+            log.error(f"BT kline {symbol}/{interval}: {e}")
+            break
+    return [{"ts":int(b[0]),"open":float(b[1]),"high":float(b[2]),
+              "low":float(b[3]),"close":float(b[4]),"volume":float(b[5])}
+             for b in all_bars]
+
+
+def _bt_calc_atr(bars, length):
+    atrs = [None] * len(bars)
+    trs  = []
+    for i in range(1, len(bars)):
+        tr = max(bars[i]["high"] - bars[i]["low"],
+                 abs(bars[i]["high"] - bars[i-1]["close"]),
+                 abs(bars[i]["low"]  - bars[i-1]["close"]))
+        trs.append(tr)
+        if len(trs) >= length:
+            atrs[i] = sum(trs[-length:]) / length
+    return atrs
+
+
+def _bt_detect_obs(bars, atrs):
+    obs = []
+    for i in range(2, len(bars)):
+        atr = atrs[i]
+        if not atr or atr == 0:
+            continue
+        b0, b1 = bars[i], bars[i-1]
+        body0 = abs(b0["close"] - b0["open"])
+        body1 = abs(b1["close"] - b1["open"])
+        rng1  = b1["high"] - b1["low"]
+        if rng1 > 0 and (body1 / rng1 * 100) < 15:
+            continue
+        if body1 > 0 and (body0 / body1) < BT_MIN_IMPULSE:
+            continue
+        ob_top = max(b1["open"], b1["close"])
+        ob_bot = min(b1["open"], b1["close"])
+        if (ob_top - ob_bot) < atr * BT_MIN_OB_SIZE:
+            continue
+        ob_mid  = (ob_top + ob_bot) / 2
+        is_bull = b1["close"] < b1["open"] and b0["close"] > b0["open"] and b0["close"] > b1["high"]
+        is_bear = b1["close"] > b1["open"] and b0["close"] < b0["open"] and b0["close"] < b1["low"]
+        if is_bull:
+            sl    = min(b1["low"], b0["low"]) - atr * BT_SL_BUF_ATR
+            entry = ob_top - BT_ENTRY_OFFSET * 2.0 * (ob_top - ob_mid)
+            risk  = abs(entry - sl)
+            if risk <= 0: continue
+            obs.append({"bar":i-1,"type":1,"top":ob_top,"bot":ob_bot,
+                        "sl":sl,"entry":entry,"tp":entry+risk*BT_RR_RATIO})
+        elif is_bear:
+            sl    = max(b1["high"], b0["high"]) + atr * BT_SL_BUF_ATR
+            entry = ob_bot + BT_ENTRY_OFFSET * 2.0 * (ob_mid - ob_bot)
+            risk  = abs(entry - sl)
+            if risk <= 0: continue
+            obs.append({"bar":i-1,"type":2,"top":ob_top,"bot":ob_bot,
+                        "sl":sl,"entry":entry,"tp":entry-risk*BT_RR_RATIO})
+    return obs
+
+
+def _bt_simulate(bars, obs, cancel_after=20):
+    results  = []
+    active   = [{**ob, "created": ob["bar"], "done": False} for ob in obs]
+    for i in range(len(bars)):
+        b = bars[i]
+        for ob in active:
+            if ob["done"]: continue
+            if i - ob["created"] > cancel_after:
+                ob["done"] = True
+                continue
+            hit = b["low"] <= ob["entry"] <= b["high"]
+            if hit:
+                ob["done"] = True
+                for j in range(i+1, min(i+200, len(bars))):
+                    bj = bars[j]
+                    if ob["type"] == 1:
+                        if bj["high"] >= ob["tp"]:
+                            results.append({"outcome":"tp","pnl_r": BT_RR_RATIO}); break
+                        if bj["low"]  <= ob["sl"]:
+                            results.append({"outcome":"sl","pnl_r":-1.0});         break
+                    else:
+                        if bj["low"]  <= ob["tp"]:
+                            results.append({"outcome":"tp","pnl_r": BT_RR_RATIO}); break
+                        if bj["high"] >= ob["sl"]:
+                            results.append({"outcome":"sl","pnl_r":-1.0});         break
+            else:
+                sl_breach = (ob["type"]==1 and b["close"]<ob["bot"]) or \
+                            (ob["type"]==2 and b["close"]>ob["top"])
+                if sl_breach:
+                    ob["done"] = True
+    return results
+
+
+def _bt_stats(results):
+    if not results or len(results) < BT_MIN_TRADES:
+        return None
+    wins  = [r for r in results if r["outcome"] == "tp"]
+    loss  = [r for r in results if r["outcome"] == "sl"]
+    total = len(results)
+    wr    = round(len(wins)/total*100, 1)
+    wp    = [r["pnl_r"] for r in wins]
+    lp    = [abs(r["pnl_r"]) for r in loss]
+    pnl_r = sum(r["pnl_r"] for r in results)
+    gw    = sum(wp); gl = sum(lp)
+    pf    = round(gw/gl, 2) if gl > 0 else 0
+    ew    = sum(wp)/len(wp) if wp else 0
+    el    = sum(lp)/len(lp) if lp else 0
+    wr_d  = len(wins)/total
+    ev    = round(wr_d * ew - (1-wr_d) * el, 3)
+    eq    = 0; pk = 0; dd = 0
+    for r in results:
+        eq += r["pnl_r"]
+        if eq > pk: pk = eq
+        if pk - eq > dd: dd = pk - eq
+    return {"wins":len(wins),"losses":len(loss),"total":total,"win_rate":wr,
+            "total_pnl":round(pnl_r,2),"avg_win":round(ew,2),"avg_loss":round(el,2),
+            "profit_factor":pf,"expectancy":ev,"max_dd":round(dd,2)}
+
+
+def _bt_save(symbol, timeframe, stats):
+    conn, db = get_db()
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    sets = json.dumps({"rr":BT_RR_RATIO,"sl_buf":BT_SL_BUF_ATR,
+                        "min_impulse":BT_MIN_IMPULSE,"lookback":BT_LOOKBACK_DAYS})
+    try:
+        if db == "pg":
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS backtest_results (
+                        id SERIAL PRIMARY KEY, symbol TEXT, timeframe TEXT,
+                        source TEXT DEFAULT 'ob', wins INT DEFAULT 0,
+                        losses INT DEFAULT 0, total INT DEFAULT 0,
+                        win_rate REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
+                        avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
+                        profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
+                        max_dd REAL DEFAULT 0, settings TEXT, run_at TEXT,
+                        UNIQUE(symbol, timeframe, source)
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO backtest_results
+                        (symbol,timeframe,source,wins,losses,total,win_rate,
+                         total_pnl,avg_win,avg_loss,profit_factor,expectancy,max_dd,settings,run_at)
+                    VALUES (%s,%s,'ob',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (symbol,timeframe,source) DO UPDATE SET
+                        wins=EXCLUDED.wins,losses=EXCLUDED.losses,total=EXCLUDED.total,
+                        win_rate=EXCLUDED.win_rate,total_pnl=EXCLUDED.total_pnl,
+                        avg_win=EXCLUDED.avg_win,avg_loss=EXCLUDED.avg_loss,
+                        profit_factor=EXCLUDED.profit_factor,expectancy=EXCLUDED.expectancy,
+                        max_dd=EXCLUDED.max_dd,settings=EXCLUDED.settings,run_at=EXCLUDED.run_at
+                """, (symbol, timeframe, stats["wins"], stats["losses"], stats["total"],
+                      stats["win_rate"], stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
+                      stats["profit_factor"], stats["expectancy"], stats["max_dd"], sets, now))
+            conn.commit()
+        else:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, timeframe TEXT,
+                    source TEXT DEFAULT 'ob', wins INT DEFAULT 0, losses INT DEFAULT 0,
+                    total INT DEFAULT 0, win_rate REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
+                    avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
+                    profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
+                    max_dd REAL DEFAULT 0, settings TEXT, run_at TEXT,
+                    UNIQUE(symbol, timeframe, source)
+                )
+            """)
+            cur.execute("""
+                INSERT OR REPLACE INTO backtest_results
+                    (symbol,timeframe,source,wins,losses,total,win_rate,
+                     total_pnl,avg_win,avg_loss,profit_factor,expectancy,max_dd,settings,run_at)
+                VALUES (?,?,'ob',?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (symbol, timeframe, stats["wins"], stats["losses"], stats["total"],
+                  stats["win_rate"], stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
+                  stats["profit_factor"], stats["expectancy"], stats["max_dd"], sets, now))
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def run_backtest_job():
+    global _bt_running, _bt_last_run, _bt_status
+    if _bt_running:
+        log.info("Backtest already running — skipping")
+        return
+    _bt_running = True
+    _bt_status  = "Running..."
+    log.info(f"Backtest started — {len(BT_SYMBOLS)} symbols × {len(BT_TIMEFRAMES)} TFs")
+    saved = 0
+    total_combos = len(BT_SYMBOLS) * len(BT_TIMEFRAMES)
+    done  = 0
+    try:
+        for symbol in BT_SYMBOLS:
+            symbol = symbol.strip()
+            for tf_str, tf_label in BT_TIMEFRAMES.items():
+                done += 1
+                try:
+                    bars = _bt_fetch_klines(symbol, tf_str, BT_LOOKBACK_DAYS)
+                    if len(bars) < 100:
+                        continue
+                    atrs    = _bt_calc_atr(bars, BT_ATR_LEN)
+                    obs     = _bt_detect_obs(bars, atrs)
+                    results = _bt_simulate(bars, obs)
+                    stats   = _bt_stats(results)
+                    if stats:
+                        _bt_save(symbol, tf_label, stats)
+                        saved += 1
+                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: WR={stats['win_rate']}% PF={stats['profit_factor']} ({stats['total']} trades)")
+                    else:
+                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: insufficient data")
+                except Exception as e:
+                    log.error(f"  {symbol}/{tf_label}: {e}")
+                time.sleep(0.1)
+    finally:
+        _bt_running  = False
+        _bt_last_run = datetime.utcnow()
+        _bt_status   = f"Completed {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} — {saved} results saved"
+        log.info(f"Backtest complete — {saved} results saved")
+
+
+def _schedule_daily_backtest():
+    """Run backtest daily at 02:00 UTC."""
+    while True:
+        now  = datetime.utcnow()
+        next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        wait = (next_run - now).total_seconds()
+        log.info(f"Next backtest scheduled at {next_run.strftime('%Y-%m-%d %H:%M UTC')} ({int(wait/3600)}h from now)")
+        time.sleep(wait)
+        try:
+            run_backtest_job()
+        except Exception as e:
+            log.error(f"Scheduled backtest error: {e}")
+
+
+def _start_backtest_scheduler():
+    t = threading.Thread(target=_schedule_daily_backtest, daemon=True)
+    t.start()
+    log.info("Backtest scheduler started — runs daily at 02:00 UTC")
+
+
+    """Fetch backtest results from DB, sorted by win_rate desc."""
+    try:
+        conn, db = get_db()
+        if db == "pg":
+            import psycopg2.extras
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT symbol, timeframe, source, wins, losses, total,
+                           win_rate, total_pnl, avg_win, avg_loss,
+                           profit_factor, expectancy, max_dd, run_at
+                    FROM backtest_results
+                    ORDER BY win_rate DESC, total DESC
+                """)
+                rows = [dict(r) for r in cur.fetchall()]
+        else:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT symbol, timeframe, source, wins, losses, total,
+                       win_rate, total_pnl, avg_win, avg_loss,
+                       profit_factor, expectancy, max_dd, run_at
+                FROM backtest_results
+                ORDER BY win_rate DESC, total DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        log.error(f"Backtest results fetch error: {e}")
+        return []
+
+
+@app.route("/backtest/run", methods=["POST"])
+def trigger_backtest():
+    """Manually trigger a backtest run."""
+    if _bt_running:
+        return jsonify({"status": "already_running", "message": "Backtest already in progress"}), 200
+    threading.Thread(target=run_backtest_job, daemon=True).start()
+    return jsonify({"status": "started", "message": f"Backtest started for {len(BT_SYMBOLS)} symbols × {len(BT_TIMEFRAMES)} timeframes"}), 200
+
+
+@app.route("/backtest/status")
+def backtest_status():
+    return jsonify({
+        "running":  _bt_running,
+        "last_run": _bt_last_run.strftime("%Y-%m-%d %H:%M UTC") if _bt_last_run else None,
+        "status":   _bt_status,
+    })
+
+
+
     """Daily alert recommendation page."""
     try:
         trades = get_all_trades(500)
         data   = _build_recommendations(trades)
+        # Add backtest results
+        bt_rows = _get_backtest_results()
+        data["bt_rows"]       = bt_rows
+        data["bt_available"]  = len(bt_rows) > 0
+        data["bt_updated"]    = bt_rows[0]["run_at"] if bt_rows else None
+        data["bt_status"]     = _bt_status
         return render_template_string(RECOMMENDATIONS_HTML, **data)
     except Exception as e:
         import traceback
@@ -2059,5 +2440,6 @@ def analysis_data():
     log.info(f"Starting webhook server — testnet={TESTNET}")
     log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
     _start_poller()
+    _start_backtest_scheduler()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
