@@ -2092,7 +2092,7 @@ def _bt_fetch_klines(symbol, interval, days):
             if oldest <= start_ms:
                 break
             cursor = oldest - 1
-            time.sleep(0.05)
+            time.sleep(0.2)
         except Exception as e:
             log.error(f"BT kline {symbol}/{interval}: {e}")
             break
@@ -2211,63 +2211,64 @@ def _bt_stats(results):
             "profit_factor":pf,"expectancy":ev,"max_dd":round(dd,2)}
 
 
-def _bt_save(symbol, timeframe, stats):
-    conn = get_db()
-    now  = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    sets = json.dumps({"rr":BT_RR_RATIO,"sl_buf":BT_SL_BUF_ATR,
-                        "min_impulse":BT_MIN_IMPULSE,"lookback":BT_LOOKBACK_DAYS})
+def _bt_init_table():
+    """Create backtest_results table if not exists."""
     try:
-        if DATABASE_URL:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS backtest_results (
-                        id SERIAL PRIMARY KEY, symbol TEXT, timeframe TEXT,
-                        source TEXT DEFAULT 'ob', wins INT DEFAULT 0,
-                        losses INT DEFAULT 0, total INT DEFAULT 0,
-                        win_rate REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
-                        avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
-                        profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
-                        max_dd REAL DEFAULT 0, settings TEXT, run_at TEXT,
-                        UNIQUE(symbol, timeframe, source)
-                    )
-                """)
-                cur.execute("""
-                    INSERT INTO backtest_results
-                        (symbol,timeframe,source,wins,losses,total,win_rate,
-                         total_pnl,avg_win,avg_loss,profit_factor,expectancy,max_dd,settings,run_at)
-                    VALUES (%s,%s,'ob',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (symbol,timeframe,source) DO UPDATE SET
-                        wins=EXCLUDED.wins,losses=EXCLUDED.losses,total=EXCLUDED.total,
-                        win_rate=EXCLUDED.win_rate,total_pnl=EXCLUDED.total_pnl,
-                        avg_win=EXCLUDED.avg_win,avg_loss=EXCLUDED.avg_loss,
-                        profit_factor=EXCLUDED.profit_factor,expectancy=EXCLUDED.expectancy,
-                        max_dd=EXCLUDED.max_dd,settings=EXCLUDED.settings,run_at=EXCLUDED.run_at
-                """, (symbol, timeframe, stats["wins"], stats["losses"], stats["total"],
-                      stats["win_rate"], stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
-                      stats["profit_factor"], stats["expectancy"], stats["max_dd"], sets, now))
-            conn.commit()
-        else:
-            cur = conn.cursor()
+        conn = get_db()
+        with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS backtest_results (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, timeframe TEXT,
-                    source TEXT DEFAULT 'ob', wins INT DEFAULT 0, losses INT DEFAULT 0,
-                    total INT DEFAULT 0, win_rate REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
-                    avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
-                    profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
-                    max_dd REAL DEFAULT 0, settings TEXT, run_at TEXT,
+                    id            SERIAL PRIMARY KEY,
+                    symbol        TEXT NOT NULL,
+                    timeframe     TEXT NOT NULL,
+                    source        TEXT NOT NULL DEFAULT 'ob',
+                    wins          INT  NOT NULL DEFAULT 0,
+                    losses        INT  NOT NULL DEFAULT 0,
+                    total         INT  NOT NULL DEFAULT 0,
+                    win_rate      REAL NOT NULL DEFAULT 0,
+                    total_pnl     REAL NOT NULL DEFAULT 0,
+                    avg_win       REAL NOT NULL DEFAULT 0,
+                    avg_loss      REAL NOT NULL DEFAULT 0,
+                    profit_factor REAL NOT NULL DEFAULT 0,
+                    expectancy    REAL NOT NULL DEFAULT 0,
+                    max_dd        REAL NOT NULL DEFAULT 0,
+                    settings      TEXT,
+                    run_at        TEXT NOT NULL,
                     UNIQUE(symbol, timeframe, source)
                 )
             """)
+        conn.commit()
+        conn.close()
+        log.info("backtest_results table ready")
+    except Exception as e:
+        log.error(f"BT table init error: {e}")
+
+
+def _bt_save(symbol, timeframe, stats):
+    conn = get_db()
+    now  = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    sets = json.dumps({"rr": BT_RR_RATIO, "sl_buf": BT_SL_BUF_ATR,
+                       "min_impulse": BT_MIN_IMPULSE, "lookback": BT_LOOKBACK_DAYS})
+    try:
+        with conn.cursor() as cur:
             cur.execute("""
-                INSERT OR REPLACE INTO backtest_results
-                    (symbol,timeframe,source,wins,losses,total,win_rate,
-                     total_pnl,avg_win,avg_loss,profit_factor,expectancy,max_dd,settings,run_at)
-                VALUES (?,?,'ob',?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (symbol, timeframe, stats["wins"], stats["losses"], stats["total"],
-                  stats["win_rate"], stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
+                INSERT INTO backtest_results
+                    (symbol, timeframe, source, wins, losses, total, win_rate,
+                     total_pnl, avg_win, avg_loss, profit_factor, expectancy, max_dd, settings, run_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (symbol, timeframe, source) DO UPDATE SET
+                    wins=EXCLUDED.wins, losses=EXCLUDED.losses, total=EXCLUDED.total,
+                    win_rate=EXCLUDED.win_rate, total_pnl=EXCLUDED.total_pnl,
+                    avg_win=EXCLUDED.avg_win, avg_loss=EXCLUDED.avg_loss,
+                    profit_factor=EXCLUDED.profit_factor, expectancy=EXCLUDED.expectancy,
+                    max_dd=EXCLUDED.max_dd, settings=EXCLUDED.settings, run_at=EXCLUDED.run_at
+            """, (symbol, timeframe, "ob",
+                  stats["wins"], stats["losses"], stats["total"], stats["win_rate"],
+                  stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
                   stats["profit_factor"], stats["expectancy"], stats["max_dd"], sets, now))
-            conn.commit()
+        conn.commit()
+    except Exception as e:
+        log.error(f"BT save error {symbol}/{timeframe}: {e}")
     finally:
         conn.close()
 
@@ -2286,10 +2287,14 @@ def run_backtest_job():
     try:
         for symbol in BT_SYMBOLS:
             symbol = symbol.strip()
+            time.sleep(1.0)  # pause between symbols to avoid rate limits
             for tf_str, tf_label in BT_TIMEFRAMES.items():
                 done += 1
+                # Adaptive lookback — fewer bars for smaller TFs to reduce API calls
+                tf_mins  = {"3":3,"5":5,"15":15,"30":30,"60":60,"240":240}[tf_str]
+                lookback = min(BT_LOOKBACK_DAYS, 30) if tf_mins <= 5 else                            min(BT_LOOKBACK_DAYS, 60) if tf_mins <= 15 else BT_LOOKBACK_DAYS
                 try:
-                    bars = _bt_fetch_klines(symbol, tf_str, BT_LOOKBACK_DAYS)
+                    bars = _bt_fetch_klines(symbol, tf_str, lookback)
                     if len(bars) < 100:
                         log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: only {len(bars)} bars — skipping")
                         continue
@@ -2303,7 +2308,7 @@ def run_backtest_job():
                         saved += 1
                 except Exception as e:
                     log.error(f"  {symbol}/{tf_label}: {e}")
-                time.sleep(0.1)
+                time.sleep(0.5)
     finally:
         _bt_running  = False
         _bt_last_run = datetime.utcnow()
@@ -2508,6 +2513,7 @@ def analysis_data():
     log.info(f"Starting webhook server — testnet={TESTNET}")
     log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
     _start_poller()
+    _bt_init_table()
     _start_backtest_scheduler()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
