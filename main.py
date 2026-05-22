@@ -2251,6 +2251,28 @@ def _bt_save(symbol, timeframe, stats):
                        "min_impulse": BT_MIN_IMPULSE, "lookback": BT_LOOKBACK_DAYS})
     try:
         with conn.cursor() as cur:
+            # Always ensure table exists before inserting
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id            SERIAL PRIMARY KEY,
+                    symbol        TEXT NOT NULL,
+                    timeframe     TEXT NOT NULL,
+                    source        TEXT NOT NULL DEFAULT 'ob',
+                    wins          INT  NOT NULL DEFAULT 0,
+                    losses        INT  NOT NULL DEFAULT 0,
+                    total         INT  NOT NULL DEFAULT 0,
+                    win_rate      REAL NOT NULL DEFAULT 0,
+                    total_pnl     REAL NOT NULL DEFAULT 0,
+                    avg_win       REAL NOT NULL DEFAULT 0,
+                    avg_loss      REAL NOT NULL DEFAULT 0,
+                    profit_factor REAL NOT NULL DEFAULT 0,
+                    expectancy    REAL NOT NULL DEFAULT 0,
+                    max_dd        REAL NOT NULL DEFAULT 0,
+                    settings      TEXT,
+                    run_at        TEXT NOT NULL,
+                    UNIQUE(symbol, timeframe, source)
+                )
+            """)
             cur.execute("""
                 INSERT INTO backtest_results
                     (symbol, timeframe, source, wins, losses, total, win_rate,
@@ -2269,6 +2291,7 @@ def _bt_save(symbol, timeframe, stats):
         conn.commit()
     except Exception as e:
         log.error(f"BT save error {symbol}/{timeframe}: {e}")
+        conn.rollback()
     finally:
         conn.close()
 
@@ -2376,35 +2399,47 @@ def _get_backtest_results():
     """Fetch backtest results from DB sorted by win_rate desc."""
     try:
         conn = get_db()
-        if DATABASE_URL:
-            import psycopg2.extras
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT symbol, timeframe, source, wins, losses, total,
-                           win_rate, total_pnl, avg_win, avg_loss,
-                           profit_factor, expectancy, max_dd, run_at
-                    FROM backtest_results
-                    ORDER BY win_rate DESC, total DESC
-                """)
-                rows = [dict(r) for r in cur.fetchall()]
-        else:
-            cur = conn.cursor()
-            try:
-                cur.execute("""
-                    SELECT symbol, timeframe, source, wins, losses, total,
-                           win_rate, total_pnl, avg_win, avg_loss,
-                           profit_factor, expectancy, max_dd, run_at
-                    FROM backtest_results
-                    ORDER BY win_rate DESC, total DESC
-                """)
-                rows = [dict(r) for r in cur.fetchall()]
-            except Exception:
-                rows = []
+        import psycopg2.extras
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_results (
+                    id SERIAL PRIMARY KEY, symbol TEXT, timeframe TEXT,
+                    source TEXT DEFAULT 'ob', wins INT DEFAULT 0, losses INT DEFAULT 0,
+                    total INT DEFAULT 0, win_rate REAL DEFAULT 0, total_pnl REAL DEFAULT 0,
+                    avg_win REAL DEFAULT 0, avg_loss REAL DEFAULT 0,
+                    profit_factor REAL DEFAULT 0, expectancy REAL DEFAULT 0,
+                    max_dd REAL DEFAULT 0, settings TEXT, run_at TEXT,
+                    UNIQUE(symbol, timeframe, source)
+                )
+            """)
+            conn.commit()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT symbol, timeframe, source, wins, losses, total,
+                       win_rate, total_pnl, avg_win, avg_loss,
+                       profit_factor, expectancy, max_dd, run_at
+                FROM backtest_results
+                ORDER BY win_rate DESC, total DESC
+            """)
+            rows = [dict(r) for r in cur.fetchall()]
         conn.close()
+        log.info(f"Backtest results fetched: {len(rows)} rows")
         return rows
     except Exception as e:
         log.error(f"Backtest results fetch error: {e}")
+        import traceback
+        log.error(traceback.format_exc())
         return []
+
+
+@app.route("/backtest/results")
+def backtest_results_debug():
+    """Debug endpoint — raw backtest results."""
+    try:
+        rows = _get_backtest_results()
+        return jsonify({"count": len(rows), "rows": rows[:10]}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/backtest/run", methods=["POST"])
