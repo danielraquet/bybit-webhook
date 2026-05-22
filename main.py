@@ -2059,7 +2059,7 @@ BT_MIN_IMPULSE   = float(os.getenv("BT_MIN_IMPULSE",  "1.3"))
 BT_MIN_OB_SIZE   = float(os.getenv("BT_MIN_OB_SIZE",  "0.8"))
 BT_ENTRY_OFFSET  = float(os.getenv("BT_ENTRY_OFFSET", "0.0"))
 BT_LOOKBACK_DAYS = int(os.getenv("BT_LOOKBACK_DAYS",  "90"))
-BT_MIN_TRADES    = int(os.getenv("BT_MIN_TRADES",     "10"))
+BT_MIN_TRADES    = int(os.getenv("BT_MIN_TRADES",     "5"))
 BT_SYMBOLS       = os.getenv("BT_SYMBOLS",
     "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,"
     "ADAUSDT,AVAXUSDT,DOTUSDT,LINKUSDT,NEARUSDT,"
@@ -2291,17 +2291,16 @@ def run_backtest_job():
                 try:
                     bars = _bt_fetch_klines(symbol, tf_str, BT_LOOKBACK_DAYS)
                     if len(bars) < 100:
+                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: only {len(bars)} bars — skipping")
                         continue
                     atrs    = _bt_calc_atr(bars, BT_ATR_LEN)
                     obs     = _bt_detect_obs(bars, atrs)
                     results = _bt_simulate(bars, obs)
                     stats   = _bt_stats(results)
+                    log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: {len(bars)} bars → {len(obs)} OBs → {len(results)} trades → {'✅ saved' if stats else f'❌ need {BT_MIN_TRADES} (got {len(results)})'}")
                     if stats:
                         _bt_save(symbol, tf_label, stats)
                         saved += 1
-                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: WR={stats['win_rate']}% PF={stats['profit_factor']} ({stats['total']} trades)")
-                    else:
-                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: insufficient data")
                 except Exception as e:
                     log.error(f"  {symbol}/{tf_label}: {e}")
                 time.sleep(0.1)
