@@ -2401,6 +2401,24 @@ def backtest_status():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/recommendations")
+def recommendations():
+    """Daily alert recommendation page."""
+    try:
+        trades  = get_all_trades(500)
+        data    = _build_recommendations(trades)
+        bt_rows = _get_backtest_results()
+        data["bt_rows"]      = bt_rows
+        data["bt_available"] = len(bt_rows) > 0
+        data["bt_updated"]   = bt_rows[0]["run_at"] if bt_rows else None
+        data["bt_status"]    = _bt_status
+        return render_template_string(RECOMMENDATIONS_HTML, **data)
+    except Exception as e:
+        import traceback
+        log.error(f"Recommendations error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/recommendations/data")
 def recommendations_data():
     """JSON recommendations endpoint."""
@@ -2412,6 +2430,19 @@ def recommendations_data():
 
 
 
+    """Trade analysis dashboard."""
+    try:
+        trades = get_all_trades(500)
+        data   = _analyse_trades(trades)
+        return render_template_string(ANALYSIS_HTML, **data)
+    except Exception as e:
+        import traceback
+        log.error(f"Analysis error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/analysis")
+def analysis():
     """Trade analysis dashboard."""
     try:
         trades = get_all_trades(500)
