@@ -1408,7 +1408,97 @@ ANALYSIS_HTML = """
   </table>
 </div>
 
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">Best &amp; Worst — Timeframe + Source</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div style="font-size:11px;color:var(--green);margin-bottom:6px;font-weight:500">▲ Best</div>
+      <table>
+        <tr><th>TF</th><th>Source</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in best_tf_src %}
+        <tr><td>{{ r.k1 }}</td><td><span class="tag tag-green">{{ r.k2.upper() }}</span></td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--red);margin-bottom:6px;font-weight:500">▼ Worst</div>
+      <table>
+        <tr><th>TF</th><th>Source</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in worst_tf_src %}
+        <tr><td>{{ r.k1 }}</td><td><span class="tag tag-red">{{ r.k2.upper() }}</span></td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+  </div>
 </div>
+
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">Best &amp; Worst — Timeframe + Symbol</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div style="font-size:11px;color:var(--green);margin-bottom:6px;font-weight:500">▲ Best</div>
+      <table>
+        <tr><th>TF</th><th>Symbol</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in best_tf_sym %}
+        <tr><td>{{ r.k1 }}</td><td>{{ r.k2 }}</td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--red);margin-bottom:6px;font-weight:500">▼ Worst</div>
+      <table>
+        <tr><th>TF</th><th>Symbol</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in worst_tf_sym %}
+        <tr><td>{{ r.k1 }}</td><td>{{ r.k2 }}</td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">Best &amp; Worst — Source + Symbol</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div>
+      <div style="font-size:11px;color:var(--green);margin-bottom:6px;font-weight:500">▲ Best</div>
+      <table>
+        <tr><th>Source</th><th>Symbol</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in best_src_sym %}
+        <tr><td><span class="tag tag-green">{{ r.k1.upper() }}</span></td><td>{{ r.k2 }}</td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+    <div>
+      <div style="font-size:11px;color:var(--red);margin-bottom:6px;font-weight:500">▼ Worst</div>
+      <table>
+        <tr><th>Source</th><th>Symbol</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+        {% for r in worst_src_sym %}
+        <tr><td><span class="tag tag-red">{{ r.k1.upper() }}</span></td><td>{{ r.k2 }}</td>
+        <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
+        <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
+        <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="section">
   <div style="font-size:11px;color:var(--dim);margin-bottom:8px">SL distance from entry. Under 0.5% is very tight for crypto — normal volatility can hit it. Ideal: 1-2% depending on timeframe.</div>
   <table>
     <tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>SL dist %</th><th>RR set</th><th>Time in trade</th></tr>
@@ -1625,24 +1715,78 @@ def _analyse_trades(trades):
         if r["total"] >= 3 and r["key"] == "Weekday" and r["wr"] < 30:
             insights.append(f"<strong>Weekday performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}).")
 
+    # Cross breakdown: best/worst per TF and per source
+    def cross_breakdown(key1_fn, key2_fn):
+        """Group by two keys, return nested stats."""
+        groups = {}
+        for t in closed:
+            k1 = key1_fn(t)
+            k2 = key2_fn(t)
+            key = (k1, k2)
+            if key not in groups:
+                groups[key] = {"wins": 0, "losses": 0, "pnl": 0.0}
+            groups[key]["wins"   if t["outcome"] == "tp" else "losses"] += 1
+            groups[key]["pnl"] += float(t.get("pnl") or 0)
+        rows = []
+        for (k1, k2), v in groups.items():
+            total = v["wins"] + v["losses"]
+            rows.append({
+                "k1": k1, "k2": k2,
+                "wins": v["wins"], "losses": v["losses"],
+                "wr": round(v["wins"] / total * 100, 1) if total > 0 else 0,
+                "pnl": round(v["pnl"], 2),
+                "total": total
+            })
+        return sorted(rows, key=lambda x: -x["total"])
+
+    src_fn = lambda t: (t.get("source") or "").replace("_test", "")
+    tf_fn  = lambda t: t.get("timeframe") or "—"
+    sym_fn = lambda t: t["symbol"]
+
+    by_tf_source  = cross_breakdown(tf_fn,  src_fn)
+    by_tf_symbol  = cross_breakdown(tf_fn,  sym_fn)
+    by_src_symbol = cross_breakdown(src_fn, sym_fn)
+
+    # Best and worst performers
+    def best_worst(rows, min_trades=2):
+        eligible = [r for r in rows if r["total"] >= min_trades]
+        if not eligible:
+            return [], []
+        best  = sorted(eligible, key=lambda x: (-x["wr"], -x["pnl"]))[:3]
+        worst = sorted(eligible, key=lambda x: (x["wr"], x["pnl"]))[:3]
+        return best, worst
+
+    best_tf_src,  worst_tf_src  = best_worst(by_tf_source)
+    best_tf_sym,  worst_tf_sym  = best_worst(by_tf_symbol)
+    best_src_sym, worst_src_sym = best_worst(by_src_symbol)
+
     return {
-        "total_closed":  total_closed,
-        "total_open":    len(open_t),
-        "wr":            wr,
-        "total_pnl":     total_pnl,
-        "avg_win":       avg_win,
-        "avg_loss":      avg_loss,
-        "profit_factor": profit_factor,
-        "expectancy":    expectancy,
-        "by_symbol":     by_symbol,
-        "by_source":     by_source,
-        "by_side":       by_side,
-        "by_tf":         by_tf,
-        "by_day":        by_day,
-        "by_session":    by_session,
-        "by_weekend":    by_weekend,
-        "sl_margins":    sl_margins,
-        "insights":      insights,
+        "total_closed":   total_closed,
+        "total_open":     len(open_t),
+        "wr":             wr,
+        "total_pnl":      total_pnl,
+        "avg_win":        avg_win,
+        "avg_loss":       avg_loss,
+        "profit_factor":  profit_factor,
+        "expectancy":     expectancy,
+        "by_symbol":      by_symbol,
+        "by_source":      by_source,
+        "by_side":        by_side,
+        "by_tf":          by_tf,
+        "by_day":         by_day,
+        "by_session":     by_session,
+        "by_weekend":     by_weekend,
+        "sl_margins":     sl_margins,
+        "by_tf_source":   by_tf_source,
+        "by_tf_symbol":   by_tf_symbol,
+        "by_src_symbol":  by_src_symbol,
+        "best_tf_src":    best_tf_src,
+        "worst_tf_src":   worst_tf_src,
+        "best_tf_sym":    best_tf_sym,
+        "worst_tf_sym":   worst_tf_sym,
+        "best_src_sym":   best_src_sym,
+        "worst_src_sym":  worst_src_sym,
+        "insights":       insights,
     }
 
 
