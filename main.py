@@ -1027,7 +1027,13 @@ def webhook():
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
                                  timeframe=gsheets._bar_seconds_to_tf(bar_seconds),
-                                 leverage=actual_leverage)
+                                 leverage=actual_leverage,
+                                 notes=json.dumps({
+                                     "rr":          payload.get("rr"),
+                                     "slBuf":       payload.get("slBuf"),
+                                     "minImpulse":  payload.get("minImpulse"),
+                                     "entryOffset": payload.get("entryOffset"),
+                                 }) if payload.get("rr") else None)
                 # Push to Google Sheets if configured
                 if gsheets.is_configured():
                     sheet_row = gsheets.push_trade_opened(
@@ -2114,7 +2120,10 @@ def _bt_calc_atr(bars, length):
     return atrs
 
 
-def _bt_detect_obs(bars, atrs):
+def _bt_detect_obs(bars, atrs, min_impulse=None, sl_buf=None, entry_offset=None):
+    mi  = min_impulse  if min_impulse  is not None else BT_MIN_IMPULSE
+    sb  = sl_buf       if sl_buf       is not None else BT_SL_BUF_ATR
+    eo  = entry_offset if entry_offset is not None else BT_ENTRY_OFFSET
     obs = []
     for i in range(2, len(bars)):
         atr = atrs[i]
@@ -2126,25 +2135,25 @@ def _bt_detect_obs(bars, atrs):
         rng1  = b1["high"] - b1["low"]
         if rng1 > 0 and (body1 / rng1 * 100) < 15:
             continue
-        if body1 > 0 and (body0 / body1) < BT_MIN_IMPULSE:
+        if body1 > 0 and (body0 / body1) < mi:
             continue
         ob_top = max(b1["open"], b1["close"])
         ob_bot = min(b1["open"], b1["close"])
-        if (ob_top - ob_bot) < atr * BT_MIN_OB_SIZE:
+        if (ob_top - ob_bot) < atr * BT_MIN_OB_SIZE:  # min OB size still from env
             continue
         ob_mid  = (ob_top + ob_bot) / 2
         is_bull = b1["close"] < b1["open"] and b0["close"] > b0["open"] and b0["close"] > b1["high"]
         is_bear = b1["close"] > b1["open"] and b0["close"] < b0["open"] and b0["close"] < b1["low"]
         if is_bull:
-            sl    = min(b1["low"], b0["low"]) - atr * BT_SL_BUF_ATR
-            entry = ob_top - BT_ENTRY_OFFSET * 2.0 * (ob_top - ob_mid)
+            sl    = min(b1["low"], b0["low"]) - atr * sb
+            entry = ob_top - eo * 2.0 * (ob_top - ob_mid)
             risk  = abs(entry - sl)
             if risk <= 0: continue
             obs.append({"bar":i-1,"type":1,"top":ob_top,"bot":ob_bot,
                         "sl":sl,"entry":entry,"tp":entry+risk*BT_RR_RATIO})
         elif is_bear:
-            sl    = max(b1["high"], b0["high"]) + atr * BT_SL_BUF_ATR
-            entry = ob_bot + BT_ENTRY_OFFSET * 2.0 * (ob_mid - ob_bot)
+            sl    = max(b1["high"], b0["high"]) + atr * sb
+            entry = ob_bot + eo * 2.0 * (ob_mid - ob_bot)
             risk  = abs(entry - sl)
             if risk <= 0: continue
             obs.append({"bar":i-1,"type":2,"top":ob_top,"bot":ob_bot,
@@ -2152,7 +2161,8 @@ def _bt_detect_obs(bars, atrs):
     return obs
 
 
-def _bt_simulate(bars, obs, cancel_after=20):
+def _bt_simulate(bars, obs, rr=None, cancel_after=20):
+    rr_ratio = rr if rr is not None else BT_RR_RATIO
     results  = []
     active   = [{**ob, "created": ob["bar"], "done": False} for ob in obs]
     for i in range(len(bars)):
@@ -2162,6 +2172,9 @@ def _bt_simulate(bars, obs, cancel_after=20):
             if i - ob["created"] > cancel_after:
                 ob["done"] = True
                 continue
+            # Calculate TP now that we know rr_ratio
+            if ob["tp"] is None:
+                ob["tp"] = ob["entry"] + ob["risk"] * rr_ratio if ob["type"] == 1 else ob["entry"] - ob["risk"] * rr_ratio
             hit = b["low"] <= ob["entry"] <= b["high"]
             if hit:
                 ob["done"] = True
@@ -2211,7 +2224,49 @@ def _bt_stats(results):
             "profit_factor":pf,"expectancy":ev,"max_dd":round(dd,2)}
 
 
-def _bt_init_table():
+def _get_indicator_settings():
+    """
+    Read the most recent OB trade settings from journal notes/payload.
+    Falls back to env var defaults if no trades found.
+    """
+    try:
+        conn = get_db()
+        import psycopg2.extras
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT notes FROM trades
+                WHERE source LIKE 'ob%' AND notes IS NOT NULL
+                ORDER BY opened_at DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+        conn.close()
+        if row and row.get("notes"):
+            notes = row["notes"]
+            # Parse settings from notes if stored as JSON
+            if "rr:" in notes:
+                import re
+                rr  = re.search(r'"rr":([\d.]+)',          notes)
+                sl  = re.search(r'"slBuf":([\d.]+)',        notes)
+                imp = re.search(r'"minImpulse":([\d.]+)',   notes)
+                off = re.search(r'"entryOffset":([\d.]+)',  notes)
+                return {
+                    "rr":           float(rr.group(1))  if rr  else BT_RR_RATIO,
+                    "slBuf":        float(sl.group(1))  if sl  else BT_SL_BUF_ATR,
+                    "minImpulse":   float(imp.group(1)) if imp else BT_MIN_IMPULSE,
+                    "entryOffset":  float(off.group(1)) if off else BT_ENTRY_OFFSET,
+                }
+    except Exception as e:
+        log.error(f"Settings sync error: {e}")
+    # Fall back to env var defaults
+    return {
+        "rr":          BT_RR_RATIO,
+        "slBuf":       BT_SL_BUF_ATR,
+        "minImpulse":  BT_MIN_IMPULSE,
+        "entryOffset": BT_ENTRY_OFFSET,
+    }
+
+
+
     """Create backtest_results table if not exists."""
     try:
         conn = get_db()
@@ -2304,6 +2359,14 @@ def run_backtest_job():
     _bt_running = True
     _bt_status  = "Running..."
     log.info(f"Backtest started — {len(BT_SYMBOLS)} symbols × {len(BT_TIMEFRAMES)} TFs")
+
+    # Sync settings from latest indicator trade
+    synced = _get_indicator_settings()
+    rr          = synced["rr"]
+    sl_buf      = synced["slBuf"]
+    min_impulse = synced["minImpulse"]
+    entry_offset= synced["entryOffset"]
+    log.info(f"Using settings: RR={rr} SL_buf={sl_buf} impulse={min_impulse} offset={entry_offset}")
     saved = 0
     total_combos = len(BT_SYMBOLS) * len(BT_TIMEFRAMES)
     done  = 0
@@ -2322,8 +2385,8 @@ def run_backtest_job():
                         log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: only {len(bars)} bars — skipping")
                         continue
                     atrs    = _bt_calc_atr(bars, BT_ATR_LEN)
-                    obs     = _bt_detect_obs(bars, atrs)
-                    results = _bt_simulate(bars, obs)
+                    obs     = _bt_detect_obs(bars, atrs, min_impulse, sl_buf, entry_offset)
+                    results = _bt_simulate(bars, obs, rr)
                     stats   = _bt_stats(results)
                     log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: {len(bars)} bars → {len(obs)} OBs → {len(results)} trades → {'✅ saved' if stats else f'❌ need {BT_MIN_TRADES} (got {len(results)})'}")
                     if stats:
