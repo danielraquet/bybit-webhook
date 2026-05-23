@@ -1430,7 +1430,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
     <div>
@@ -1442,7 +1443,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
   </div>
@@ -1460,7 +1462,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
     <div>
@@ -1472,7 +1475,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
   </div>
@@ -1490,7 +1494,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#4caf50"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
     <div>
@@ -1502,7 +1507,8 @@ ANALYSIS_HTML = """
         <td class="green">{{ r.wins }}</td><td class="red">{{ r.losses }}</td>
         <td>{{ r.wr }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:#ef5350"></span></span></td>
         <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td></tr>
-        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>{% endfor %}
+        {% else %}<tr><td colspan="6" style="color:var(--dim)">Need 2+ trades per combo</td></tr>
+        {% endfor %}
       </table>
     </div>
   </div>
@@ -1946,7 +1952,7 @@ function runBacktest(btn) {
   </table>
 </div>
 
-{% if bt_available and bt_analysis %}
+{% if bt_available and bt_analysis and bt_analysis.tf_rows %}
 <div class="section" style="margin-bottom:16px">
   <div class="section-title">📈 Timeframe × Indicator Analysis</div>
   <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Aggregated across all symbols — which TF and indicator combination performs best overall</p>
@@ -2318,51 +2324,74 @@ def _bt_detect_obs(bars, atrs, min_impulse=None, sl_buf=None, entry_offset=None)
             risk  = abs(entry - sl)
             if risk <= 0: continue
             obs.append({"bar":i-1,"type":1,"top":ob_top,"bot":ob_bot,
-                        "sl":sl,"entry":entry,"tp":entry+risk*BT_RR_RATIO})
+                        "sl":sl,"entry":entry,"tp":None,"risk":risk})
         elif is_bear:
             sl    = max(b1["high"], b0["high"]) + atr * sb
             entry = ob_bot + eo * 2.0 * (ob_mid - ob_bot)
             risk  = abs(entry - sl)
             if risk <= 0: continue
             obs.append({"bar":i-1,"type":2,"top":ob_top,"bot":ob_bot,
-                        "sl":sl,"entry":entry,"tp":entry-risk*BT_RR_RATIO})
+                        "sl":sl,"entry":entry,"tp":None,"risk":risk})
     return obs
 
 
 def _bt_simulate(bars, obs, rr=None, cancel_after=20):
     rr_ratio = rr if rr is not None else BT_RR_RATIO
     results  = []
-    active   = [{**ob, "created": ob["bar"], "done": False} for ob in obs]
+    # Start active from bar AFTER detection (ob["bar"]+1) — same as indicator
+    active   = [{**ob, "created": ob["bar"] + 1, "done": False} for ob in obs]
+
     for i in range(len(bars)):
         b = bars[i]
         for ob in active:
             if ob["done"]: continue
+            # Only start checking entry from bar after detection
+            if i < ob["created"]: continue
             if i - ob["created"] > cancel_after:
                 ob["done"] = True
                 continue
-            # Calculate TP now that we know rr_ratio
-            if ob["tp"] is None:
-                ob["tp"] = ob["entry"] + ob["risk"] * rr_ratio if ob["type"] == 1 else ob["entry"] - ob["risk"] * rr_ratio
-            hit = b["low"] <= ob["entry"] <= b["high"]
-            if hit:
-                ob["done"] = True
-                for j in range(i+1, min(i+200, len(bars))):
-                    bj = bars[j]
-                    if ob["type"] == 1:
-                        if bj["high"] >= ob["tp"]:
-                            results.append({"outcome":"tp","pnl_r": BT_RR_RATIO}); break
-                        if bj["low"]  <= ob["sl"]:
-                            results.append({"outcome":"sl","pnl_r":-1.0});         break
-                    else:
-                        if bj["low"]  <= ob["tp"]:
-                            results.append({"outcome":"tp","pnl_r": BT_RR_RATIO}); break
-                        if bj["high"] >= ob["sl"]:
-                            results.append({"outcome":"sl","pnl_r":-1.0});         break
+
+            # Calculate TP using rr_ratio
+            if ob.get("tp") is None or ob.get("risk"):
+                risk = ob.get("risk", abs(ob["entry"] - ob["sl"]))
+                ob["tp"] = ob["entry"] + risk * rr_ratio if ob["type"] == 1 else ob["entry"] - risk * rr_ratio
+
+            # Entry: bull needs price to come DOWN to entry (open > entry, low <= entry)
+            #        bear needs price to come UP to entry (open < entry, high >= entry)
+            if ob["type"] == 1:
+                entry_hit = b["open"] > ob["entry"] and b["low"] <= ob["entry"]
             else:
-                sl_breach = (ob["type"]==1 and b["close"]<ob["bot"]) or \
-                            (ob["type"]==2 and b["close"]>ob["top"])
+                entry_hit = b["open"] < ob["entry"] and b["high"] >= ob["entry"]
+
+            if entry_hit:
+                ob["done"] = True
+                # Check resolution from NEXT bar (limit order fills at close of entry bar)
+                for j in range(i + 1, min(i + 200, len(bars))):
+                    bj = bars[j]
+                    tp_hit = bj["high"] >= ob["tp"] if ob["type"] == 1 else bj["low"] <= ob["tp"]
+                    sl_hit = bj["low"]  <= ob["sl"] if ob["type"] == 1 else bj["high"] >= ob["sl"]
+
+                    if tp_hit and sl_hit:
+                        # Tiebreaker: use open proximity
+                        tp_dist = abs(bj["open"] - ob["tp"])
+                        sl_dist = abs(bj["open"] - ob["sl"])
+                        outcome = "tp" if tp_dist < sl_dist else "sl"
+                    elif tp_hit:
+                        outcome = "tp"
+                    elif sl_hit:
+                        outcome = "sl"
+                    else:
+                        continue
+
+                    results.append({"outcome": outcome, "pnl_r": rr_ratio if outcome == "tp" else -1.0})
+                    break
+            else:
+                # Invalidate if price closes beyond SL side of OB
+                sl_breach = (ob["type"] == 1 and b["close"] < ob["bot"]) or \
+                            (ob["type"] == 2 and b["close"] > ob["top"])
                 if sl_breach:
                     ob["done"] = True
+
     return results
 
 
