@@ -1881,7 +1881,6 @@ function runBacktest(btn) {
 
 <div class="section">
   <div class="section-title">✅ Run these alerts</div>
-  {% if active %}
   {% for r in active %}
   <div class="rec-row">
     <div class="rec-num active">{{ loop.index }}</div>
@@ -1899,15 +1898,13 @@ function runBacktest(btn) {
       <div style="font-size:10px;color:var(--dim)">{{ r.total }} trades</div>
     </div>
   </div>
-  {% endfor %}
   {% else %}
-  <p class="empty">No combinations with enough data yet — need {{ min_trades }}+ trades per combo.</p>
-  {% endif %}
+    <p class="empty">No combinations with enough data yet — need {{ min_trades }}+ trades per combo.</p>
+  {% endfor %}
 </div>
 
 <div class="section">
   <div class="section-title">⏸️ Pause or review these</div>
-  {% if pause %}
   {% for r in pause %}
   <div class="rec-row">
     <div class="rec-num pause">{{ loop.index }}</div>
@@ -1924,10 +1921,9 @@ function runBacktest(btn) {
       <div style="font-size:10px;color:var(--dim)">{{ r.total }} trades</div>
     </div>
   </div>
-  {% endfor %}
   {% else %}
-  <p class="empty">No underperforming combinations found.</p>
-  {% endif %}
+    <p class="empty">No underperforming combinations found.</p>
+  {% endfor %}
 </div>
 
 <div class="section">
@@ -1976,8 +1972,8 @@ function runBacktest(btn) {
             {% if bt_analysis.best_src_per_tf[r.key] %}
             <span class="tag tag-green">{{ bt_analysis.best_src_per_tf[r.key].src.upper() }}</span>
             <span style="font-size:10px;color:var(--dim)">{{ bt_analysis.best_src_per_tf[r.key].wr }}%</span>
-            {% endif %}
           </td>
+            {% endif %}
         </tr>
         {% endfor %}
       </table>
@@ -1999,9 +1995,9 @@ function runBacktest(btn) {
             {% if bt_analysis.best_tf_per_src[r.key] %}
             <span class="tag tag-blue">{{ bt_analysis.best_tf_per_src[r.key].tf }}</span>
             <span style="font-size:10px;color:var(--dim)">{{ bt_analysis.best_tf_per_src[r.key].wr }}%</span>
-            {% endif %}
           </td>
         </tr>
+            {% endif %}
         {% endfor %}
       </table>
     </div>
@@ -2037,6 +2033,9 @@ function runBacktest(btn) {
   </div>
 </div>
 {% endif %}
+{% if bt_available %}
+<div class="section">
+  <div class="section-title">🤖 Backtest Results — OB Strategy ({{ bt_updated }})</div>
   <p style="font-size:11px;color:var(--dim);margin-bottom:10px">{{ bt_rows|length }} combinations · Last 90 days · Simulated entries at OB detection</p>
   <table>
     <tr><th>Symbol</th><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PF</th><th>Expectancy</th><th>Max DD</th></tr>
@@ -2057,7 +2056,7 @@ function runBacktest(btn) {
 {% else %}
 <div class="section">
   <div class="section-title">🤖 Backtest Results</div>
-  <p style="font-size:12px;color:var(--dim)">No backtest data yet. Trigger the Railway cron job or run <code>python backtest.py</code> locally to generate results.</p>
+  <p style="font-size:12px;color:var(--dim)">No backtest data yet. Click ▶ Run Backtest to generate results.</p>
 </div>
 {% endif %}
 
