@@ -235,6 +235,7 @@ JOURNAL_HTML = """
   <div style="display:flex;align-items:center;gap:16px;">
     <a href="/analysis" style="color:var(--blue);font-size:12px;text-decoration:none;">📊 Analysis</a>
     <a href="/recommendations" style="color:var(--blue);font-size:12px;text-decoration:none;">🎯 Recommendations</a>
+    <a href="/watchlist" style="color:var(--blue);font-size:12px;text-decoration:none;">📋 Watchlist</a>
     <span id="last-update">updated just now</span>
     <button class="refresh" onclick="location.reload()">↻ refresh</button>
   </div>
@@ -1945,9 +1946,91 @@ function runBacktest(btn) {
   </table>
 </div>
 
-{% if bt_available %}
-<div class="section">
-  <div class="section-title">🤖 Backtest Results — OB Strategy ({{ bt_updated }})</div>
+{% if bt_available and bt_analysis %}
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">📈 Timeframe × Indicator Analysis</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:12px">Aggregated across all symbols — which TF and indicator combination performs best overall</p>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+
+    <div>
+      <div style="font-size:11px;font-weight:500;margin-bottom:8px;color:var(--dim)">TIMEFRAME RANKING</div>
+      <table>
+        <tr><th>#</th><th>TF</th><th>WR%</th><th>Trades</th><th>Best Indicator</th></tr>
+        {% for r in bt_analysis.tf_rows %}
+        <tr>
+          <td style="color:var(--dim)">{{ loop.index }}</td>
+          <td><span class="tag tag-blue">{{ r.key }}</span></td>
+          <td>
+            <span style="color:{{ 'var(--green)' if r.wr >= 50 else 'var(--amber)' if r.wr >= 35 else 'var(--red)' }};font-weight:500">{{ r.wr }}%</span>
+            <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+          </td>
+          <td style="color:var(--dim)">{{ r.total }}</td>
+          <td>
+            {% if bt_analysis.best_src_per_tf[r.key] %}
+            <span class="tag tag-green">{{ bt_analysis.best_src_per_tf[r.key].src.upper() }}</span>
+            <span style="font-size:10px;color:var(--dim)">{{ bt_analysis.best_src_per_tf[r.key].wr }}%</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div>
+      <div style="font-size:11px;font-weight:500;margin-bottom:8px;color:var(--dim)">INDICATOR RANKING</div>
+      <table>
+        <tr><th>Source</th><th>WR%</th><th>Trades</th><th>Best TF</th></tr>
+        {% for r in bt_analysis.src_rows %}
+        <tr>
+          <td><span class="tag {{ 'tag-green' if r.key == 'ob' else 'tag-amber' if r.key == 'fib' else 'tag-purple' }}">{{ r.key.upper() }}</span></td>
+          <td>
+            <span style="color:{{ 'var(--green)' if r.wr >= 50 else 'var(--amber)' if r.wr >= 35 else 'var(--red)' }};font-weight:500">{{ r.wr }}%</span>
+            <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+          </td>
+          <td style="color:var(--dim)">{{ r.total }}</td>
+          <td>
+            {% if bt_analysis.best_tf_per_src[r.key] %}
+            <span class="tag tag-blue">{{ bt_analysis.best_tf_per_src[r.key].tf }}</span>
+            <span style="font-size:10px;color:var(--dim)">{{ bt_analysis.best_tf_per_src[r.key].wr }}%</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div>
+      <div style="font-size:11px;font-weight:500;margin-bottom:8px;color:var(--dim)">RECOMMENDATION</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        {% for src, v in bt_analysis.best_tf_per_src.items() %}
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+          <div style="font-size:12px;font-weight:500;margin-bottom:4px">
+            <span class="tag {{ 'tag-green' if src == 'ob' else 'tag-amber' if src == 'fib' else 'tag-purple' }}">{{ src.upper() }}</span>
+            →
+            <span class="tag tag-blue">{{ v.tf }}</span>
+          </div>
+          <div style="font-size:11px;color:var(--dim)">Best timeframe for {{ src.upper() }} indicator</div>
+          <div style="font-size:13px;font-weight:500;color:{{ 'var(--green)' if v.wr >= 50 else 'var(--amber)' }}">{{ v.wr }}% WR · {{ v.total }} trades</div>
+        </div>
+        {% endfor %}
+        {% for tf, v in bt_analysis.best_src_per_tf.items() %}
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px">
+          <div style="font-size:12px;font-weight:500;margin-bottom:4px">
+            <span class="tag tag-blue">{{ tf }}</span>
+            →
+            <span class="tag {{ 'tag-green' if v.src == 'ob' else 'tag-amber' }}">{{ v.src.upper() }}</span>
+          </div>
+          <div style="font-size:11px;color:var(--dim)">Best indicator for {{ tf }} timeframe</div>
+          <div style="font-size:13px;font-weight:500;color:{{ 'var(--green)' if v.wr >= 50 else 'var(--amber)' }}">{{ v.wr }}% WR · {{ v.total }} trades</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endif %}
   <p style="font-size:11px;color:var(--dim);margin-bottom:10px">{{ bt_rows|length }} combinations · Last 90 days · Simulated entries at OB detection</p>
   <table>
     <tr><th>Symbol</th><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PF</th><th>Expectancy</th><th>Max DD</th></tr>
@@ -2055,9 +2138,94 @@ def _build_recommendations(trades, min_trades=3):
         "updated":    _dt.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
     }
 
+def _build_bt_recommendations(bt_rows):
+    """
+    Analyse backtest results to find:
+    1. Best TF per indicator (source)
+    2. Best indicator per TF
+    3. Overall TF ranking
+    4. Overall indicator ranking
+    """
+    if not bt_rows:
+        return None
+
+    from collections import defaultdict
+
+    # Group by TF
+    by_tf = defaultdict(lambda: {"wins":0,"losses":0,"total":0,"pnl":0.0,"combos":0})
+    # Group by source (indicator)
+    by_src = defaultdict(lambda: {"wins":0,"losses":0,"total":0,"pnl":0.0,"combos":0})
+    # Group by TF+source
+    by_tf_src = defaultdict(lambda: {"wins":0,"losses":0,"total":0,"pnl":0.0,"combos":0})
+
+    for r in bt_rows:
+        tf  = r["timeframe"]
+        src = r["source"]
+        w, l, t = r["wins"], r["losses"], r["total"]
+        pnl = r.get("total_pnl", 0) or 0
+
+        by_tf[tf]["wins"]   += w
+        by_tf[tf]["losses"] += l
+        by_tf[tf]["total"]  += t
+        by_tf[tf]["pnl"]    += pnl
+        by_tf[tf]["combos"] += 1
+
+        by_src[src]["wins"]   += w
+        by_src[src]["losses"] += l
+        by_src[src]["total"]  += t
+        by_src[src]["pnl"]    += pnl
+        by_src[src]["combos"] += 1
+
+        by_tf_src[(tf,src)]["wins"]   += w
+        by_tf_src[(tf,src)]["losses"] += l
+        by_tf_src[(tf,src)]["total"]  += t
+        by_tf_src[(tf,src)]["pnl"]    += pnl
+        by_tf_src[(tf,src)]["combos"] += 1
+
+    def make_row(key, v):
+        t = v["total"]
+        wr = round(v["wins"] / t * 100, 1) if t > 0 else 0
+        ev = round((wr/100 * 2.0) - ((1-wr/100) * 1.0), 3)  # approx expectancy
+        return {"key": key, "wins": v["wins"], "losses": v["losses"],
+                "total": t, "wr": wr, "pnl": round(v["pnl"],2),
+                "combos": v["combos"], "ev": ev}
+
+    tf_rows  = sorted([make_row(k,v) for k,v in by_tf.items()],
+                      key=lambda x: (-x["wr"], -x["total"]))
+    src_rows = sorted([make_row(k,v) for k,v in by_src.items()],
+                      key=lambda x: (-x["wr"], -x["total"]))
+
+    # Best TF for each source
+    best_tf_per_src = {}
+    for (tf, src), v in by_tf_src.items():
+        t  = v["total"]
+        wr = round(v["wins"] / t * 100, 1) if t > 0 else 0
+        if src not in best_tf_per_src or wr > best_tf_per_src[src]["wr"]:
+            best_tf_per_src[src] = {"tf": tf, "wr": wr, "total": t,
+                                     "wins": v["wins"], "losses": v["losses"]}
+
+    # Best source for each TF
+    best_src_per_tf = {}
+    for (tf, src), v in by_tf_src.items():
+        t  = v["total"]
+        wr = round(v["wins"] / t * 100, 1) if t > 0 else 0
+        if tf not in best_src_per_tf or wr > best_src_per_tf[tf]["wr"]:
+            best_src_per_tf[tf] = {"src": src, "wr": wr, "total": t,
+                                    "wins": v["wins"], "losses": v["losses"]}
+
+    # TF order for display
+    tf_order = ["M3","M5","M15","M30","H1","H4","H12","D1"]
+    tf_rows.sort(key=lambda x: tf_order.index(x["key"]) if x["key"] in tf_order else 99)
+
+    return {
+        "tf_rows":         tf_rows,
+        "src_rows":        src_rows,
+        "best_tf_per_src": best_tf_per_src,
+        "best_src_per_tf": best_src_per_tf,
+    }
 
 
-# ─── BACKTEST ENGINE ──────────────────────────────────────────────────────────
+
 BT_RR_RATIO      = float(os.getenv("BT_RR_RATIO",    "2.0"))
 BT_SL_BUF_ATR    = float(os.getenv("BT_SL_BUF_ATR",  "0.5"))
 BT_ATR_LEN       = int(os.getenv("BT_ATR_LEN",        "14"))
@@ -2541,8 +2709,202 @@ def backtest_status():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/recommendations")
-def recommendations():
+WATCHLIST_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Watchlist Sync</title>
+<style>
+  :root { --bg:#0f0f0f;--surface:#1a1a1a;--border:#2a2a2a;--text:#e8e8e8;--dim:#888;--green:#4caf50;--red:#ef5350;--blue:#42a5f5;--amber:#ffa726;--purple:#ce93d8; }
+  * { box-sizing:border-box;margin:0;padding:0; }
+  body { background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:24px; }
+  h1 { font-size:18px;font-weight:500;margin-bottom:4px; }
+  .subtitle { color:var(--dim);font-size:12px;margin-bottom:24px; }
+  .nav { display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap; }
+  .nav a { color:var(--dim);text-decoration:none;font-size:12px; }
+  .nav a:hover { color:var(--text); }
+  .section { background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px; }
+  .section-title { font-size:13px;font-weight:500;margin-bottom:12px;color:var(--dim);text-transform:uppercase;letter-spacing:0.05em; }
+  .grid { display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px; }
+  .asset-card { background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;align-items:center;gap:10px; }
+  .asset-card.has-data { border-color:rgba(76,175,80,0.3); }
+  .asset-card.no-data  { border-color:rgba(239,83,80,0.2);opacity:0.7; }
+  .dot { width:8px;height:8px;border-radius:50%;flex-shrink:0; }
+  .dot-green  { background:var(--green); }
+  .dot-red    { background:var(--red); }
+  .dot-amber  { background:var(--amber); }
+  .asset-name { font-weight:500;font-size:13px;flex:1; }
+  .asset-wr   { font-size:12px;font-weight:500; }
+  .asset-meta { font-size:10px;color:var(--dim); }
+  .tag { display:inline-block;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:500; }
+  .tag-green  { background:rgba(76,175,80,0.15);color:var(--green); }
+  .tag-red    { background:rgba(239,83,80,0.15);color:var(--red); }
+  .tag-amber  { background:rgba(255,167,38,0.15);color:var(--amber); }
+  .tag-blue   { background:rgba(66,165,245,0.15);color:var(--blue); }
+  .legend { display:flex;gap:16px;margin-bottom:12px;font-size:11px;color:var(--dim); }
+  .legend-item { display:flex;align-items:center;gap:5px; }
+  .stats-row { display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px; }
+  .stat { background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px; }
+  .stat-label { font-size:11px;color:var(--dim);margin-bottom:2px; }
+  .stat-value { font-size:18px;font-weight:500; }
+  .copy-box { background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-family:monospace;font-size:11px;color:var(--dim);word-break:break-all;margin-top:10px; }
+  button.copy-btn { background:rgba(66,165,245,0.15);color:var(--blue);border:1px solid rgba(66,165,245,0.3);border-radius:4px;padding:4px 10px;font-size:11px;cursor:pointer;margin-top:6px; }
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/journal">← Journal</a>
+  <a href="/analysis">📊 Analysis</a>
+  <a href="/recommendations">🎯 Recommendations</a>
+  <a href="/watchlist">🔄 Refresh</a>
+</div>
+<h1>// Watchlist Sync</h1>
+<p class="subtitle">{{ total_symbols }} symbols in backtest · {{ has_data }} have results · Last backtest: {{ bt_updated or 'Never' }}</p>
+
+<div class="stats-row">
+  <div class="stat"><div class="stat-label">Total symbols</div><div class="stat-value">{{ total_symbols }}</div></div>
+  <div class="stat"><div class="stat-label">Has backtest data</div><div class="stat-value" style="color:var(--green)">{{ has_data }}</div></div>
+  <div class="stat"><div class="stat-label">Recommended (WR≥45%)</div><div class="stat-value" style="color:var(--green)">{{ recommended }}</div></div>
+  <div class="stat"><div class="stat-label">Avoid (WR<35%)</div><div class="stat-value" style="color:var(--red)">{{ avoid }}</div></div>
+</div>
+
+<div class="section">
+  <div class="section-title">Asset Status — best timeframe per symbol</div>
+  <div class="legend">
+    <div class="legend-item"><div class="dot dot-green"></div>WR ≥ 45% — run alerts</div>
+    <div class="legend-item"><div class="dot dot-amber"></div>WR 35–44% — use with caution</div>
+    <div class="legend-item"><div class="dot dot-red"></div>WR < 35% — avoid or pause</div>
+  </div>
+  <div class="grid">
+    {% for a in assets %}
+    <div class="asset-card {{ 'has-data' if a.has_data else 'no-data' }}">
+      <div class="dot {{ 'dot-green' if a.wr >= 45 else 'dot-amber' if a.wr >= 35 else 'dot-red' }}"></div>
+      <div style="flex:1">
+        <div class="asset-name">{{ a.symbol.replace('USDT','') }}<span style="color:var(--dim);font-size:10px">USDT.P</span></div>
+        {% if a.has_data %}
+        <div class="asset-meta">
+          Best: <span class="tag tag-blue">{{ a.best_tf }}</span>
+          <span style="color:{{ 'var(--green)' if a.wr >= 45 else 'var(--amber)' if a.wr >= 35 else 'var(--red)' }}">{{ a.wr }}%</span>
+          · {{ a.total }} trades
+        </div>
+        {% else %}
+        <div class="asset-meta" style="color:var(--red)">No backtest data</div>
+        {% endif %}
+      </div>
+      {% if a.has_data %}
+      <div class="asset-wr" style="color:{{ 'var(--green)' if a.wr >= 45 else 'var(--amber)' if a.wr >= 35 else 'var(--red)' }}">{{ a.wr }}%</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">✅ Suggested alert setup — by timeframe</div>
+  {% for tf, syms in by_tf_recommended.items() %}
+  {% if syms %}
+  <div style="margin-bottom:14px">
+    <div style="font-size:12px;font-weight:500;margin-bottom:6px">
+      <span class="tag tag-blue">{{ tf }}</span>
+      <span style="color:var(--dim);font-size:11px;margin-left:6px">{{ syms|length }} asset{{ 's' if syms|length != 1 else '' }}</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">
+      {% for s in syms %}
+      <span style="background:rgba(76,175,80,0.1);border:1px solid rgba(76,175,80,0.3);border-radius:4px;padding:3px 8px;font-size:12px">
+        {{ s.symbol.replace('USDT','') }}
+        <span style="color:var(--green);font-size:10px">{{ s.wr }}%</span>
+      </span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+
+<div class="section">
+  <div class="section-title">Railway BT_SYMBOLS env var</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Copy this into your Railway BT_SYMBOLS environment variable to keep backtest in sync:</p>
+  <div class="copy-box" id="bt-symbols">{{ bt_symbols_str }}</div>
+  <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('bt-symbols').innerText);this.innerText='✅ Copied';setTimeout(()=>this.innerText='📋 Copy',2000)">📋 Copy</button>
+</div>
+
+</body>
+</html>
+"""
+
+
+@app.route("/watchlist")
+def watchlist_sync():
+    """Watchlist sync page — shows backtest status per symbol."""
+    try:
+        bt_rows    = _get_backtest_results()
+        bt_updated = bt_rows[0]["run_at"] if bt_rows else None
+
+        # Best WR per symbol (across all TFs)
+        sym_best = {}
+        for r in bt_rows:
+            sym = r["symbol"]
+            if sym not in sym_best or r["win_rate"] > sym_best[sym]["wr"]:
+                sym_best[sym] = {
+                    "wr":      r["win_rate"],
+                    "best_tf": r["timeframe"],
+                    "total":   r["total"],
+                }
+
+        # Build asset cards
+        tf_order = ["M3","M5","M15","M30","H1","H4"]
+        assets = []
+        for sym in BT_SYMBOLS:
+            sym = sym.strip()
+            if sym in sym_best:
+                d = sym_best[sym]
+                assets.append({
+                    "symbol":   sym,
+                    "has_data": True,
+                    "wr":       d["wr"],
+                    "best_tf":  d["best_tf"],
+                    "total":    d["total"],
+                })
+            else:
+                assets.append({
+                    "symbol":   sym,
+                    "has_data": False,
+                    "wr":       0,
+                    "best_tf":  "—",
+                    "total":    0,
+                })
+
+        # Sort: recommended first, then caution, then avoid
+        assets.sort(key=lambda x: (-x["wr"]))
+
+        # Group recommended assets by their best TF
+        by_tf_recommended = {tf: [] for tf in tf_order}
+        for a in assets:
+            if a["has_data"] and a["wr"] >= 45 and a["best_tf"] in by_tf_recommended:
+                by_tf_recommended[a["best_tf"]].append(a)
+
+        recommended = sum(1 for a in assets if a["wr"] >= 45)
+        avoid       = sum(1 for a in assets if a["has_data"] and a["wr"] < 35)
+
+        return render_template_string(WATCHLIST_HTML,
+            assets=assets,
+            total_symbols=len(assets),
+            has_data=sum(1 for a in assets if a["has_data"]),
+            recommended=recommended,
+            avoid=avoid,
+            by_tf_recommended=by_tf_recommended,
+            bt_updated=bt_updated,
+            bt_symbols_str=",".join(a["symbol"] for a in assets),
+        )
+    except Exception as e:
+        import traceback
+        log.error(f"Watchlist error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
     """Daily alert recommendation page."""
     try:
         trades  = get_all_trades(500)
@@ -2552,6 +2914,7 @@ def recommendations():
         data["bt_available"] = len(bt_rows) > 0
         data["bt_updated"]   = bt_rows[0]["run_at"] if bt_rows else None
         data["bt_status"]    = _bt_status
+        data["bt_analysis"]  = _build_bt_recommendations(bt_rows)
         return render_template_string(RECOMMENDATIONS_HTML, **data)
     except Exception as e:
         import traceback
