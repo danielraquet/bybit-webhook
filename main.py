@@ -2784,18 +2784,18 @@ WATCHLIST_HTML = """
       <div style="flex:1">
         <div class="asset-name">{{ a.symbol.replace('USDT','') }}<span style="color:var(--dim);font-size:10px">USDT.P</span></div>
         {% if a.has_data %}
-        <div class="asset-meta">
-          Best: <span class="tag tag-blue">{{ a.best_tf }}</span>
-          <span style="color:{{ 'var(--green)' if a.wr >= 45 else 'var(--amber)' if a.wr >= 35 else 'var(--red)' }}">{{ a.wr }}%</span>
-          · {{ a.total }} trades
+        <div class="asset-meta" style="margin-top:3px;display:flex;flex-wrap:wrap;gap:3px">
+          {% for t in a.all_tfs %}
+          <span style="display:inline-flex;align-items:center;gap:2px;background:{{ 'rgba(76,175,80,0.12)' if t.wr >= 45 else 'rgba(255,167,38,0.12)' if t.wr >= 35 else 'rgba(239,83,80,0.1)' }};border:1px solid {{ 'rgba(76,175,80,0.3)' if t.wr >= 45 else 'rgba(255,167,38,0.3)' if t.wr >= 35 else 'rgba(239,83,80,0.2)' }};border-radius:3px;padding:1px 5px;font-size:10px">
+            {{ t.tf }}
+            <span style="color:{{ 'var(--green)' if t.wr >= 45 else 'var(--amber)' if t.wr >= 35 else 'var(--red)' }}">{{ t.wr }}%</span>
+          </span>
+          {% endfor %}
         </div>
         {% else %}
         <div class="asset-meta" style="color:var(--red)">No backtest data</div>
         {% endif %}
       </div>
-      {% if a.has_data %}
-      <div class="asset-wr" style="color:{{ 'var(--green)' if a.wr >= 45 else 'var(--amber)' if a.wr >= 35 else 'var(--red)' }}">{{ a.wr }}%</div>
-      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -2842,48 +2842,56 @@ def watchlist_sync():
         bt_rows    = _get_backtest_results()
         bt_updated = bt_rows[0]["run_at"] if bt_rows else None
 
-        # Best WR per symbol (across all TFs)
-        sym_best = {}
+        # All TFs per symbol
+        sym_tfs = {}
         for r in bt_rows:
             sym = r["symbol"]
-            if sym not in sym_best or r["win_rate"] > sym_best[sym]["wr"]:
-                sym_best[sym] = {
-                    "wr":      r["win_rate"],
-                    "best_tf": r["timeframe"],
-                    "total":   r["total"],
-                }
+            if sym not in sym_tfs:
+                sym_tfs[sym] = []
+            sym_tfs[sym].append({
+                "tf":    r["timeframe"],
+                "wr":    r["win_rate"],
+                "total": r["total"],
+                "pf":    r.get("profit_factor", 0) or 0,
+            })
+        # Sort each symbol's TFs by WR desc
+        tf_order_list = ["M3","M5","M15","M30","H1","H4"]
+        for sym in sym_tfs:
+            sym_tfs[sym].sort(key=lambda x: -x["wr"])
 
-        # Build asset cards
-        tf_order = ["M3","M5","M15","M30","H1","H4"]
+        # Build asset cards — best WR across all TFs
         assets = []
         for sym in BT_SYMBOLS:
             sym = sym.strip()
-            if sym in sym_best:
-                d = sym_best[sym]
-                assets.append({
-                    "symbol":   sym,
-                    "has_data": True,
-                    "wr":       d["wr"],
-                    "best_tf":  d["best_tf"],
-                    "total":    d["total"],
-                })
-            else:
-                assets.append({
-                    "symbol":   sym,
-                    "has_data": False,
-                    "wr":       0,
-                    "best_tf":  "—",
-                    "total":    0,
-                })
+            tfs = sym_tfs.get(sym, [])
+            good_tfs = [t for t in tfs if t["wr"] >= 35]  # show amber+ TFs
+            best_wr  = tfs[0]["wr"] if tfs else 0
+            assets.append({
+                "symbol":   sym,
+                "has_data": len(tfs) > 0,
+                "wr":       best_wr,
+                "best_tf":  tfs[0]["tf"] if tfs else "—",
+                "total":    sum(t["total"] for t in tfs),
+                "all_tfs":  tfs,
+                "good_tfs": good_tfs,
+            })
 
         # Sort: recommended first, then caution, then avoid
         assets.sort(key=lambda x: (-x["wr"]))
 
-        # Group recommended assets by their best TF
+        # Group recommended assets by TF — include all good TFs per asset
+        tf_order = ["M3","M5","M15","M30","H1","H4"]
         by_tf_recommended = {tf: [] for tf in tf_order}
         for a in assets:
-            if a["has_data"] and a["wr"] >= 45 and a["best_tf"] in by_tf_recommended:
-                by_tf_recommended[a["best_tf"]].append(a)
+            if not a["has_data"]:
+                continue
+            for t in a["good_tfs"]:
+                if t["tf"] in by_tf_recommended and t["wr"] >= 45:
+                    by_tf_recommended[t["tf"]].append({
+                        "symbol": a["symbol"],
+                        "wr":     t["wr"],
+                        "total":  t["total"],
+                    })
 
         recommended = sum(1 for a in assets if a["wr"] >= 45)
         avoid       = sum(1 for a in assets if a["has_data"] and a["wr"] < 35)
@@ -2905,6 +2913,25 @@ def watchlist_sync():
 
 
 
+    """Daily alert recommendation page."""
+    try:
+        trades  = get_all_trades(500)
+        data    = _build_recommendations(trades)
+        bt_rows = _get_backtest_results()
+        data["bt_rows"]      = bt_rows
+        data["bt_available"] = len(bt_rows) > 0
+        data["bt_updated"]   = bt_rows[0]["run_at"] if bt_rows else None
+        data["bt_status"]    = _bt_status
+        data["bt_analysis"]  = _build_bt_recommendations(bt_rows)
+        return render_template_string(RECOMMENDATIONS_HTML, **data)
+    except Exception as e:
+        import traceback
+        log.error(f"Recommendations error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/recommendations")
+def recommendations():
     """Daily alert recommendation page."""
     try:
         trades  = get_all_trades(500)
