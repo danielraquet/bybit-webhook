@@ -57,15 +57,15 @@ if DATABASE_URL:
             conn.commit()
         log.info("PostgreSQL journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO trades
-                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, opened_at)
-                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, opened_at)
+                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage,
+                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes,
                       datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
                 row_id = cur.fetchone()[0]
             conn.commit()
@@ -204,13 +204,13 @@ else:
             conn.commit()
         log.info("SQLite journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
         with get_db() as conn:
             cur = conn.execute("""
                 INSERT INTO trades
-                    (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, opened_at)
-                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage,
+                    (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, opened_at)
+                VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes,
                   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
             conn.commit()
             return cur.lastrowid
