@@ -49,25 +49,27 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 def get_config():
     """Read config fresh from environment on every call — picks up Railway variable changes."""
+    def _float(key, default):
+        try: return float(os.getenv(key, str(default)) or str(default))
+        except: return float(default)
+    def _int(key, default):
+        try: return int(os.getenv(key, str(default)) or str(default))
+        except: return int(default)
+    def _str(key, default=""):
+        return (os.getenv(key, default) or default).strip()
+
     return {
-        "enabled":      os.getenv("ENABLED",      "true").lower() == "true",
-        "balance_pct":  float(os.getenv("BALANCE_PCT",  "2.0") or "2.0"),
-        "max_trades":   int(os.getenv("MAX_TRADES",      "3") or "3"),
-        "leverage":     int(os.getenv("LEVERAGE",        "5") or "5"),
-        "poll_interval":int(os.getenv("POLL_INTERVAL",   "300") or "300"),
-        # ── Server-side trade filters ──────────────────────────────────────
-        # FILTER_SIDE: "long", "short", or "" (both). Default: "" (both)
-        "filter_side":  os.getenv("FILTER_SIDE",    "").lower(),
-        # FILTER_MIN_WR: minimum win rate % from alert JSON. 0 = disabled
-        "filter_min_wr":    float(os.getenv("FILTER_MIN_WR", "0") or "0"),
-        # FILTER_SOURCES: comma-separated sources to allow, e.g. "ob,fibob". "" = all
-        "filter_sources":os.getenv("FILTER_SOURCES", "").lower(),
-        # FILTER_TIMEFRAMES: comma-separated TFs to allow, e.g. "M15,H1". "" = all
-        "filter_timeframes":os.getenv("FILTER_TIMEFRAMES", "").upper(),
-        # FILTER_SYMBOLS_ALLOW: comma-separated symbols to allow. "" = all
-        "filter_symbols_allow":os.getenv("FILTER_SYMBOLS_ALLOW", "").upper(),
-        # FILTER_SYMBOLS_BLOCK: comma-separated symbols to block. "" = none
-        "filter_symbols_block":os.getenv("FILTER_SYMBOLS_BLOCK", "").upper(),
+        "enabled":              _str("ENABLED", "true").lower() == "true",
+        "balance_pct":          _float("BALANCE_PCT",   2.0),
+        "max_trades":           _int("MAX_TRADES",       3),
+        "leverage":             _int("LEVERAGE",         5),
+        "poll_interval":        _int("POLL_INTERVAL",    300),
+        "filter_side":          _str("FILTER_SIDE").lower(),
+        "filter_min_wr":        _float("FILTER_MIN_WR",  0),
+        "filter_sources":       _str("FILTER_SOURCES").lower(),
+        "filter_timeframes":    _str("FILTER_TIMEFRAMES").upper(),
+        "filter_symbols_allow": _str("FILTER_SYMBOLS_ALLOW").upper(),
+        "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
     }
 
 app = Flask(__name__)
@@ -2323,14 +2325,14 @@ def _build_bt_recommendations(bt_rows):
 
 
 
-BT_RR_RATIO      = float(os.getenv("BT_RR_RATIO",    "2.0"))
-BT_SL_BUF_ATR    = float(os.getenv("BT_SL_BUF_ATR",  "0.5"))
-BT_ATR_LEN       = int(os.getenv("BT_ATR_LEN",        "14"))
-BT_MIN_IMPULSE   = float(os.getenv("BT_MIN_IMPULSE",  "1.3"))
-BT_MIN_OB_SIZE   = float(os.getenv("BT_MIN_OB_SIZE",  "0.8"))
-BT_ENTRY_OFFSET  = float(os.getenv("BT_ENTRY_OFFSET", "0.0"))
-BT_LOOKBACK_DAYS = int(os.getenv("BT_LOOKBACK_DAYS",  "90"))
-BT_MIN_TRADES    = int(os.getenv("BT_MIN_TRADES",     "5"))
+BT_RR_RATIO      = float(os.getenv("BT_RR_RATIO",    "2.0") or "2.0")
+BT_SL_BUF_ATR    = float(os.getenv("BT_SL_BUF_ATR",  "0.5") or "0.5")
+BT_ATR_LEN       = int(os.getenv("BT_ATR_LEN",        "14") or "14")
+BT_MIN_IMPULSE   = float(os.getenv("BT_MIN_IMPULSE",  "1.3") or "1.3")
+BT_MIN_OB_SIZE   = float(os.getenv("BT_MIN_OB_SIZE",  "0.8") or "0.8")
+BT_ENTRY_OFFSET  = float(os.getenv("BT_ENTRY_OFFSET", "0.0") or "0.0")
+BT_LOOKBACK_DAYS = int(os.getenv("BT_LOOKBACK_DAYS",  "90") or "90")
+BT_MIN_TRADES    = int(os.getenv("BT_MIN_TRADES",     "5") or "5")
 BT_SYMBOLS       = os.getenv("BT_SYMBOLS",
     "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,"
     "ADAUSDT,AVAXUSDT,DOTUSDT,LINKUSDT,NEARUSDT,"
