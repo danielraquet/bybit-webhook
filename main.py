@@ -799,6 +799,16 @@ _start_poller()
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
+@app.route("/")
+def index():
+    return jsonify({"status": "ok", "service": "bybit-webhook"}), 200
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+
 @app.route("/debug", methods=["POST", "GET"])
 def debug():
     """Echo back exactly what was received — use to diagnose webhook issues."""
@@ -1181,12 +1191,31 @@ def status():
 
 @app.route("/poll", methods=["POST"])
 def manual_poll():
-    """Manually trigger a check of closed trades — useful for testing."""
+    """Manually trigger a check of closed trades."""
     try:
+        # First show what's in DB
+        if DATABASE_URL:
+            import psycopg2.extras
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20")
+                    all_trades = [dict(r) for r in cur.fetchall()]
+                    cur.execute("SELECT COUNT(*) as c FROM trades WHERE status = 'open'")
+                    open_count = cur.fetchone()["c"]
+        else:
+            with get_db() as conn:
+                all_trades = [dict(r) for r in conn.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20").fetchall()]
+                open_count = conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'open'").fetchone()[0]
+
         _check_closed_trades()
-        return jsonify({"status": "ok", "message": "Poll complete"}), 200
+        return jsonify({
+            "status": "ok",
+            "open_count": open_count,
+            "recent_trades": all_trades
+        }), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        import traceback
+        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
 @app.route("/journal/fix", methods=["POST"])
