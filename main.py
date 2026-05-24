@@ -783,24 +783,6 @@ def _check_closed_pnl(trade):
         log.error(f"Error checking closed PnL for {symbol}: {e}")
 
 
-def auto_cancel_opposite(symbol: str, new_side: str):
-    """Cancel any pending orders in the opposite direction on this symbol."""
-    try:
-        resp     = session.get_open_orders(category="linear", symbol=symbol)
-        orders   = resp.get("result", {}).get("list", [])
-        opposite = "Sell" if new_side == "Buy" else "Buy"
-        for order in orders:
-            if order.get("side") == opposite:
-                order_id = order.get("orderId")
-                session.cancel_order(category="linear", symbol=symbol, orderId=order_id)
-                log.info(f"Auto-cancelled opposite {opposite} order {order_id} for {symbol}")
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE trades SET status = 'skipped', notes = 'Auto-cancelled — opposite setup fired' WHERE order_id = " + ph() + " AND status = 'open'", (order_id,))
-                    conn.commit()
-    except Exception as e:
-        log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
-
 
 # ─── POLLER STARTER — defined here so poll_closed_trades is already defined ───
 def _start_poller():
