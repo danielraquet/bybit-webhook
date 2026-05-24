@@ -1198,8 +1198,8 @@ def manual_poll():
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20")
             all_trades = [dict(r) for r in cur.fetchall()]
-            cur.execute("SELECT COUNT(*) FROM trades WHERE status = 'open'")
-            open_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE status = 'open'")
+            open_count = cur.fetchone()["cnt"]
         conn.close()
 
         _check_closed_trades()
