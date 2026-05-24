@@ -50,11 +50,24 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 def get_config():
     """Read config fresh from environment on every call — picks up Railway variable changes."""
     return {
-        "enabled":     os.getenv("ENABLED",     "true").lower() == "true",
-        "balance_pct": float(os.getenv("BALANCE_PCT", "2.0")),
-        "max_trades":  int(os.getenv("MAX_TRADES",    "3")),
-        "leverage":    int(os.getenv("LEVERAGE",      "5")),
-        "poll_interval": int(os.getenv("POLL_INTERVAL", "300")),
+        "enabled":      os.getenv("ENABLED",      "true").lower() == "true",
+        "balance_pct":  float(os.getenv("BALANCE_PCT",  "2.0")),
+        "max_trades":   int(os.getenv("MAX_TRADES",      "3")),
+        "leverage":     int(os.getenv("LEVERAGE",        "5")),
+        "poll_interval":int(os.getenv("POLL_INTERVAL",   "300")),
+        # ── Server-side trade filters ──────────────────────────────────────
+        # FILTER_SIDE: "long", "short", or "" (both). Default: "" (both)
+        "filter_side":  os.getenv("FILTER_SIDE",    "").lower(),
+        # FILTER_MIN_WR: minimum win rate % from alert JSON. 0 = disabled
+        "filter_min_wr":float(os.getenv("FILTER_MIN_WR", "0")),
+        # FILTER_SOURCES: comma-separated sources to allow, e.g. "ob,fibob". "" = all
+        "filter_sources":os.getenv("FILTER_SOURCES", "").lower(),
+        # FILTER_TIMEFRAMES: comma-separated TFs to allow, e.g. "M15,H1". "" = all
+        "filter_timeframes":os.getenv("FILTER_TIMEFRAMES", "").upper(),
+        # FILTER_SYMBOLS_ALLOW: comma-separated symbols to allow. "" = all
+        "filter_symbols_allow":os.getenv("FILTER_SYMBOLS_ALLOW", "").upper(),
+        # FILTER_SYMBOLS_BLOCK: comma-separated symbols to block. "" = none
+        "filter_symbols_block":os.getenv("FILTER_SYMBOLS_BLOCK", "").upper(),
     }
 
 app = Flask(__name__)
@@ -698,8 +711,21 @@ def _check_closed_pnl(trade):
         positions = pos_resp.get("result", {}).get("list", [])
         pos_open  = any(float(p.get("size", 0)) > 0 for p in positions)
         if pos_open:
-            log.info(f"Position still open for {symbol} — skipping PnL check")
-            return
+            pos_size = next((float(p.get("size", 0)) for p in positions if float(p.get("size", 0)) > 0), 0)
+            # If position open for less than 30 mins, skip
+            opened_at = trade.get("opened_at", "")
+            try:
+                from datetime import datetime
+                opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                mins_open = (datetime.utcnow() - opened).total_seconds() / 60
+                if mins_open < 30:
+                    log.info(f"Position still open for {symbol} (size={pos_size}) — skipping PnL check")
+                    return
+                else:
+                    log.info(f"Position open for {mins_open:.0f}m — checking PnL anyway")
+            except:
+                log.info(f"Position still open for {symbol} (size={pos_size}) — skipping PnL check")
+                return
 
         # Position closed — find the closing record in closed PnL
         resp    = session.get_closed_pnl(category="linear", symbol=symbol, limit=200)
@@ -741,7 +767,8 @@ def _check_closed_pnl(trade):
                                     cur.execute("SELECT notes, qty FROM trades WHERE order_id = " + ph(), (order_id,))
                                     row = cur.fetchone()
                             if row and row[0] and "sheet_row:" in str(row[0]):
-                                sheet_row = int(str(row[0]).split("sheet_row:")[1])
+                                notes_str = str(row[0])
+                                sheet_row = int(notes_str.split("sheet_row:")[1].split("|")[0])
                                 qty_val   = float(row[1]) if row[1] else 0
                                 gsheets.push_trade_closed(sheet_row, exit_price, qty_val)
                         except Exception as e:
@@ -873,6 +900,58 @@ def webhook():
         msg = f"Missing required fields — got: {data}"
         log.error(msg)
         return jsonify({"status": "error", "message": msg}), 400
+
+    # ── Server-side filters ───────────────────────────────────────────────────
+    tf_label = gsheets._bar_seconds_to_tf(bar_seconds)
+
+    # Extract WR from alert payload
+    alert_wr = 0.0
+    try:
+        wr_raw = str(data.get("wr", "") or "")
+        if wr_raw:
+            alert_wr = float(wr_raw.split("%")[0].strip())
+    except:
+        pass
+
+    def _filter_skip(reason):
+        log.info(f"🚫 Filtered: {reason}")
+        log_order_skipped(symbol, side, entry, sl, tp, f"Filtered: {reason}")
+        return jsonify({"status": "filtered", "message": reason}), 200
+
+    # Side filter: FILTER_SIDE=long or short
+    if cfg["filter_side"]:
+        trade_side = "long" if side == "Buy" else "short"
+        if trade_side != cfg["filter_side"]:
+            return _filter_skip(f"{symbol} {side} blocked — FILTER_SIDE={cfg['filter_side']}")
+
+    # Min WR filter: FILTER_MIN_WR=49
+    if cfg["filter_min_wr"] > 0 and alert_wr > 0:
+        if alert_wr < cfg["filter_min_wr"]:
+            return _filter_skip(f"{symbol} WR {alert_wr}% < FILTER_MIN_WR={cfg['filter_min_wr']}%")
+
+    # Source filter: FILTER_SOURCES=ob,fibob
+    if cfg["filter_sources"]:
+        allowed = [s.strip() for s in cfg["filter_sources"].split(",")]
+        if source.lower() not in allowed:
+            return _filter_skip(f"source '{source}' not in FILTER_SOURCES={cfg['filter_sources']}")
+
+    # Timeframe filter: FILTER_TIMEFRAMES=M15,H1
+    if cfg["filter_timeframes"]:
+        allowed = [t.strip() for t in cfg["filter_timeframes"].split(",")]
+        if tf_label not in allowed:
+            return _filter_skip(f"TF '{tf_label}' not in FILTER_TIMEFRAMES={cfg['filter_timeframes']}")
+
+    # Symbol allow-list: FILTER_SYMBOLS_ALLOW=BTCUSDT,ETHUSDT
+    if cfg["filter_symbols_allow"]:
+        allowed = [s.strip() for s in cfg["filter_symbols_allow"].split(",")]
+        if symbol not in allowed:
+            return _filter_skip(f"{symbol} not in FILTER_SYMBOLS_ALLOW")
+
+    # Symbol block-list: FILTER_SYMBOLS_BLOCK=POLUSDT,NEARUSDT
+    if cfg["filter_symbols_block"]:
+        blocked = [s.strip() for s in cfg["filter_symbols_block"].split(",")]
+        if symbol in blocked:
+            return _filter_skip(f"{symbol} is in FILTER_SYMBOLS_BLOCK")
 
     import math as _math
     if any(_math.isnan(v) or _math.isinf(v) for v in [entry, sl, tp] if isinstance(v, float)):
@@ -1048,7 +1127,12 @@ def webhook():
                         try:
                             with get_db() as conn:
                                 with conn.cursor() as cur:
-                                    cur.execute("UPDATE trades SET notes = " + ph() + " WHERE order_id = " + ph(), (f"sheet_row:{sheet_row}", order_id))
+                                    # Append sheet_row to existing notes
+                                    cur.execute("SELECT notes FROM trades WHERE order_id = " + ph(), (order_id,))
+                                    row = cur.fetchone()
+                                    existing = str(row[0]) if row and row[0] else ""
+                                    new_notes = f"{existing}|sheet_row:{sheet_row}" if existing else f"sheet_row:{sheet_row}"
+                                    cur.execute("UPDATE trades SET notes = " + ph() + " WHERE order_id = " + ph(), (new_notes, order_id))
                                 conn.commit()
                         except Exception as e:
                             log.error(f"Failed to store sheet row: {e}")
@@ -1100,6 +1184,14 @@ def status():
         "balance_pct":     cfg["balance_pct"],
         "leverage":        cfg["leverage"],
         "poll_interval":   cfg["poll_interval"],
+        "filters": {
+            "side":            cfg["filter_side"]            or "both",
+            "min_wr":          cfg["filter_min_wr"]          or "disabled",
+            "sources":         cfg["filter_sources"]         or "all",
+            "timeframes":      cfg["filter_timeframes"]      or "all",
+            "symbols_allow":   cfg["filter_symbols_allow"]   or "all",
+            "symbols_block":   cfg["filter_symbols_block"]   or "none",
+        },
     })
 
 
