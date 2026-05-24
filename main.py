@@ -1193,28 +1193,26 @@ def status():
 def manual_poll():
     """Manually trigger a check of closed trades."""
     try:
-        # First show what's in DB
-        if DATABASE_URL:
-            import psycopg2.extras
-            with get_db() as conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    cur.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20")
-                    all_trades = [dict(r) for r in cur.fetchall()]
-                    cur.execute("SELECT COUNT(*) as c FROM trades WHERE status = 'open'")
-                    open_count = cur.fetchone()["c"]
-        else:
-            with get_db() as conn:
-                all_trades = [dict(r) for r in conn.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20").fetchall()]
-                open_count = conn.execute("SELECT COUNT(*) FROM trades WHERE status = 'open'").fetchone()[0]
+        import psycopg2.extras
+        conn = get_db()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, symbol, side, status, order_id, opened_at FROM trades ORDER BY opened_at DESC LIMIT 20")
+            all_trades = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT COUNT(*) FROM trades WHERE status = 'open'")
+            open_count = cur.fetchone()[0]
+        conn.close()
 
         _check_closed_trades()
+
         return jsonify({
-            "status": "ok",
-            "open_count": open_count,
-            "recent_trades": all_trades
+            "status":        "ok",
+            "open_count":    open_count,
+            "recent_trades": all_trades,
+            "message":       f"Poll complete — found {open_count} open trades",
         }), 200
     except Exception as e:
         import traceback
+        log.error(f"Poll error: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
