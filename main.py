@@ -51,15 +51,15 @@ def get_config():
     """Read config fresh from environment on every call — picks up Railway variable changes."""
     return {
         "enabled":      os.getenv("ENABLED",      "true").lower() == "true",
-        "balance_pct":  float(os.getenv("BALANCE_PCT",  "2.0")),
-        "max_trades":   int(os.getenv("MAX_TRADES",      "3")),
-        "leverage":     int(os.getenv("LEVERAGE",        "5")),
-        "poll_interval":int(os.getenv("POLL_INTERVAL",   "300")),
+        "balance_pct":  float(os.getenv("BALANCE_PCT",  "2.0") or "2.0"),
+        "max_trades":   int(os.getenv("MAX_TRADES",      "3") or "3"),
+        "leverage":     int(os.getenv("LEVERAGE",        "5") or "5"),
+        "poll_interval":int(os.getenv("POLL_INTERVAL",   "300") or "300"),
         # ── Server-side trade filters ──────────────────────────────────────
         # FILTER_SIDE: "long", "short", or "" (both). Default: "" (both)
         "filter_side":  os.getenv("FILTER_SIDE",    "").lower(),
         # FILTER_MIN_WR: minimum win rate % from alert JSON. 0 = disabled
-        "filter_min_wr":float(os.getenv("FILTER_MIN_WR", "0")),
+        "filter_min_wr":    float(os.getenv("FILTER_MIN_WR", "0") or "0"),
         # FILTER_SOURCES: comma-separated sources to allow, e.g. "ob,fibob". "" = all
         "filter_sources":os.getenv("FILTER_SOURCES", "").lower(),
         # FILTER_TIMEFRAMES: comma-separated TFs to allow, e.g. "M15,H1". "" = all
