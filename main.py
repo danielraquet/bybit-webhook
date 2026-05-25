@@ -1180,7 +1180,7 @@ def status():
     })
 
 
-@app.route("/poll", methods=["POST"])
+@app.route("/poll", methods=["GET", "POST"])
 def manual_poll():
     """Manually trigger a check of closed trades."""
     try:
