@@ -340,7 +340,7 @@ JOURNAL_HTML = """
     <tbody>
       {% for t in trades %}
       <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}" data-source="{{ t.source or '' }}">
-        <td class="dim">{{ t.id }}</td>
+        <td class="dim">{{ loop.index }}</td>
         <td style="color:var(--white);font-weight:500">{{ t.symbol }}</td>
         <td>
           <span class="badge {{ 'badge-buy' if t.side == 'Buy' else 'badge-sell' }}">
@@ -1255,22 +1255,21 @@ def import_from_bybit():
                 exit_price = float(r.get("avgExitPrice", 0) or r.get("exitPrice", 0))
                 pnl        = float(r.get("closedPnl", 0) or 0)
                 exec_type  = r.get("execType", "")
-                created_ms = int(r.get("createdTime", 0) or 0)
+                created_ms  = int(r.get("createdTime",  0) or 0)
+                updated_ms  = int(r.get("updatedTime",  0) or created_ms)
+                opened_dt   = datetime.utcfromtimestamp(created_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if created_ms else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                closed_dt   = datetime.utcfromtimestamp(updated_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if updated_ms else opened_dt
 
                 if not order_id or not symbol or exit_price <= 0:
                     continue
 
-                # Skip if already in journal
                 if order_id in existing_ids:
                     skipped += 1
                     continue
 
-                # Entry side is opposite to closing side
                 entry_side = "Buy" if side_close == "Sell" else "Sell"
                 outcome    = "tp" if exec_type == "TakeProfit" else "sl" if exec_type == "StopLoss" else "sl"
-                opened_dt  = datetime.utcfromtimestamp(created_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if created_ms else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
-                # Insert as closed trade
                 conn = get_db()
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -1280,8 +1279,7 @@ def import_from_bybit():
                         VALUES (%s, %s, 'closed', %s, %s, 0, 0, %s, %s, 0, %s, %s, 'bybit_import', %s, %s, 'Imported from Bybit history')
                         ON CONFLICT DO NOTHING
                     """, (symbol, entry_side, qty, exit_price, exit_price,
-                          pnl, outcome, order_id, opened_dt,
-                          datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
+                          pnl, outcome, order_id, opened_dt, closed_dt))
                 conn.commit()
                 conn.close()
                 imported += 1
