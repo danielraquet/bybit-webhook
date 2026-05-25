@@ -670,90 +670,105 @@ def _check_closed_trades():
 
 
 def _check_closed_pnl(trade):
-    """
-    Check Bybit's closed PnL records to see if a trade was closed
-    by SL or TP being triggered.
-    """
-    symbol   = trade["symbol"]
-    order_id = trade["order_id"]
-    qty      = float(trade["qty"] or 0)
-    side     = trade["side"]
+    """Check Bybit closed PnL — matches by symbol+side+qty since SL/TP uses different orderId."""
+    symbol    = trade["symbol"]
+    order_id  = trade["order_id"]
+    qty       = float(trade["qty"] or 0)
+    side      = trade["side"]
+    opened_at = trade.get("opened_at", "")
 
     try:
-        # First check if position is still open — if so no need to check PnL yet
+        # Check if position still open
         pos_resp  = session.get_positions(category="linear", symbol=symbol)
         positions = pos_resp.get("result", {}).get("list", [])
         pos_open  = any(float(p.get("size", 0)) > 0 for p in positions)
         if pos_open:
-            pos_size = next((float(p.get("size", 0)) for p in positions if float(p.get("size", 0)) > 0), 0)
-            # If position open for less than 30 mins, skip
-            opened_at = trade.get("opened_at", "")
             try:
-                from datetime import datetime
-                opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
-                mins_open = (datetime.utcnow() - opened).total_seconds() / 60
-                if mins_open < 30:
-                    log.info(f"Position still open for {symbol} (size={pos_size}) — skipping PnL check")
+                opened   = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                mins     = (datetime.utcnow() - opened).total_seconds() / 60
+                if mins < 30:
+                    log.info(f"Position open {symbol} ({mins:.0f}m) — skip")
                     return
-                else:
-                    log.info(f"Position open for {mins_open:.0f}m — checking PnL anyway")
+                log.info(f"Position open {mins:.0f}m — checking PnL anyway")
             except:
-                log.info(f"Position still open for {symbol} (size={pos_size}) — skipping PnL check")
+                log.info(f"Position open {symbol} — skip")
                 return
 
-        # Position closed — find the closing record in closed PnL
+        # Fetch closed PnL records
         resp    = session.get_closed_pnl(category="linear", symbol=symbol, limit=200)
         records = resp.get("result", {}).get("list", [])
 
-        for record in records:
-            rec_order_id = record.get("orderId", "")
-            exec_type    = record.get("execType", "")
-            exit_price   = float(record.get("avgExitPrice", 0) or record.get("exitPrice", 0))
-            closed_size  = float(record.get("qty", 0))
-            realised_pnl = float(record.get("closedPnl", 0) or 0)
+        if not records:
+            log.warning(f"No closed PnL records for {symbol}")
+            return
 
-            # Match by order ID, or by size (within 5%) + exec type
-            id_match   = rec_order_id == order_id
-            size_match = (qty > 0 and abs(closed_size - qty) < qty * 0.05 and
-                         exec_type in ("StopLoss", "TakeProfit", "Trade"))
-            is_match   = id_match or size_match
+        # Closing side is opposite to entry side
+        closing_side = "Sell" if side == "Buy" else "Buy"
 
-            if is_match and exit_price > 0:
-                if exec_type == "TakeProfit":
-                    outcome = "tp"
-                elif exec_type == "StopLoss":
-                    outcome = "sl"
-                else:
-                    tp = float(trade["tp"] or 0)
-                    sl = float(trade["sl"] or 0)
-                    if side == "Buy":
-                        outcome = "tp" if exit_price >= tp * 0.999 else "sl"
-                    else:
-                        outcome = "tp" if exit_price <= tp * 1.001 else "sl"
+        # Find best match: order_id > qty+side match > most recent same-side close
+        best = None
+        for r in records:
+            exit_p = float(r.get("avgExitPrice", 0) or r.get("exitPrice", 0))
+            if exit_p <= 0:
+                continue
+            cqty   = float(r.get("qty", 0))
+            cside  = r.get("side", "")
+            id_ok  = r.get("orderId", "") == order_id
+            qty_ok = qty > 0 and abs(cqty - qty) <= qty * 0.1 and cside == closing_side
+            if id_ok:
+                best = r
+                break
+            if qty_ok and best is None:
+                best = r
 
-                success = log_trade_closed(order_id, exit_price, outcome, realised_pnl=realised_pnl)
-                if success:
-                    log.info(f"✅ Poller closed {symbol} {order_id} — {outcome.upper()} @ {exit_price} PnL={realised_pnl}")
-                    if gsheets.is_configured():
-                        try:
-                            with get_db() as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute("SELECT notes, qty FROM trades WHERE order_id = " + ph(), (order_id,))
-                                    row = cur.fetchone()
-                            if row and row[0] and "sheet_row:" in str(row[0]):
-                                notes_str = str(row[0])
-                                sheet_row = int(notes_str.split("sheet_row:")[1].split("|")[0])
-                                qty_val   = float(row[1]) if row[1] else 0
-                                gsheets.push_trade_closed(sheet_row, exit_price, qty_val)
-                        except Exception as e:
-                            log.error(f"Google Sheets close update error: {e}")
-                return
+        # Last resort — most recent close on this symbol same side
+        if not best:
+            for r in records:
+                exit_p = float(r.get("avgExitPrice", 0) or r.get("exitPrice", 0))
+                if exit_p > 0 and r.get("side", "") == closing_side:
+                    best = r
+                    log.warning(f"{symbol}: using most recent {closing_side} close as fallback")
+                    break
 
-        log.warning(f"No closed PnL record found for {symbol} {order_id} — will retry next poll")
+        if not best:
+            log.warning(f"No closed PnL match for {symbol} {order_id}")
+            return
+
+        exit_price   = float(best.get("avgExitPrice", 0) or best.get("exitPrice", 0))
+        realised_pnl = float(best.get("closedPnl", 0) or 0)
+        exec_type    = best.get("execType", "")
+
+        # Determine outcome
+        if exec_type == "TakeProfit":
+            outcome = "tp"
+        elif exec_type == "StopLoss":
+            outcome = "sl"
+        else:
+            tp = float(trade.get("tp") or 0)
+            if side == "Buy":
+                outcome = "tp" if exit_price >= tp * 0.999 else "sl"
+            else:
+                outcome = "tp" if exit_price <= tp * 1.001 else "sl"
+
+        success = log_trade_closed(order_id, exit_price, outcome, realised_pnl=realised_pnl)
+        if success:
+            log.info(f"✅ Closed {symbol} {order_id} — {outcome.upper()} @ {exit_price} PnL={realised_pnl:.4f}")
+            if gsheets.is_configured():
+                try:
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT notes, qty FROM trades WHERE order_id = " + ph(), (order_id,))
+                        row = cur.fetchone()
+                    conn.close()
+                    if row and row[0] and "sheet_row:" in str(row[0]):
+                        sheet_row = int(str(row[0]).split("sheet_row:")[1].split("|")[0])
+                        gsheets.push_trade_closed(sheet_row, exit_price, float(row[1] or 0))
+                except Exception as e:
+                    log.error(f"Sheets close error: {e}")
 
     except Exception as e:
-        log.error(f"Error checking closed PnL for {symbol}: {e}")
-
+        log.error(f"_check_closed_pnl {symbol}: {e}")
+        import traceback; log.error(traceback.format_exc())
 
 
 # ─── POLLER STARTER — defined here so poll_closed_trades is already defined ───
