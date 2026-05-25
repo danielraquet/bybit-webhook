@@ -16,16 +16,28 @@ if DATABASE_URL:
     import psycopg2
     import psycopg2.extras
 
+    class _DBConn:
+        """Wrapper that makes psycopg2 connection properly close on context exit."""
+        def __init__(self, conn):
+            self._conn = conn
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            try: self._conn.close()
+            except: pass
+
     def get_db():
         try:
             conn = psycopg2.connect(DATABASE_URL, sslmode="require")
         except Exception:
-            # Some Supabase connection strings already include sslmode
             conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        return _DBConn(conn)
 
     def init_db():
-        with get_db() as conn:
+        conn = get_db()
+        try:
             with conn.cursor() as cur:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS trades (
@@ -50,12 +62,13 @@ if DATABASE_URL:
                         notes       TEXT
                     )
                 """)
-                # Migrations — add columns if not exists for existing tables
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes TEXT")
             conn.commit()
-        log.info("PostgreSQL journal initialised")
+            log.info("PostgreSQL journal initialised")
+        finally:
+            conn.close()
 
     def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
         with get_db() as conn:
@@ -128,7 +141,7 @@ if DATABASE_URL:
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT * FROM trades ORDER BY opened_at DESC LIMIT %s", (limit,)
+                    "SELECT * FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
                 )
                 return [dict(r) for r in cur.fetchall()]
 
