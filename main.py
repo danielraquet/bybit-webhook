@@ -340,7 +340,7 @@ JOURNAL_HTML = """
     <tbody>
       {% for t in trades %}
       <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}" data-source="{{ t.source or '' }}">
-        <td class="dim">{{ loop.index }}</td>
+        <td class="dim">{{ trades|length - loop.index0 }}</td>
         <td style="color:var(--white);font-weight:500">{{ t.symbol }}</td>
         <td>
           <span class="badge {{ 'badge-buy' if t.side == 'Buy' else 'badge-sell' }}">
@@ -1220,6 +1220,21 @@ def manual_poll():
         import traceback
         log.error(f"Poll error: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/journal/delete-imports", methods=["GET", "POST"])
+def delete_imports():
+    """Delete all bybit_import trades so they can be re-imported with better matching."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM trades WHERE source = 'bybit_import'")
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "message": f"Deleted {deleted} imported trades"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/import", methods=["GET", "POST"])
