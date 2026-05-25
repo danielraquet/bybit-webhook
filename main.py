@@ -629,72 +629,44 @@ def _check_closed_trades():
     for trade in open_trades:
         order_id = trade["order_id"]
         symbol   = trade["symbol"]
-
         try:
-            # Check order history for this symbol
-            resp = session.get_order_history(
-                category="linear",
-                symbol=symbol,
-                orderId=order_id,
-            )
-            orders = resp.get("result", {}).get("list", [])
+            # Check if order is still pending (unfilled limit)
+            open_resp  = session.get_open_orders(category="linear", symbol=symbol, orderId=order_id)
+            open_orders = open_resp.get("result", {}).get("list", [])
 
-            if not orders:
-                # Order not in history — check if it's still in open orders
-                open_resp = session.get_open_orders(category="linear", symbol=symbol, orderId=order_id)
-                open_orders = open_resp.get("result", {}).get("list", [])
-                if not open_orders:
-                    # Not open and not in history — must be cancelled or filled
-                    # Check closed PnL first
-                    _check_closed_pnl(trade)
-                    # If still showing as open after PnL check, mark as cancelled
-                    with get_db() as conn:
-                        if DATABASE_URL:
-                            import psycopg2.extras
-                            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                                cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
-                                row = cur.fetchone()
-                                if row and row["status"] == "open":
-                                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
-                                    log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
-                        else:
-                            with conn.cursor() as cur:
-                                cur.execute("SELECT status FROM trades WHERE order_id = " + ph(), (order_id,))
-                                row = cur.fetchone()
-                                if row and row[0] == "open":
-                                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Order not found — likely cancelled' WHERE order_id = " + ph(), (order_id,))
-                                    log.info(f"Marked {symbol} {order_id} as cancelled — not found in open orders or history")
-                        conn.commit()
+            if open_orders:
+                # Still pending — check if it's been too long
+                opened_at = trade.get("opened_at", "")
+                try:
+                    from datetime import datetime
+                    opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                    mins   = (datetime.utcnow() - opened).total_seconds() / 60
+                    if mins > 480:  # 8 hours — likely stuck
+                        log.warning(f"{symbol} {order_id} pending for {mins:.0f}m — checking PnL anyway")
+                        _check_closed_pnl(trade)
+                except:
+                    pass
                 continue
 
-            order = orders[0]
-            order_status = order.get("orderStatus", "")
+            # Not in open orders — either filled+closed or cancelled
+            # Check order history to see final status
+            hist_resp = session.get_order_history(category="linear", symbol=symbol, orderId=order_id)
+            hist      = hist_resp.get("result", {}).get("list", [])
+            order_status = hist[0].get("orderStatus", "") if hist else "Unknown"
 
-            if order_status == "Filled":
-                # Limit order filled — entry confirmed, trade is now open on exchange
-                # Don't close journal entry yet — wait for SL/TP
-                avg_price = float(order.get("avgPrice", 0))
-                if avg_price > 0 and trade["entry"] != avg_price:
-                    # Update actual entry price if different from limit
-                    with get_db() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("UPDATE trades SET entry = " + ph() + " WHERE order_id = " + ph(), (avg_price, order_id))
-                        conn.commit()
-                    log.info(f"Updated entry price for {symbol} {order_id}: {avg_price}")
-
-                # Now check if SL/TP has been triggered
-                _check_closed_pnl(trade)
-
-            elif order_status in ("Cancelled", "Rejected", "Deactivated"):
-                # Order was cancelled before fill — mark as skipped
+            if order_status in ("Cancelled", "Rejected", "Deactivated"):
                 with get_db() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(), (f"Order {order_status.lower()} on exchange", order_id))
+                        cur.execute("UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(),
+                                   (f"Order {order_status.lower()}", order_id))
                     conn.commit()
-                log.info(f"Order {order_id} {symbol} was {order_status} — updated journal")
+                log.info(f"{symbol} {order_id} was {order_status} — marked skipped")
+            else:
+                # Filled or unknown — check closed PnL
+                _check_closed_pnl(trade)
 
         except Exception as e:
-            log.error(f"Error checking order {order_id} for {symbol}: {e}")
+            log.error(f"Error checking {symbol} {order_id}: {e}")
 
 
 def _check_closed_pnl(trade):
@@ -793,8 +765,12 @@ def _start_poller():
     except Exception as e:
         log.error(f"Failed to start poller: {e}")
 
-# Start poller immediately — all functions defined by this point
-_start_poller()
+# Start poller — deferred to avoid blocking module import
+try:
+    _start_poller()
+except Exception as _e:
+    import logging as _log
+    _log.getLogger("main").error(f"Poller start failed: {_e}")
 
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
