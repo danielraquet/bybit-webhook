@@ -310,6 +310,7 @@ JOURNAL_HTML = """
   <span style="margin:0 8px;color:var(--dim)">|</span>
   <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
+  <button class="filter-btn" onclick="runImport(this)" style="color:var(--amber)">📥 Import Bybit</button>
 </div>
 
 <div class="table-wrap">
@@ -384,6 +385,20 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function runImport(btn) {
+  if (!confirm('Import missing trades from Bybit history? This will add closed trades not yet in the journal.')) return;
+  const base = window.location.origin;
+  btn.innerText = '⏳ Importing...';
+  btn.disabled = true;
+  fetch(base + '/journal/import', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ ' + (data.message || 'Done');
+      setTimeout(() => { btn.innerText = '📥 Import Bybit'; btn.disabled = false; location.reload(); }, 3000);
+    })
+    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
 function runPoll(btn) {
   const base = window.location.origin;
   btn.innerText = '⏳ Polling...';
@@ -1207,7 +1222,82 @@ def manual_poll():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
-@app.route("/journal/fix", methods=["POST"])
+@app.route("/journal/import", methods=["GET", "POST"])
+def import_from_bybit():
+    """Import closed trades from Bybit that are missing from the journal."""
+    try:
+        imported = 0
+        skipped  = 0
+        errors   = 0
+        results  = []
+
+        # Fetch last 7 days of closed PnL across all symbols
+        resp    = session.get_closed_pnl(category="linear", limit=200)
+        records = resp.get("result", {}).get("list", [])
+
+        if not records:
+            return jsonify({"status": "ok", "message": "No closed PnL records found"}), 200
+
+        # Get existing order IDs from journal
+        conn = get_db()
+        import psycopg2.extras
+        with conn.cursor() as cur:
+            cur.execute("SELECT order_id FROM trades WHERE order_id IS NOT NULL")
+            existing_ids = {row[0] for row in cur.fetchall()}
+        conn.close()
+
+        for r in records:
+            try:
+                order_id   = r.get("orderId", "")
+                symbol     = r.get("symbol", "")
+                side_close = r.get("side", "")  # closing side
+                qty        = float(r.get("qty", 0))
+                exit_price = float(r.get("avgExitPrice", 0) or r.get("exitPrice", 0))
+                pnl        = float(r.get("closedPnl", 0) or 0)
+                exec_type  = r.get("execType", "")
+                created_ms = int(r.get("createdTime", 0) or 0)
+
+                if not order_id or not symbol or exit_price <= 0:
+                    continue
+
+                # Skip if already in journal
+                if order_id in existing_ids:
+                    skipped += 1
+                    continue
+
+                # Entry side is opposite to closing side
+                entry_side = "Buy" if side_close == "Sell" else "Sell"
+                outcome    = "tp" if exec_type == "TakeProfit" else "sl" if exec_type == "StopLoss" else "sl"
+                opened_dt  = datetime.utcfromtimestamp(created_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if created_ms else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+                # Insert as closed trade
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO trades
+                            (symbol, side, status, qty, entry, sl, tp, exit_price,
+                             pnl, pnl_pct, outcome, order_id, source, opened_at, closed_at, notes)
+                        VALUES (%s, %s, 'closed', %s, %s, 0, 0, %s, %s, 0, %s, %s, 'bybit_import', %s, %s, 'Imported from Bybit history')
+                        ON CONFLICT DO NOTHING
+                    """, (symbol, entry_side, qty, exit_price, exit_price,
+                          pnl, outcome, order_id, opened_dt,
+                          datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
+                conn.commit()
+                conn.close()
+                imported += 1
+                results.append(f"✅ {symbol} {entry_side} {outcome.upper()} PnL={pnl:.4f}")
+
+            except Exception as e:
+                errors += 1
+                results.append(f"❌ Error: {e}")
+
+        msg = f"Imported {imported}, skipped {skipped} existing, {errors} errors"
+        log.info(f"Bybit import: {msg}")
+        return jsonify({"status": "ok", "message": msg, "details": results[:20]}), 200
+
+    except Exception as e:
+        import traceback
+        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 def fix_journal():
     """
     Manually fix stale 'open' journal entries by checking Bybit.
