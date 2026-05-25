@@ -1227,71 +1227,103 @@ def import_from_bybit():
     """Import closed trades from Bybit that are missing from the journal."""
     try:
         imported = 0
+        matched  = 0
         skipped  = 0
-        errors   = 0
         results  = []
 
-        # Fetch last 7 days of closed PnL across all symbols
         resp    = session.get_closed_pnl(category="linear", limit=200)
         records = resp.get("result", {}).get("list", [])
 
         if not records:
             return jsonify({"status": "ok", "message": "No closed PnL records found"}), 200
 
-        # Get existing order IDs from journal
+        # Get existing trades for matching
         conn = get_db()
         import psycopg2.extras
-        with conn.cursor() as cur:
-            cur.execute("SELECT order_id FROM trades WHERE order_id IS NOT NULL")
-            existing_ids = {row[0] for row in cur.fetchall()}
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT order_id, symbol, side, source, timeframe, sl, tp, entry, opened_at FROM trades WHERE order_id IS NOT NULL")
+            existing = [dict(r) for r in cur.fetchall()]
         conn.close()
+
+        existing_ids  = {t["order_id"] for t in existing}
+        # Index by symbol+side for quick lookup
+        from collections import defaultdict
+        by_sym_side = defaultdict(list)
+        for t in existing:
+            by_sym_side[(t["symbol"], t["side"])].append(t)
 
         for r in records:
             try:
                 order_id   = r.get("orderId", "")
                 symbol     = r.get("symbol", "")
-                side_close = r.get("side", "")  # closing side
+                side_close = r.get("side", "")
                 qty        = float(r.get("qty", 0))
                 exit_price = float(r.get("avgExitPrice", 0) or r.get("exitPrice", 0))
                 pnl        = float(r.get("closedPnl", 0) or 0)
                 exec_type  = r.get("execType", "")
-                created_ms  = int(r.get("createdTime",  0) or 0)
-                updated_ms  = int(r.get("updatedTime",  0) or created_ms)
-                opened_dt   = datetime.utcfromtimestamp(created_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if created_ms else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                closed_dt   = datetime.utcfromtimestamp(updated_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if updated_ms else opened_dt
+                created_ms = int(r.get("createdTime", 0) or 0)
+                updated_ms = int(r.get("updatedTime", 0) or created_ms)
 
                 if not order_id or not symbol or exit_price <= 0:
                     continue
-
                 if order_id in existing_ids:
                     skipped += 1
                     continue
 
                 entry_side = "Buy" if side_close == "Sell" else "Sell"
-                outcome    = "tp" if exec_type == "TakeProfit" else "sl" if exec_type == "StopLoss" else "sl"
+                outcome    = "tp" if exec_type == "TakeProfit" else "sl"
+                closed_dt  = datetime.utcfromtimestamp(updated_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if updated_ms else datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                opened_dt  = datetime.utcfromtimestamp(created_ms/1000).strftime("%Y-%m-%d %H:%M:%S") if created_ms else closed_dt
+
+                # Try to find matching journal entry by symbol+side+time proximity
+                source_val    = "bybit_import"
+                timeframe_val = None
+                sl_val        = 0
+                tp_val        = 0
+                entry_val     = exit_price
+                notes_val     = "Imported — no indicator data"
+
+                candidates = by_sym_side.get((symbol, entry_side), [])
+                for c in candidates:
+                    try:
+                        c_opened = datetime.strptime(c["opened_at"][:19], "%Y-%m-%d %H:%M:%S")
+                        b_opened = datetime.strptime(opened_dt[:19], "%Y-%m-%d %H:%M:%S")
+                        diff_mins = abs((b_opened - c_opened).total_seconds() / 60)
+                        if diff_mins < 60:  # within 1 hour
+                            source_val    = c.get("source") or "bybit_import"
+                            timeframe_val = c.get("timeframe")
+                            sl_val        = c.get("sl") or 0
+                            tp_val        = c.get("tp") or 0
+                            entry_val     = c.get("entry") or exit_price
+                            notes_val     = f"Imported — matched to journal entry"
+                            matched      += 1
+                            break
+                    except:
+                        pass
 
                 conn = get_db()
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO trades
                             (symbol, side, status, qty, entry, sl, tp, exit_price,
-                             pnl, pnl_pct, outcome, order_id, source, opened_at, closed_at, notes)
-                        VALUES (%s, %s, 'closed', %s, %s, 0, 0, %s, %s, 0, %s, %s, 'bybit_import', %s, %s, 'Imported from Bybit history')
+                             pnl, pnl_pct, outcome, order_id, source, timeframe,
+                             opened_at, closed_at, notes)
+                        VALUES (%s,%s,'closed',%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT DO NOTHING
-                    """, (symbol, entry_side, qty, exit_price, exit_price,
-                          pnl, outcome, order_id, opened_dt, closed_dt))
+                    """, (symbol, entry_side, qty, entry_val, sl_val, tp_val,
+                          exit_price, pnl, outcome, order_id,
+                          source_val, timeframe_val, opened_dt, closed_dt, notes_val))
                 conn.commit()
                 conn.close()
                 imported += 1
-                results.append(f"✅ {symbol} {entry_side} {outcome.upper()} PnL={pnl:.4f}")
+                results.append(f"✅ {symbol} {entry_side} {outcome.upper()} src={source_val} PnL={pnl:.4f}")
 
             except Exception as e:
-                errors += 1
-                results.append(f"❌ Error: {e}")
+                results.append(f"❌ {symbol}: {e}")
 
-        msg = f"Imported {imported}, skipped {skipped} existing, {errors} errors"
+        msg = f"Imported {imported} ({matched} matched to indicator), skipped {skipped} existing"
         log.info(f"Bybit import: {msg}")
-        return jsonify({"status": "ok", "message": msg, "details": results[:20]}), 200
+        return jsonify({"status": "ok", "message": msg, "details": results[:30]}), 200
 
     except Exception as e:
         import traceback
@@ -1726,8 +1758,10 @@ ANALYSIS_HTML = """
 
 def _analyse_trades(trades):
     """Compute analysis metrics from trade list."""
-    closed = [t for t in trades if t.get("outcome") in ("tp", "sl")]
-    open_t = [t for t in trades if t.get("status") == "open"]
+    # Exclude imported trades with no indicator data from win rate analysis
+    valid   = [t for t in trades if (t.get("source") or "") not in ("bybit_import",) or t.get("timeframe")]
+    closed  = [t for t in valid if t.get("outcome") in ("tp", "sl")]
+    open_t  = [t for t in trades if t.get("status") == "open"]
 
     wins   = [t for t in closed if t["outcome"] == "tp"]
     losses = [t for t in closed if t["outcome"] == "sl"]
