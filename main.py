@@ -1496,7 +1496,7 @@ ANALYSIS_HTML = """
 <body>
 <div class="nav"><a href="/journal">← Journal</a><a href="/status">Status</a></div>
 <h1>// Trade Analysis</h1>
-<p class="subtitle">{{ total_closed }} closed trades · {{ total_open }} open · updated just now</p>
+<p class="subtitle">{{ total_closed }} closed trades ({{ total_known }} with indicator data{% if total_imported > 0 %}, {{ total_imported }} imported{% endif %}) · {{ total_open }} open · updated just now</p>
 
 <div class="grid">
   <div class="stat"><div class="stat-label">Win rate</div><div class="stat-value" style="color:{{ 'var(--green)' if wr >= 40 else 'var(--red)' }}">{{ wr }}%</div></div>
@@ -1773,10 +1773,15 @@ ANALYSIS_HTML = """
 
 def _analyse_trades(trades):
     """Compute analysis metrics from trade list."""
-    # Exclude imported trades with no indicator data from win rate analysis
-    valid   = [t for t in trades if (t.get("source") or "") not in ("bybit_import",) or t.get("timeframe")]
-    closed  = [t for t in valid if t.get("outcome") in ("tp", "sl")]
+    # All resolved trades for overall stats (including imports — we know TP/SL)
+    closed  = [t for t in trades if t.get("outcome") in ("tp", "sl")]
     open_t  = [t for t in trades if t.get("status") == "open"]
+
+    # For breakdowns — exclude unmatched imports (no source/timeframe data)
+    def has_indicator(t):
+        src = (t.get("source") or "")
+        return src != "bybit_import" or bool(t.get("timeframe"))
+    closed_known = [t for t in closed if has_indicator(t)]
 
     wins   = [t for t in closed if t["outcome"] == "tp"]
     losses = [t for t in closed if t["outcome"] == "sl"]
@@ -1798,7 +1803,7 @@ def _analyse_trades(trades):
 
     def group_stats(key_fn):
         groups = {}
-        for t in closed:
+        for t in closed_known:  # only trades with known indicator
             k = key_fn(t)
             if k not in groups:
                 groups[k] = {"wins": 0, "losses": 0, "pnl": 0.0}
@@ -1922,7 +1927,7 @@ def _analyse_trades(trades):
     by_session_raw = {}
     wk_stats       = {"Weekend": {"wins":0,"losses":0,"pnl":0.0}, "Weekday": {"wins":0,"losses":0,"pnl":0.0}}
 
-    for t in closed:
+    for t in closed_known:
         pnl     = float(t.get("pnl") or 0)
         outcome = t["outcome"]
         day, session, is_weekend, d_order = get_day_session(t.get("opened_at") or "")
@@ -1966,7 +1971,7 @@ def _analyse_trades(trades):
     def cross_breakdown(key1_fn, key2_fn):
         """Group by two keys, return nested stats."""
         groups = {}
-        for t in closed:
+        for t in closed_known:
             k1 = key1_fn(t)
             k2 = key2_fn(t)
             key = (k1, k2)
@@ -2009,6 +2014,8 @@ def _analyse_trades(trades):
 
     return {
         "total_closed":   total_closed,
+        "total_known":    len(closed_known),
+        "total_imported": total_closed - len(closed_known),
         "total_open":     len(open_t),
         "wr":             wr,
         "total_pnl":      total_pnl,
