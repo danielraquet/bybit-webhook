@@ -1376,6 +1376,11 @@ def import_from_bybit():
                     except Exception as e:
                         results.append(f"⚠️ {symbol}: match update failed: {e}")
                     continue  # don't insert duplicate
+
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO trades
                             (symbol, side, status, qty, entry, sl, tp, exit_price,
                              pnl, pnl_pct, outcome, order_id, source, timeframe,
                              opened_at, closed_at, notes)
