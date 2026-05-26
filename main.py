@@ -1222,6 +1222,36 @@ def manual_poll():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
+@app.route("/journal/delete-duplicates", methods=["GET", "POST"])
+def delete_duplicates():
+    """Delete duplicate imported trades where an identical native trade exists."""
+    try:
+        conn = get_db()
+        import psycopg2.extras
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Find imported trades where symbol+side+exit_price matches a non-imported trade
+            cur.execute("""
+                DELETE FROM trades
+                WHERE source = 'bybit_import'
+                AND notes = 'Imported — matched to journal entry'
+                AND EXISTS (
+                    SELECT 1 FROM trades t2
+                    WHERE t2.id != trades.id
+                    AND t2.symbol = trades.symbol
+                    AND t2.side   = trades.side
+                    AND t2.source != 'bybit_import'
+                    AND ABS(EXTRACT(EPOCH FROM (t2.opened_at::timestamp - trades.opened_at::timestamp))) < 3600
+                )
+                RETURNING id
+            """)
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "message": f"Deleted {deleted} duplicate imported trades"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/journal/delete-imports", methods=["GET", "POST"])
 def delete_imports():
     """Delete all bybit_import trades so they can be re-imported with better matching."""
@@ -1316,10 +1346,36 @@ def import_from_bybit():
                     except:
                         pass
 
-                conn = get_db()
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO trades
+                # If matched to an existing journal entry — skip, don't create duplicate
+                if notes_val == "Imported — matched to journal entry":
+                    # Update the existing entry's PnL if it's missing
+                    try:
+                        conn2 = get_db()
+                        with conn2.cursor() as cur2:
+                            cur2.execute("""
+                                UPDATE trades SET
+                                    exit_price = %s,
+                                    pnl        = %s,
+                                    outcome    = %s,
+                                    closed_at  = %s,
+                                    status     = 'closed'
+                                WHERE symbol = %s AND side = %s
+                                AND opened_at BETWEEN %s::timestamp - interval '1 hour'
+                                             AND     %s::timestamp + interval '1 hour'
+                                AND status != 'closed'
+                            """, (exit_price, pnl, outcome, closed_dt,
+                                  symbol, entry_side, opened_dt, opened_dt))
+                            updated = cur2.rowcount
+                        conn2.commit()
+                        conn2.close()
+                        if updated:
+                            matched += 1
+                            results.append(f"🔄 {symbol} {entry_side} updated existing entry")
+                        else:
+                            skipped += 1
+                    except Exception as e:
+                        results.append(f"⚠️ {symbol}: match update failed: {e}")
+                    continue  # don't insert duplicate
                             (symbol, side, status, qty, entry, sl, tp, exit_price,
                              pnl, pnl_pct, outcome, order_id, source, timeframe,
                              opened_at, closed_at, notes)
