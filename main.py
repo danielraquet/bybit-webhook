@@ -2273,20 +2273,44 @@ function runBacktest(btn) {
 {% endif %}
 {% if bt_available %}
 <div class="section">
-  <div class="section-title">🤖 Backtest Results — OB Strategy ({{ bt_updated }})</div>
-  <p style="font-size:11px;color:var(--dim);margin-bottom:10px">{{ bt_rows|length }} combinations · Last 90 days · Simulated entries at OB detection</p>
+  <div class="section-title">🤖 Backtest Results — OB vs OB + Key Level Filter ({{ bt_updated }})</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:10px">{{ bt_rows|length }} combinations · Faded rows WR &lt; 30% · 🔑 = key level variant improves WR</p>
   <table>
-    <tr><th>Symbol</th><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PF</th><th>Expectancy</th><th>Max DD</th></tr>
-    {% for r in bt_rows %}
-    <tr style="{{ 'opacity:0.5' if r.win_rate < 30 else '' }}">
+    <tr><th>Symbol</th><th>TF</th><th>OB only WR%</th><th>OB + KL WR%</th><th>Δ</th><th>OB trades</th><th>KL trades</th><th>Recommendation</th></tr>
+    {% for r in bt_comparison %}
+    <tr style="{{ 'opacity:0.5' if r.ob_wr < 30 else '' }}">
       <td>{{ r.symbol }}</td>
-      <td><span class="tag tag-blue">{{ r.timeframe }}</span></td>
-      <td class="green">{{ r.wins }}</td>
-      <td class="red">{{ r.losses }}</td>
-      <td>{{ r.win_rate }}%<span class="bar-wrap"><span class="bar" style="width:{{ r.win_rate }}%;background:{{ '#4caf50' if r.win_rate >= 50 else '#ffa726' if r.win_rate >= 35 else '#ef5350' }};"></span></span></td>
-      <td style="color:{{ 'var(--green)' if r.profit_factor >= 1 else 'var(--red)' }}">{{ '%.2f'|format(r.profit_factor) }}</td>
-      <td style="color:{{ 'var(--green)' if r.expectancy >= 0 else 'var(--red)' }}">{{ '+' if r.expectancy >= 0 else '' }}{{ '%.3f'|format(r.expectancy) }}R</td>
-      <td style="color:var(--amber)">{{ '%.1f'|format(r.max_dd) }}R</td>
+      <td><span class="tag tag-blue">{{ r.tf }}</span></td>
+      <td>
+        {{ r.ob_wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.ob_wr }}%;background:{{ '#4caf50' if r.ob_wr >= 50 else '#ffa726' if r.ob_wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td>
+        {% if r.kl_wr %}
+        <span style="font-weight:500;color:{{ 'var(--green)' if r.kl_wr >= 50 else 'var(--amber)' if r.kl_wr >= 35 else 'var(--red)' }}">{{ r.kl_wr }}%</span>
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.kl_wr }}%;background:{{ '#4caf50' if r.kl_wr >= 50 else '#ffa726' if r.kl_wr >= 35 else '#ef5350' }};"></span></span>
+        {% else %}
+        <span style="color:var(--dim)">—</span>
+        {% endif %}
+      </td>
+      <td style="font-weight:500;color:{{ 'var(--green)' if r.delta and r.delta > 0 else 'var(--red)' if r.delta and r.delta < 0 else 'var(--dim)' }}">
+        {% if r.delta %}{{ '+' if r.delta > 0 else '' }}{{ r.delta }}%{% else %}—{% endif %}
+      </td>
+      <td style="color:var(--dim)">{{ r.ob_total }}</td>
+      <td style="color:var(--dim)">{{ r.kl_total or '—' }}</td>
+      <td>
+        {% if r.kl_wr and r.delta and r.delta >= 5 %}
+        <span class="tag tag-green">🔑 Use KL filter</span>
+        {% elif r.kl_wr and r.delta and r.delta < -5 %}
+        <span class="tag tag-red">Skip KL filter</span>
+        {% elif r.ob_wr >= 45 %}
+        <span class="tag tag-green">✅ Trade</span>
+        {% elif r.ob_wr < 35 %}
+        <span class="tag tag-red">❌ Avoid</span>
+        {% else %}
+        <span class="tag tag-amber">⚠️ Caution</span>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </table>
@@ -2572,7 +2596,115 @@ def _bt_detect_obs(bars, atrs, min_impulse=None, sl_buf=None, entry_offset=None)
     return obs
 
 
-def _bt_simulate(bars, obs, rr=None, cancel_after=20):
+def _bt_find_key_levels(bars, lookback=300, tol_pct=0.3, min_score=6):
+    """
+    Pivot-bounce key level detection — mirrors the Pine Script algorithm.
+    Returns list of significant price levels with their scores.
+    """
+    lb   = min(lookback, len(bars) - 1)
+    pvlen = 5
+
+    # Find pivot highs and lows
+    pivots = []
+    for i in range(pvlen, lb - pvlen):
+        is_high = all(bars[i]["high"] >= bars[i-j]["high"] and
+                      bars[i]["high"] >= bars[i+j]["high"] for j in range(1, pvlen+1))
+        is_low  = all(bars[i]["low"]  <= bars[i-j]["low"]  and
+                      bars[i]["low"]  <= bars[i+j]["low"]  for j in range(1, pvlen+1))
+        if is_high:
+            pivots.append({"price": bars[i]["high"], "is_high": True,  "bar": i})
+        if is_low:
+            pivots.append({"price": bars[i]["low"],  "is_high": False, "bar": i})
+
+    if not pivots:
+        return []
+
+    # Cluster pivots
+    levels = []  # {price, score, touches}
+    for pv in pivots:
+        p     = pv["price"]
+        found = False
+        for lv in levels:
+            if lv["price"] > 0 and abs(p - lv["price"]) / lv["price"] * 100 < tol_pct:
+                cnt = lv["touches"]
+                lv["price"]   = (lv["price"] * cnt + p) / (cnt + 1)
+                lv["touches"] += 1
+                found = True
+                break
+        if not found:
+            levels.append({"price": p, "score": 0, "touches": 1})
+
+    # Score each level
+    for lv in levels:
+        lp        = lv["price"]
+        score     = 0
+        tol       = lp * tol_pct / 100
+        zone_bars = 0
+        cons_added = False
+        last_above = bars[min(lb, len(bars)-1)]["close"] > lp
+
+        for k in range(min(lb, len(bars)-2), 0, -1):
+            b         = bars[k]
+            body      = abs(b["close"] - b["open"])
+            up_wick   = b["high"]  - max(b["close"], b["open"])
+            dn_wick   = min(b["close"], b["open"]) - b["low"]
+            near      = abs(b["close"] - lp) < tol
+
+            # Consolidation
+            if near:
+                zone_bars += 1
+                if zone_bars == 3 and not cons_added:
+                    score     += 2
+                    cons_added = True
+            else:
+                zone_bars  = 0
+                cons_added = False
+
+            # Touch (side switch)
+            now_above = b["close"] > lp
+            if near and now_above != last_above:
+                score += 1
+            last_above = now_above
+
+            # Wick rejection
+            wick_bull = b["low"]  < lp - tol and b["close"] > lp
+            wick_bear = b["high"] > lp + tol and b["close"] < lp
+            if (wick_bull or wick_bear) and body > 0 and (up_wick + dn_wick) >= body:
+                score += 3
+
+            # Failed breakout
+            if k < len(bars) - 1:
+                prev_c = bars[k+1]["close"]
+                if (prev_c > lp + tol and b["close"] < lp) or \
+                   (prev_c < lp - tol and b["close"] > lp):
+                    score += 4
+
+        lv["score"] = score
+
+    # Filter and sort by score
+    qualified = [lv for lv in levels if lv["score"] >= min_score]
+    qualified.sort(key=lambda x: -x["score"])
+    return qualified[:10]  # top 10 levels
+
+
+def _bt_ob_near_key_level(ob_top, ob_bot, ob_type, atr, key_levels, proximity=1.0):
+    """Check if OB zone overlaps a key level of the correct type (support for bull, resistance for bear)."""
+    if not key_levels:
+        return False
+    slack = atr * proximity
+    # Use midpoint of current bars as proxy for "close" to determine S/R
+    mid = (ob_top + ob_bot) / 2
+    for lv in key_levels:
+        lp     = lv["price"]
+        is_res = lp > mid
+        dir_ok = (ob_type == 1 and not is_res) or (ob_type == 2 and is_res)
+        in_zone = ob_bot - slack <= lp <= ob_top + slack
+        if dir_ok and in_zone:
+            return True
+    return False
+
+
+
     rr_ratio = rr if rr is not None else BT_RR_RATIO
     results  = []
     # Start active from bar AFTER detection (ob["bar"]+1) — same as indicator
@@ -2733,7 +2865,8 @@ def _get_indicator_settings():
         log.error(f"BT table init error: {e}")
 
 
-def _bt_save(symbol, timeframe, stats):
+def _bt_save(symbol, timeframe, stats, variant="ob"):
+    """Save backtest result. variant: 'ob' = no KL filter, 'ob_kl' = with KL filter."""
     conn = get_db()
     now  = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     sets = json.dumps({"rr": BT_RR_RATIO, "sl_buf": BT_SL_BUF_ATR,
@@ -2773,7 +2906,7 @@ def _bt_save(symbol, timeframe, stats):
                     avg_win=EXCLUDED.avg_win, avg_loss=EXCLUDED.avg_loss,
                     profit_factor=EXCLUDED.profit_factor, expectancy=EXCLUDED.expectancy,
                     max_dd=EXCLUDED.max_dd, settings=EXCLUDED.settings, run_at=EXCLUDED.run_at
-            """, (symbol, timeframe, "ob",
+            """, (symbol, timeframe, variant,
                   stats["wins"], stats["losses"], stats["total"], stats["win_rate"],
                   stats["total_pnl"], stats["avg_win"], stats["avg_loss"],
                   stats["profit_factor"], stats["expectancy"], stats["max_dd"], sets, now))
@@ -2820,12 +2953,28 @@ def run_backtest_job():
                         continue
                     atrs    = _bt_calc_atr(bars, BT_ATR_LEN)
                     obs     = _bt_detect_obs(bars, atrs, min_impulse, sl_buf, entry_offset)
+
+                    # ── Variant 1: no key level filter ────────────────────────
                     results = _bt_simulate(bars, obs, rr)
                     stats   = _bt_stats(results)
-                    log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: {len(bars)} bars → {len(obs)} OBs → {len(results)} trades → {'✅ saved' if stats else f'❌ need {BT_MIN_TRADES} (got {len(results)})'}")
+                    log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: {len(bars)} bars → {len(obs)} OBs → {len(results)} trades → {'✅' if stats else '❌'} (no KL)")
                     if stats:
-                        _bt_save(symbol, tf_label, stats)
+                        _bt_save(symbol, tf_label, stats, variant="ob")
                         saved += 1
+
+                    # ── Variant 2: with key level filter ─────────────────────
+                    key_levels = _bt_find_key_levels(bars, lookback=min(lookback, 300))
+                    if key_levels:
+                        obs_kl  = [ob for ob in obs if _bt_ob_near_key_level(
+                                    ob["top"], ob["bot"], ob["type"],
+                                    atrs[ob["bar"]] or atrs[-1],
+                                    key_levels)]
+                        results_kl = _bt_simulate(bars, obs_kl, rr)
+                        stats_kl   = _bt_stats(results_kl)
+                        log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: {len(obs_kl)}/{len(obs)} OBs near KL → {len(results_kl)} trades → {'✅' if stats_kl else '❌'} (with KL)")
+                        if stats_kl:
+                            _bt_save(symbol, tf_label, stats_kl, variant="ob_kl")
+                            saved += 1
                 except Exception as e:
                     log.error(f"  {symbol}/{tf_label}: {e}")
                 time.sleep(0.5)
@@ -2962,12 +3111,31 @@ def backtest_status():
     try:
         trades = get_all_trades(500)
         data   = _build_recommendations(trades)
-        # Add backtest results
         bt_rows = _get_backtest_results()
+
+        # Build OB vs OB+KL comparison
+        ob_results  = {(r["symbol"], r["timeframe"]): r for r in bt_rows if r["source"] == "ob"}
+        kl_results  = {(r["symbol"], r["timeframe"]): r for r in bt_rows if r["source"] == "ob_kl"}
+        bt_comparison = []
+        for key, ob in sorted(ob_results.items(), key=lambda x: -x[1]["win_rate"]):
+            kl    = kl_results.get(key)
+            delta = round(kl["win_rate"] - ob["win_rate"], 1) if kl else None
+            bt_comparison.append({
+                "symbol":   key[0],
+                "tf":       key[1],
+                "ob_wr":    ob["win_rate"],
+                "ob_total": ob["total"],
+                "kl_wr":    kl["win_rate"] if kl else None,
+                "kl_total": kl["total"]    if kl else None,
+                "delta":    delta,
+            })
+
         data["bt_rows"]       = bt_rows
+        data["bt_comparison"] = bt_comparison
         data["bt_available"]  = len(bt_rows) > 0
         data["bt_updated"]    = bt_rows[0]["run_at"] if bt_rows else None
         data["bt_status"]     = _bt_status
+        data["bt_analysis"]   = _build_bt_recommendations(bt_rows)
         return render_template_string(RECOMMENDATIONS_HTML, **data)
     except Exception as e:
         import traceback
