@@ -874,26 +874,39 @@ def webhook():
     """
     data = request.get_json(silent=True, force=True)
     # Store for debugging
+    raw_body = request.get_data(as_text=True)
     _last_webhooks.append({
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "data": data,
-        "raw":  request.get_data(as_text=True)[:200] if not data else None
+        "raw":  raw_body[:300]
     })
     if len(_last_webhooks) > 5:
         _last_webhooks.pop(0)
+
     if not data:
-        raw = request.get_data(as_text=True)
+        raw = raw_body
         log.info(f"Raw payload received: {repr(raw[:500])}")
         import json as json_lib
-        # Find the last { ... } block in the message
-        start = raw.rfind('{')
-        end   = raw.rfind('}')
-        if start != -1 and end != -1 and end > start:
+
+        # Method 1: split on || separator (readable text || JSON)
+        if "||" in raw:
             try:
-                data = json_lib.loads(raw[start:end+1])
-                log.info(f"Extracted JSON: {data}")
+                json_part = raw.split("||")[-1].strip()
+                data = json_lib.loads(json_part)
+                log.info(f"Extracted JSON via || separator: {data}")
             except Exception as e:
-                log.warning(f"JSON parse failed: {e} — attempted: {repr(raw[start:end+1][:200])}")
+                log.warning(f"|| JSON parse failed: {e}")
+
+        # Method 2: find last { } block
+        if not data:
+            start = raw.rfind('{')
+            end   = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json_lib.loads(raw[start:end+1])
+                    log.info(f"Extracted JSON via brace search: {data}")
+                except Exception as e:
+                    log.warning(f"Brace JSON parse failed: {e}")
     if not data:
         raw = request.get_data(as_text=True)
         log.info(f"Non-JSON alert received (notification only, no order): {repr(raw[:200])}")
