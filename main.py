@@ -845,6 +845,19 @@ def debug():
     }), 200
 
 
+@app.route("/webhook/last", methods=["GET"])
+def webhook_last():
+    """Show the last 5 webhook payloads received."""
+    return jsonify({
+        "last_payloads": _last_webhooks,
+        "count": len(_last_webhooks)
+    }), 200
+
+
+# Store last 5 webhook payloads for debugging
+_last_webhooks = []
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """
@@ -859,7 +872,15 @@ def webhook():
         "tp":      83800.0
     }
     """
-    data = request.get_json(silent=True, force=True)  # force=True ignores Content-Type
+    data = request.get_json(silent=True, force=True)
+    # Store for debugging
+    _last_webhooks.append({
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "data": data,
+        "raw":  request.get_data(as_text=True)[:200] if not data else None
+    })
+    if len(_last_webhooks) > 5:
+        _last_webhooks.pop(0)
     if not data:
         raw = request.get_data(as_text=True)
         log.info(f"Raw payload received: {repr(raw[:500])}")
