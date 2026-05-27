@@ -878,7 +878,7 @@ def webhook():
     _last_webhooks.append({
         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "data": data,
-        "raw":  raw_body[:300]
+        "raw":  raw_body[:1000]
     })
     if len(_last_webhooks) > 5:
         _last_webhooks.pop(0)
@@ -888,25 +888,28 @@ def webhook():
         log.info(f"Raw payload received: {repr(raw[:500])}")
         import json as json_lib
 
-        # Method 1: split on || separator (readable text || JSON)
-        if "||" in raw:
+        # Method 1: find JSON by locating the { that starts the JSON object
+        # Alert format: "readable text | {json}" — JSON starts at last {
+        if not data:
+            start = raw.find('{"secret"')  # find the JSON start specifically
+            if start == -1:
+                start = raw.rfind('{')
+            end = raw.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json_lib.loads(raw[start:end+1])
+                    log.info(f"Extracted JSON: {data}")
+                except Exception as e:
+                    log.warning(f"JSON parse failed: {e} on: {repr(raw[start:end+1][:300])}")
+
+        # Method 2: split on || separator
+        if not data and "||" in raw:
             try:
                 json_part = raw.split("||")[-1].strip()
                 data = json_lib.loads(json_part)
                 log.info(f"Extracted JSON via || separator: {data}")
             except Exception as e:
-                log.warning(f"|| JSON parse failed: {e}")
-
-        # Method 2: find last { } block
-        if not data:
-            start = raw.rfind('{')
-            end   = raw.rfind('}')
-            if start != -1 and end != -1 and end > start:
-                try:
-                    data = json_lib.loads(raw[start:end+1])
-                    log.info(f"Extracted JSON via brace search: {data}")
-                except Exception as e:
-                    log.warning(f"Brace JSON parse failed: {e}")
+                log.warning(f"|| parse failed: {e}")
     if not data:
         raw = request.get_data(as_text=True)
         log.info(f"Non-JSON alert received (notification only, no order): {repr(raw[:200])}")
