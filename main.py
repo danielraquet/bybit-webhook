@@ -311,6 +311,7 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
   <button class="filter-btn" onclick="runImport(this)" style="color:var(--amber)">📥 Import Bybit</button>
+  <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
 </div>
 
 <div class="table-wrap">
@@ -385,6 +386,20 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function runDeleteDupes(btn) {
+  if (!confirm('Delete duplicate imported trades? This removes imports where a matching native trade already exists.')) return;
+  const base = window.location.origin;
+  btn.innerText = '⏳ Deleting...';
+  btn.disabled = true;
+  fetch(base + '/journal/delete-duplicates', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ ' + (data.message || 'Done');
+      setTimeout(() => { btn.innerText = '🗑️ Delete Dupes'; btn.disabled = false; location.reload(); }, 2000);
+    })
+    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
 function runImport(btn) {
   if (!confirm('Import missing trades from Bybit history? This will add closed trades not yet in the journal.')) return;
   const base = window.location.origin;
