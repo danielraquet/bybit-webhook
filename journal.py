@@ -71,18 +71,24 @@ if DATABASE_URL:
             conn.close()
 
     def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO trades
-                        (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, opened_at)
-                    VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING id
-                """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes,
-                      datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
-                row_id = cur.fetchone()[0]
-            conn.commit()
-            return row_id
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO trades
+                            (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, opened_at)
+                        VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                    """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes,
+                          datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
+                    row_id = cur.fetchone()[0]
+                conn.commit()
+                return row_id
+        except Exception as e:
+            log.error(f"log_order_placed failed for {symbol} {side}: {e}")
+            import traceback
+            log.error(traceback.format_exc())
+            return None
 
     def log_trade_closed(order_id, exit_price, outcome, realised_pnl=None):
         with get_db() as conn:
