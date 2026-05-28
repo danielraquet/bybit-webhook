@@ -853,6 +853,23 @@ def debug():
     }), 200
 
 
+@app.route("/webhook/test", methods=["GET"])
+def webhook_test():
+    """Test the full webhook chain with a fake payload."""
+    try:
+        test_payload = '{"secret":"' + WEBHOOK_SECRET + '","symbol":"TESTUSDT","side":"Buy","orderType":"Limit","entry":1.0,"sl":0.9,"tp":1.3,"cancelAfterBars":20,"barSeconds":180,"testMode":true,"testBalancePct":0.1,"testLeverage":2,"source":"ob","rr":3,"slBuf":0.1,"minImpulse":1.3,"entryOffset":0.0}'
+        import json as _j
+        data = _j.loads(test_payload)
+        return jsonify({
+            "status": "ok",
+            "parsed": data,
+            "secret_match": data.get("secret") == WEBHOOK_SECRET,
+            "message": "Parsing works. If this shows ok but real alerts fail, the issue is in TradingView sending."
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/webhook/last", methods=["GET"])
 def webhook_last():
     """Show the last 5 webhook payloads received."""
