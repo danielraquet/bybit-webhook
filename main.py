@@ -874,6 +874,7 @@ def webhook():
     """
     # Read raw body FIRST before any other request parsing
     raw_body = request.get_data(as_text=True)
+    log.info(f"WEBHOOK received, raw_body length={len(raw_body)}, preview={repr(raw_body[:100])}")
 
     # Try standard JSON parse
     data = None
@@ -933,11 +934,10 @@ def webhook():
             except Exception as e:
                 log.warning(f"|| parse failed: {e}")
     if not data:
-        raw = request.get_data(as_text=True)
-        log.info(f"Non-JSON alert received (notification only, no order): {repr(raw[:200])}")
+        log.warning(f"JSON extraction FAILED — raw_body={repr(raw_body[:300])}")
         return jsonify({"status": "ok", "message": "Notification received — no order placed"}), 200
 
-    log.info(f"Received alert: {data}")
+    log.info(f"JSON parsed OK: symbol={data.get('symbol')} side={data.get('side')} source={data.get('source')}")
 
     # ── Read config fresh — picks up any Railway variable changes ─────────────
     cfg = get_config()
