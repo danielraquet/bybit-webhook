@@ -988,14 +988,25 @@ def webhook():
     # ── Server-side filters ───────────────────────────────────────────────────
     tf_label = gsheets._bar_seconds_to_tf(bar_seconds)
 
-    # Extract WR from alert payload
+    # Extract WR from raw readable text — format: "WR: 28% (7/25)"
     alert_wr = 0.0
     try:
-        wr_raw = str(data.get("wr", "") or "")
-        if wr_raw:
-            alert_wr = float(wr_raw.split("%")[0].strip())
+        import re as _re
+        wr_match = _re.search(r'WR:\s*([\d.]+)%', raw_body)
+        if wr_match:
+            alert_wr = float(wr_match.group(1))
+            log.info(f"Extracted WR from text: {alert_wr}%")
     except:
         pass
+
+    # Also try from JSON payload if present
+    if alert_wr == 0.0:
+        try:
+            wr_raw = str(data.get("wr", "") or "") if data else ""
+            if wr_raw:
+                alert_wr = float(wr_raw.split("%")[0].strip())
+        except:
+            pass
 
     def _filter_skip(reason):
         log.info(f"🚫 Filtered: {reason}")
@@ -1009,7 +1020,9 @@ def webhook():
             return _filter_skip(f"{symbol} {side} blocked — FILTER_SIDE={cfg['filter_side']}")
 
     # Min WR filter: FILTER_MIN_WR=49
-    if cfg["filter_min_wr"] > 0 and alert_wr > 0:
+    if cfg["filter_min_wr"] > 0:
+        if alert_wr == 0.0:
+            return _filter_skip(f"{symbol} WR unknown (could not extract from alert) — FILTER_MIN_WR={cfg['filter_min_wr']}% requires known WR")
         if alert_wr < cfg["filter_min_wr"]:
             return _filter_skip(f"{symbol} WR {alert_wr}% < FILTER_MIN_WR={cfg['filter_min_wr']}%")
 
