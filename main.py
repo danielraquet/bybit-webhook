@@ -909,37 +909,14 @@ def webhook():
     except Exception:
         pass
 
-    # Store for debugging
-    _last_webhooks.append({
-        "time":   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        "data":   data,
-        "raw":    raw_body[:1000],
-        "parsed": data is not None,
-    })
-    if len(_last_webhooks) > 5:
-        _last_webhooks.pop(0)
-
     if not data:
         log.info(f"Raw payload: {repr(raw_body[:500])}")
-
-        # TradingView sends the alert message as plain text
-        # The JSON part uses escaped quotes: \"secret\" instead of "secret"
-        # We need to find and unescape the JSON portion
-
-        # Find the start of the JSON object
-        start = raw_body.find('{"secret"')       # unescaped (direct JSON)
-        if start == -1:
-            start = raw_body.find('{\\\"secret\\\"')  # escaped (embedded in string)
-
-        # Also try finding via last { if secret not found
+        start = raw_body.find('{"secret"')
         if start == -1:
             start = raw_body.rfind('{')
-
         end = raw_body.rfind('}')
-
         if start != -1 and end != -1 and end > start:
             json_str = raw_body[start:end+1]
-            # Unescape if needed
             if '\\"' in json_str:
                 json_str = json_str.replace('\\"', '"')
             try:
@@ -947,8 +924,6 @@ def webhook():
                 log.info(f"Extracted JSON: {data}")
             except Exception as e:
                 log.warning(f"JSON parse failed: {e} — tried: {repr(json_str[:300])}")
-
-        # Fallback: || separator
         if not data and "||" in raw_body:
             try:
                 part = raw_body.split("||")[-1].strip()
@@ -958,6 +933,16 @@ def webhook():
                 log.info(f"Extracted JSON via || separator: {data}")
             except Exception as e:
                 log.warning(f"|| parse failed: {e}")
+
+    # Store for debugging AFTER all parsing attempts
+    _last_webhooks.append({
+        "time":   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "data":   data,
+        "raw":    raw_body[:1000],
+        "parsed": data is not None,
+    })
+    if len(_last_webhooks) > 5:
+        _last_webhooks.pop(0)
     if not data:
         log.warning(f"JSON extraction FAILED — raw_body={repr(raw_body[:300])}")
         return jsonify({"status": "ok", "message": "Notification received — no order placed"}), 200
