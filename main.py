@@ -60,7 +60,7 @@ def get_config():
 
     return {
         "enabled":              _str("ENABLED", "true").lower() == "true",
-        "balance_pct":          _float("BALANCE_PCT",   2.0),
+        "balance_pct":          _float("BALANCE_PCT",   1.0),  # % of wallet to RISK per trade (SL-based)
         "max_trades":           _int("MAX_TRADES",       3),
         "leverage":             _int("LEVERAGE",         5),
         "poll_interval":        _int("POLL_INTERVAL",    300),
@@ -608,26 +608,42 @@ def set_leverage(symbol: str, leverage: int):
         pass  # Already set or not supported — not critical
 
 
-def calculate_qty(symbol: str, entry: float, balance_pct: float, leverage: int) -> float:
+def calculate_qty(symbol: str, entry: float, sl: float, balance_pct: float, leverage: int) -> float:
     """
-    Calculate order quantity based on % of available balance.
-    qty = (balance * pct/100 * leverage) / entry_price
+    Risk-based position sizing.
+    Risk a fixed % of wallet per trade based on SL distance.
+    qty = (balance × risk_pct / 100) / |entry - sl|
+    This ensures every trade risks the same dollar amount regardless of asset price.
     """
     balance = get_available_balance()
     if balance <= 0:
         log.error("Zero or negative balance — cannot calculate qty")
         return 0.0
 
-    info       = get_instrument_info(symbol)
-    notional   = balance * (balance_pct / 100.0) * leverage
-    raw_qty    = notional / entry
-    qty        = round_to_step(raw_qty, info["qty_step"])
+    sl_distance = abs(entry - sl)
+    if sl_distance <= 0:
+        log.error(f"{symbol}: SL distance is zero — cannot calculate qty")
+        return 0.0
+
+    info        = get_instrument_info(symbol)
+    risk_amount = balance * (balance_pct / 100.0)   # $ amount to risk
+    raw_qty     = risk_amount / sl_distance          # qty that risks exactly risk_amount
+    qty         = round_to_step(raw_qty, info["qty_step"])
+
+    # Check notional value meets Bybit minimums (usually $1-5)
+    notional = qty * entry
+    min_notional = 1.0  # Bybit minimum notional
+    if notional < min_notional:
+        log.warning(f"{symbol}: notional {notional:.4f} below minimum — adjusting qty")
+        qty = round_to_step(min_notional / entry, info["qty_step"])
 
     if qty < info["min_qty"]:
         log.warning(f"{symbol}: calculated qty {qty} below min {info['min_qty']}")
         return 0.0
 
-    log.info(f"{symbol}: balance={balance:.2f} USDT, notional={notional:.2f}, qty={qty}")
+    actual_risk = qty * sl_distance
+    margin      = qty * entry / leverage
+    log.info(f"{symbol}: balance={balance:.2f} risk={risk_amount:.2f} USDT sl_dist={sl_distance:.6f} qty={qty} margin={margin:.2f} USDT actual_risk={actual_risk:.2f} USDT")
     return qty
 
 
@@ -1160,7 +1176,7 @@ def webhook():
             actual_leverage = cfg["leverage"]
 
         trade_balance = get_available_balance()  # store for Google Sheets
-        qty = calculate_qty(symbol, entry, actual_bal_pct, actual_leverage)
+        qty = calculate_qty(symbol, entry, sl, actual_bal_pct, actual_leverage)
         if qty <= 0:
             return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
 
