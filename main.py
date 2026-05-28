@@ -371,8 +371,16 @@ JOURNAL_HTML = """
         <td class="dim">{{ t.source or '—' }}</td>
         <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
         <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
-        <td class="dim" style="max-width:200px;overflow:hidden;text-overflow:ellipsis">
-          {{ t.notes or '—' }}
+        <td class="dim" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">
+          {% set kl = t.notes and '"klLevel"' in (t.notes or '') %}
+          {% if kl %}
+            {% set kl_val = t.notes.split('"klLevel":')[1].split(',')[0].split('}')[0].strip() %}
+            {% if kl_val != 'null' %}
+            <span class="tag tag-blue" title="S/R level that triggered this alert">S/R {{ kl_val }}</span>
+            {% else %}—{% endif %}
+          {% else %}
+            {{ t.notes or '—' }}
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -1187,6 +1195,7 @@ def webhook():
                                      "slBuf":       payload.get("slBuf"),
                                      "minImpulse":  payload.get("minImpulse"),
                                      "entryOffset": payload.get("entryOffset"),
+                                     "klLevel":     payload.get("klLevel"),
                                  }) if payload.get("rr") else None)
                 # Push to Google Sheets if configured
                 if gsheets.is_configured():
@@ -1783,6 +1792,42 @@ ANALYSIS_HTML = """
 </div>
 
 <div class="section" style="margin-bottom:16px">
+  <div class="section-title">🎯 Key Level Filter Impact</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:10px">Comparing trades that triggered at a key S/R level vs those without — shows whether the filter improves results</p>
+  <table>
+    <tr><th></th><th>Trades</th><th>WR%</th><th>Total PnL</th></tr>
+    <tr>
+      <td><span class="tag tag-green">With Key Level</span></td>
+      <td>{{ kl_analysis.with_kl.count }}</td>
+      <td>
+        <span style="color:{{ 'var(--green)' if kl_analysis.with_kl.wr >= 50 else 'var(--amber)' if kl_analysis.with_kl.wr >= 35 else 'var(--red)' }};font-weight:500">{{ kl_analysis.with_kl.wr }}%</span>
+        <span class="bar-wrap"><span class="bar" style="width:{{ kl_analysis.with_kl.wr }}%;background:{{ '#4caf50' if kl_analysis.with_kl.wr >= 50 else '#ffa726' if kl_analysis.with_kl.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if kl_analysis.with_kl.pnl >= 0 else 'var(--red)' }}">{{ '+' if kl_analysis.with_kl.pnl >= 0 else '' }}{{ '%.2f'|format(kl_analysis.with_kl.pnl) }}</td>
+    </tr>
+    <tr>
+      <td><span class="tag tag-amber">Without Key Level</span></td>
+      <td>{{ kl_analysis.without_kl.count }}</td>
+      <td>
+        <span style="color:{{ 'var(--green)' if kl_analysis.without_kl.wr >= 50 else 'var(--amber)' if kl_analysis.without_kl.wr >= 35 else 'var(--red)' }};font-weight:500">{{ kl_analysis.without_kl.wr }}%</span>
+        <span class="bar-wrap"><span class="bar" style="width:{{ kl_analysis.without_kl.wr }}%;background:{{ '#4caf50' if kl_analysis.without_kl.wr >= 50 else '#ffa726' if kl_analysis.without_kl.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if kl_analysis.without_kl.pnl >= 0 else 'var(--red)' }}">{{ '+' if kl_analysis.without_kl.pnl >= 0 else '' }}{{ '%.2f'|format(kl_analysis.without_kl.pnl) }}</td>
+    </tr>
+  </table>
+  {% set delta = kl_analysis.with_kl.wr - kl_analysis.without_kl.wr %}
+  {% if kl_analysis.with_kl.count >= 5 and kl_analysis.without_kl.count >= 5 %}
+  <p style="font-size:11px;margin-top:8px;color:{{ 'var(--green)' if delta > 3 else 'var(--red)' if delta < -3 else 'var(--dim)' }}">
+    {% if delta > 3 %}✅ Key level filter improves WR by {{ '%.1f'|format(delta) }}% — keep it ON
+    {% elif delta < -3 %}⚠️ Key level filter reduces WR by {{ '%.1f'|format(delta|abs) }}% — consider turning it OFF
+    {% else %}📊 Key level filter has minimal impact ({{ '+' if delta >= 0 else '' }}{{ '%.1f'|format(delta) }}%) — neutral{% endif %}
+  </p>
+  {% else %}
+  <p style="font-size:11px;margin-top:8px;color:var(--dim)">Need 5+ trades in each group for meaningful comparison</p>
+  {% endif %}
+</div>
+
+<div class="section" style="margin-bottom:16px">
   <div class="section-title">Best &amp; Worst — Timeframe + Source</div>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <div>
@@ -2102,7 +2147,18 @@ def _analyse_trades(trades):
         if r["total"] >= 3 and r["key"] == "Weekday" and r["wr"] < 30:
             insights.append(f"<strong>Weekday performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}).")
 
-    # Cross breakdown: best/worst per TF and per source
+    # ── KL Level analysis — trades with vs without key level ─────────────────
+    with_kl    = [t for t in closed_known if _extract_kl_level(t.get("notes"))]
+    without_kl = [t for t in closed_known if not _extract_kl_level(t.get("notes"))]
+
+    def _wr(trades):
+        if not trades: return 0
+        return round(sum(1 for t in trades if t["outcome"] == "tp") / len(trades) * 100, 1)
+
+    kl_analysis = {
+        "with_kl":    {"count": len(with_kl),    "wr": _wr(with_kl),    "pnl": round(sum(float(t.get("pnl") or 0) for t in with_kl), 2)},
+        "without_kl": {"count": len(without_kl), "wr": _wr(without_kl), "pnl": round(sum(float(t.get("pnl") or 0) for t in without_kl), 2)},
+    }
     def cross_breakdown(key1_fn, key2_fn):
         """Group by two keys, return nested stats."""
         groups = {}
@@ -2175,6 +2231,7 @@ def _analyse_trades(trades):
         "worst_tf_sym":   worst_tf_sym,
         "best_src_sym":   best_src_sym,
         "worst_src_sym":  worst_src_sym,
+        "kl_analysis":    kl_analysis,
         "insights":       insights,
     }
 
@@ -3176,7 +3233,19 @@ def _start_backtest_scheduler():
         return []
 
 
-def _get_backtest_results():
+def _extract_kl_level(notes):
+    """Extract klLevel from trade notes JSON."""
+    if not notes:
+        return None
+    try:
+        import json as _j
+        # notes can be JSON string or pipe-separated
+        notes_str = str(notes).split("|")[0].strip()
+        d = _j.loads(notes_str)
+        kl = d.get("klLevel")
+        return float(kl) if kl and kl != "null" else None
+    except:
+        return None
     """Fetch backtest results from DB sorted by win_rate desc."""
     try:
         conn = get_db()
