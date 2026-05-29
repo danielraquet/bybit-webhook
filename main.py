@@ -63,7 +63,7 @@ def get_config():
         "balance_pct":          _float("BALANCE_PCT",   1.0),  # % of wallet to RISK per trade (SL-based)
         "max_trades":           _int("MAX_TRADES",       3),
         "leverage":             _int("LEVERAGE",         5),
-        "poll_interval":        _int("POLL_INTERVAL",    360),  # 6 min default
+        "poll_interval":        _int("POLL_INTERVAL",    600),  # 10 min default
         "filter_side":          _str("FILTER_SIDE").lower(),
         "filter_min_wr":        _float("FILTER_MIN_WR",  0),
         "filter_sources":       _str("FILTER_SOURCES").lower(),
@@ -693,66 +693,77 @@ def poll_closed_trades():
         time.sleep(get_config()["poll_interval"])
 
 
+import threading as _threading
+_poll_lock = _threading.Lock()
+
+
 def _check_closed_trades():
     """Find open journal entries and check if Bybit has closed them."""
-    if DATABASE_URL:
-        import psycopg2.extras
-        with get_db() as conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute("SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL")
-                open_trades = [dict(r) for r in cur.fetchall()]
-    else:
-        with get_db() as conn:
-            open_trades = [dict(r) for r in conn.execute(
-                "SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
-            ).fetchall()]
-
-    if not open_trades:
+    if not _poll_lock.acquire(blocking=False):
+        log.info("Poll already running — skipping")
         return
 
-    log.info(f"Poller: checking {len(open_trades)} open trade(s)")
+    try:
+        if DATABASE_URL:
+            import psycopg2.extras
+            with get_db() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL")
+                    open_trades = [dict(r) for r in cur.fetchall()]
+        else:
+            with get_db() as conn:
+                open_trades = [dict(r) for r in conn.execute(
+                    "SELECT * FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
+                ).fetchall()]
 
-    for trade in open_trades:
-        order_id = trade["order_id"]
-        symbol   = trade["symbol"]
-        try:
-            # Check if order is still pending (unfilled limit)
-            open_resp   = _api_call(session.get_open_orders, category="linear", symbol=symbol, orderId=order_id)
-            open_orders = open_resp.get("result", {}).get("list", [])
+        if not open_trades:
+            return
 
-            if open_orders:
-                # Still pending — check if it's been too long
-                opened_at = trade.get("opened_at", "")
-                try:
-                    from datetime import datetime
-                    opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
-                    mins   = (datetime.utcnow() - opened).total_seconds() / 60
-                    if mins > 480:  # 8 hours — likely stuck
-                        log.warning(f"{symbol} {order_id} pending for {mins:.0f}m — checking PnL anyway")
-                        _check_closed_pnl(trade)
-                except:
-                    pass
-                continue
+        log.info(f"Poller: checking {len(open_trades)} open trade(s)")
 
-            # Not in open orders — either filled+closed or cancelled
-            # Check order history to see final status
-            hist_resp = _api_call(session.get_order_history, category="linear", symbol=symbol, orderId=order_id)
-            hist      = hist_resp.get("result", {}).get("list", [])
-            order_status = hist[0].get("orderStatus", "") if hist else "Unknown"
+        for trade in open_trades:
+            time.sleep(1)  # 1s between each trade check to avoid rate limits
+            order_id = trade["order_id"]
+            symbol   = trade["symbol"]
+            try:
+                # Check if order is still pending (unfilled limit)
+                open_resp   = _api_call(session.get_open_orders, category="linear", symbol=symbol, orderId=order_id)
+                open_orders = open_resp.get("result", {}).get("list", [])
 
-            if order_status in ("Cancelled", "Rejected", "Deactivated"):
-                with get_db() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(),
-                                   (f"Order {order_status.lower()}", order_id))
-                    conn.commit()
-                log.info(f"{symbol} {order_id} was {order_status} — marked skipped")
-            else:
-                # Filled or unknown — check closed PnL
-                _check_closed_pnl(trade)
+                if open_orders:
+                    # Still pending — check if it's been too long
+                    opened_at = trade.get("opened_at", "")
+                    try:
+                        from datetime import datetime
+                        opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                        mins   = (datetime.utcnow() - opened).total_seconds() / 60
+                        if mins > 480:  # 8 hours — likely stuck
+                            log.warning(f"{symbol} {order_id} pending for {mins:.0f}m — checking PnL anyway")
+                            _check_closed_pnl(trade)
+                    except:
+                        pass
+                    continue
 
-        except Exception as e:
-            log.error(f"Error checking {symbol} {order_id}: {e}")
+                # Not in open orders — either filled+closed or cancelled
+                hist_resp    = _api_call(session.get_order_history, category="linear", symbol=symbol, orderId=order_id)
+                hist         = hist_resp.get("result", {}).get("list", [])
+                order_status = hist[0].get("orderStatus", "") if hist else "Unknown"
+
+                if order_status in ("Cancelled", "Rejected", "Deactivated"):
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET status = 'skipped', notes = " + ph() + " WHERE order_id = " + ph(),
+                                       (f"Order {order_status.lower()}", order_id))
+                        conn.commit()
+                    log.info(f"{symbol} {order_id} was {order_status} — marked skipped")
+                else:
+                    _check_closed_pnl(trade)
+
+            except Exception as e:
+                log.error(f"Error checking {symbol} {order_id}: {e}")
+
+    finally:
+        _poll_lock.release()
 
 
 def _check_closed_pnl(trade):
