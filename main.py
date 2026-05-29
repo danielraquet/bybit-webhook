@@ -312,6 +312,7 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
   <button class="filter-btn" onclick="runImport(this)" style="color:var(--amber)">📥 Import Bybit</button>
   <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
+  <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
 </div>
 
 <div class="table-wrap">
@@ -394,6 +395,21 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function runReset(btn) {
+  if (!confirm('⚠️ DELETE ALL TRADES? This cannot be undone.')) return;
+  if (!confirm('Are you sure? All journal entries will be permanently deleted.')) return;
+  const base = window.location.origin;
+  btn.innerText = '⏳ Deleting...';
+  btn.disabled = true;
+  fetch(base + '/journal/reset', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ ' + (data.message || 'Done');
+      setTimeout(() => { btn.innerText = '⚠️ Reset All'; btn.disabled = false; location.reload(); }, 2000);
+    })
+    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
 function runDeleteDupes(btn) {
   if (!confirm('Delete duplicate imported trades? This removes imports where a matching native trade already exists.')) return;
   const base = window.location.origin;
@@ -1349,6 +1365,21 @@ def manual_poll():
         import traceback
         log.error(f"Poll error: {traceback.format_exc()}")
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/journal/reset", methods=["GET", "POST"])
+def journal_reset():
+    """Delete ALL trades from the journal — start fresh."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM trades")
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "message": f"Deleted {deleted} trades — journal is now empty"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/delete-duplicates", methods=["GET", "POST"])
