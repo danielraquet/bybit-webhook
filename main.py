@@ -805,7 +805,21 @@ def _check_closed_pnl(trade):
 
         if not records:
             log.warning(f"No closed PnL records for {symbol}")
+            # Mark as skipped if trade is very old
+            try:
+                opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                mins   = (datetime.utcnow() - opened).total_seconds() / 60
+                if mins > 240:
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET status='skipped', notes='No PnL record found after 4h' WHERE order_id=" + ph(), (order_id,))
+                        conn.commit()
+                    log.info(f"{symbol} {order_id} — no PnL after 4h, marked skipped")
+            except:
+                pass
             return
+
+        log.info(f"{symbol}: found {len(records)} closed PnL records, looking for order_id={order_id} qty={qty} side={closing_side}")
 
         # Closing side is opposite to entry side
         closing_side = "Sell" if side == "Buy" else "Buy"
@@ -836,7 +850,19 @@ def _check_closed_pnl(trade):
                     break
 
         if not best:
-            log.warning(f"No closed PnL match for {symbol} {order_id}")
+            log.warning(f"No closed PnL match for {symbol} {order_id} — checking if order still exists")
+            # If order is old and has no PnL match, it was likely cancelled/never filled
+            try:
+                opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+                mins   = (datetime.utcnow() - opened).total_seconds() / 60
+                if mins > 120:
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE trades SET status='skipped', notes='No match in closed PnL — likely cancelled or unfilled' WHERE order_id=" + ph(), (order_id,))
+                        conn.commit()
+                    log.info(f"{symbol} {order_id} — no PnL match after {mins:.0f}m, marked skipped")
+            except:
+                pass
             return
 
         exit_price   = float(best.get("avgExitPrice", 0) or best.get("exitPrice", 0))
