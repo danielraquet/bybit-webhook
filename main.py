@@ -1238,12 +1238,11 @@ def webhook():
                                  timeframe=gsheets._bar_seconds_to_tf(bar_seconds),
                                  leverage=actual_leverage,
                                  notes=json.dumps({
-                                     "rr":          payload.get("rr"),
-                                     "slBuf":       payload.get("slBuf"),
-                                     "minImpulse":  payload.get("minImpulse"),
-                                     "entryOffset": payload.get("entryOffset"),
-                                     "klLevel":     payload.get("klLevel"),
-                                 }) if payload.get("rr") else None)
+                                     "rr":          data.get("rr"),
+                                     "slBuf":       data.get("slBuf"),
+                                     "minImpulse":  data.get("minImpulse"),
+                                     "entryOffset": data.get("entryOffset"),
+                                 }) if data.get("rr") else None)
                 # Push to Google Sheets if configured
                 if gsheets.is_configured():
                     sheet_row = gsheets.push_trade_opened(
