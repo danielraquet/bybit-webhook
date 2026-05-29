@@ -810,8 +810,19 @@ def _check_closed_pnl(trade):
                 log.info(f"Position open {symbol} — skip")
                 return
 
-        # Fetch closed PnL records
-        resp    = _api_call(session.get_closed_pnl, category="linear", symbol=symbol, limit=200)
+        # Only look at PnL records after the trade was opened
+        # Add generous buffer (24h) to catch delayed closes
+        try:
+            opened_dt  = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
+            start_ms   = int((opened_dt.timestamp() - 300) * 1000)  # 5min before open
+        except:
+            start_ms   = None
+
+        pnl_kwargs = dict(category="linear", symbol=symbol, limit=50)
+        if start_ms:
+            pnl_kwargs["startTime"] = start_ms
+
+        resp    = _api_call(session.get_closed_pnl, **pnl_kwargs)
         records = resp.get("result", {}).get("list", [])
 
         if not records:
