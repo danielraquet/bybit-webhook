@@ -830,10 +830,10 @@ def _check_closed_pnl(trade):
                 pass
             return
 
-        log.info(f"{symbol}: found {len(records)} closed PnL records, looking for order_id={order_id} qty={qty} side={closing_side}")
-
         # Closing side is opposite to entry side
         closing_side = "Sell" if side == "Buy" else "Buy"
+
+        log.info(f"{symbol}: found {len(records)} closed PnL records, looking for order_id={order_id} qty={qty} side={closing_side}")
 
         # Find best match: order_id > qty+side match > most recent same-side close
         best = None
