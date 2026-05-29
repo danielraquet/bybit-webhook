@@ -768,7 +768,8 @@ def _check_closed_trades():
                     _check_closed_pnl(trade)
 
             except Exception as e:
-                log.error(f"Error checking {symbol} {order_id}: {e}")
+                import traceback
+                log.error(f"Error checking {symbol} {order_id}: {e}\n{traceback.format_exc()}")
 
     finally:
         _poll_lock.release()
