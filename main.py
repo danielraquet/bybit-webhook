@@ -1378,6 +1378,17 @@ def manual_poll():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
+@app.route("/ip", methods=["GET"])
+def check_ip():
+    """Check what IP Railway is using."""
+    try:
+        import urllib.request
+        ip = urllib.request.urlopen("https://api.ipify.org").read().decode()
+        return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/journal/reset", methods=["GET", "POST"])
 def journal_reset():
     """Delete ALL trades from the journal — start fresh."""
