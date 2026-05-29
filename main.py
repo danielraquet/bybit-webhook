@@ -557,11 +557,19 @@ def _api_call(fn, *args, **kwargs):
     """Wrapper for Bybit API calls with retry on rate limit."""
     for attempt in range(3):
         try:
-            return fn(*args, **kwargs)
+            result = fn(*args, **kwargs)
+            # Check for API-level errors in response
+            ret_code = result.get("retCode", 0) if isinstance(result, dict) else 0
+            if ret_code == 10006:  # rate limit
+                wait = (attempt + 1) * 3
+                log.warning(f"Rate limit (retCode 10006) — waiting {wait}s before retry {attempt+1}/3")
+                time.sleep(wait)
+                continue
+            return result
         except Exception as e:
             err = str(e)
             if "403" in err or "rate limit" in err.lower() or "10006" in err:
-                wait = (attempt + 1) * 2
+                wait = (attempt + 1) * 3
                 log.warning(f"Rate limit hit — waiting {wait}s before retry {attempt+1}/3")
                 time.sleep(wait)
             else:
@@ -734,9 +742,11 @@ def _check_closed_trades():
             order_id = trade["order_id"]
             symbol   = trade["symbol"]
             try:
-                # Check if order is still pending (unfilled limit)
-                open_resp   = _api_call(session.get_open_orders, category="linear", symbol=symbol, orderId=order_id)
-                open_orders = open_resp.get("result", {}).get("list", [])
+                # Check if order is still pending — query all open orders for symbol
+                # (orderId filter can cause issues on some Bybit endpoints)
+                open_resp   = _api_call(session.get_open_orders, category="linear", symbol=symbol)
+                all_open    = open_resp.get("result", {}).get("list", [])
+                open_orders = [o for o in all_open if o.get("orderId") == order_id]
 
                 if open_orders:
                     # Still pending — check if it's been too long
