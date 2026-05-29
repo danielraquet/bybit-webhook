@@ -717,7 +717,7 @@ def _check_closed_trades():
         symbol   = trade["symbol"]
         try:
             # Check if order is still pending (unfilled limit)
-            open_resp  = session.get_open_orders(category="linear", symbol=symbol, orderId=order_id)
+            open_resp   = _api_call(session.get_open_orders, category="linear", symbol=symbol, orderId=order_id)
             open_orders = open_resp.get("result", {}).get("list", [])
 
             if open_orders:
@@ -1344,6 +1344,8 @@ def status():
 def manual_poll():
     """Manually trigger a check of closed trades."""
     try:
+        _check_closed_trades()
+
         import psycopg2.extras
         conn = get_db()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1352,8 +1354,6 @@ def manual_poll():
             cur.execute("SELECT COUNT(*) as cnt FROM trades WHERE status = 'open'")
             open_count = cur.fetchone()["cnt"]
         conn.close()
-
-        _check_closed_trades()
 
         return jsonify({
             "status":        "ok",
