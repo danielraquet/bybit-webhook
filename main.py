@@ -526,10 +526,18 @@ function updateStats() {
 
 
 # ─── BYBIT SESSION ────────────────────────────────────────────────────────────
+BYBIT_PROXY = os.environ.get("BYBIT_PROXY", "")
+
 session = HTTP(
     testnet=TESTNET,
     api_key=API_KEY,
     api_secret=API_SECRET,
+    **({
+        "proxies": {
+            "http":  BYBIT_PROXY,
+            "https": BYBIT_PROXY,
+        }
+    } if BYBIT_PROXY else {})
 )
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
