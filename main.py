@@ -63,7 +63,7 @@ def get_config():
         "balance_pct":          _float("BALANCE_PCT",   1.0),  # % of wallet to RISK per trade (SL-based)
         "max_trades":           _int("MAX_TRADES",       3),
         "leverage":             _int("LEVERAGE",         5),
-        "poll_interval":        _int("POLL_INTERVAL",    300),
+        "poll_interval":        _int("POLL_INTERVAL",    360),  # 6 min default
         "filter_side":          _str("FILTER_SIDE").lower(),
         "filter_min_wr":        _float("FILTER_MIN_WR",  0),
         "filter_sources":       _str("FILTER_SOURCES").lower(),
@@ -521,7 +521,7 @@ session = HTTP(
 def get_open_positions() -> list:
     """Return list of symbols with open positions."""
     try:
-        resp = session.get_positions(category="linear", settleCoin="USDT")
+        resp = _api_call(session.get_positions, category="linear", settleCoin="USDT")
         positions = resp.get("result", {}).get("list", [])
         return [p["symbol"] for p in positions if float(p.get("size", 0)) > 0]
     except Exception as e:
@@ -529,10 +529,26 @@ def get_open_positions() -> list:
         return []
 
 
+def _api_call(fn, *args, **kwargs):
+    """Wrapper for Bybit API calls with retry on rate limit."""
+    for attempt in range(3):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            err = str(e)
+            if "403" in err or "rate limit" in err.lower() or "10006" in err:
+                wait = (attempt + 1) * 2
+                log.warning(f"Rate limit hit — waiting {wait}s before retry {attempt+1}/3")
+                time.sleep(wait)
+            else:
+                raise
+    raise Exception(f"API call failed after 3 retries")
+
+
 def get_open_orders(symbol: str) -> list:
     """Return list of open orders for a symbol."""
     try:
-        resp = session.get_open_orders(category="linear", symbol=symbol)
+        resp = _api_call(session.get_open_orders, category="linear", symbol=symbol)
         return resp.get("result", {}).get("list", [])
     except Exception as e:
         log.error(f"Error fetching open orders for {symbol}: {e}")
@@ -542,7 +558,7 @@ def get_open_orders(symbol: str) -> list:
 def get_available_balance() -> float:
     """Return available USDT balance."""
     try:
-        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        resp = _api_call(session.get_wallet_balance, accountType="UNIFIED", coin="USDT")
         result = resp.get("result", {}).get("list", [{}])[0]
         # Try account-level total equity first
         for field in ["totalAvailableBalance", "totalEquity", "totalWalletBalance"]:
@@ -704,7 +720,7 @@ def _check_closed_trades():
 
             # Not in open orders — either filled+closed or cancelled
             # Check order history to see final status
-            hist_resp = session.get_order_history(category="linear", symbol=symbol, orderId=order_id)
+            hist_resp = _api_call(session.get_order_history, category="linear", symbol=symbol, orderId=order_id)
             hist      = hist_resp.get("result", {}).get("list", [])
             order_status = hist[0].get("orderStatus", "") if hist else "Unknown"
 
@@ -733,7 +749,7 @@ def _check_closed_pnl(trade):
 
     try:
         # Check if position still open
-        pos_resp  = session.get_positions(category="linear", symbol=symbol)
+        pos_resp  = _api_call(session.get_positions, category="linear", symbol=symbol)
         positions = pos_resp.get("result", {}).get("list", [])
         pos_open  = any(float(p.get("size", 0)) > 0 for p in positions)
         if pos_open:
@@ -749,7 +765,7 @@ def _check_closed_pnl(trade):
                 return
 
         # Fetch closed PnL records
-        resp    = session.get_closed_pnl(category="linear", symbol=symbol, limit=200)
+        resp    = _api_call(session.get_closed_pnl, category="linear", symbol=symbol, limit=200)
         records = resp.get("result", {}).get("list", [])
 
         if not records:
@@ -1090,7 +1106,7 @@ def webhook():
         if symbol in open_positions:
             # Check direction of existing position vs incoming order
             try:
-                pos_resp   = session.get_positions(category="linear", symbol=symbol)
+                pos_resp   = _api_call(session.get_positions, category="linear", symbol=symbol)
                 pos_list   = pos_resp.get("result", {}).get("list", [])
                 pos_side   = next((p.get("side") for p in pos_list if float(p.get("size", 0)) > 0), None)
                 same_dir   = (pos_side == "Buy" and side == "Buy") or (pos_side == "Sell" and side == "Sell")
@@ -1390,7 +1406,7 @@ def import_from_bybit():
         skipped  = 0
         results  = []
 
-        resp    = session.get_closed_pnl(category="linear", limit=200)
+        resp    = _api_call(session.get_closed_pnl, category="linear", limit=200)
         records = resp.get("result", {}).get("list", [])
 
         if not records:
