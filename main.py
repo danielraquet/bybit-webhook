@@ -312,6 +312,7 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
   <button class="filter-btn" onclick="runImport(this)" style="color:var(--amber)">📥 Import Bybit</button>
   <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
+  <button class="filter-btn" onclick="runDeleteOlderThan(this)" style="color:var(--amber)">🗓️ Delete Older Than</button>
   <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
 </div>
 
@@ -395,6 +396,22 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function runDeleteOlderThan(btn) {
+  const days = prompt('Delete trades older than how many days?', '7');
+  if (!days || isNaN(days)) return;
+  if (!confirm(`Delete all trades older than ${days} days? This cannot be undone.`)) return;
+  const base = window.location.origin;
+  btn.innerText = '⏳ Deleting...';
+  btn.disabled = true;
+  fetch(base + '/journal/delete-older-than/' + parseInt(days), {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+      btn.innerText = '✅ ' + (data.message || 'Done');
+      setTimeout(() => { btn.innerText = '🗓️ Delete Older Than'; btn.disabled = false; location.reload(); }, 2000);
+    })
+    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
+}
+
 function runReset(btn) {
   if (!confirm('⚠️ DELETE ALL TRADES? This cannot be undone.')) return;
   if (!confirm('Are you sure? All journal entries will be permanently deleted.')) return;
@@ -1444,6 +1461,24 @@ def check_ip():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/journal/delete-older-than/<int:days>", methods=["GET", "POST"])
+def delete_older_than(days):
+    """Delete all trades older than X days."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM trades
+                WHERE opened_at < NOW() - INTERVAL '%s days'
+            """, (days,))
+            deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok", "message": f"Deleted {deleted} trades older than {days} days"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/journal/reset", methods=["GET", "POST"])
 def journal_reset():
     """Delete ALL trades from the journal — start fresh."""
@@ -1513,7 +1548,9 @@ def import_from_bybit():
         skipped  = 0
         results  = []
 
-        resp    = _api_call(session.get_closed_pnl, category="linear", limit=200)
+        # Only import last 7 days
+        start_ms = int((datetime.utcnow().timestamp() - 7 * 86400) * 1000)
+        resp    = _api_call(session.get_closed_pnl, category="linear", limit=200, startTime=start_ms)
         records = resp.get("result", {}).get("list", [])
 
         if not records:
