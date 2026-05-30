@@ -1468,7 +1468,7 @@ def delete_older_than(days):
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM trades WHERE opened_at < NOW() - INTERVAL '1 day' * %s",
+                "DELETE FROM trades WHERE opened_at::timestamp < NOW() - INTERVAL '1 day' * %s",
                 (days,)
             )
             deleted = cur.rowcount
