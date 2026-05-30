@@ -155,7 +155,6 @@ if DATABASE_URL:
                     cur.execute(
                         "SELECT * FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
                     )
-                )
                 return [dict(r) for r in cur.fetchall()]
 
     def get_stats():
