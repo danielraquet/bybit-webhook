@@ -872,15 +872,14 @@ def _check_closed_pnl(trade):
                     break
 
         if not best:
-            log.warning(f"No closed PnL match for {symbol} {order_id} — checking if order still exists")
-            # If order is old and has no PnL match, it was likely cancelled/never filled
+            log.warning(f"No closed PnL match for {symbol} {order_id} qty={qty} side={closing_side} — {len(records)} records checked")
             try:
                 opened = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
                 mins   = (datetime.utcnow() - opened).total_seconds() / 60
-                if mins > 120:
+                if mins > 480:  # 8 hours — definitely done, not just slow TP
                     with get_db() as conn:
                         with conn.cursor() as cur:
-                            cur.execute("UPDATE trades SET status='skipped', notes='No match in closed PnL — likely cancelled or unfilled' WHERE order_id=" + ph(), (order_id,))
+                            cur.execute("UPDATE trades SET status='skipped', notes='No match in closed PnL after 8h' WHERE order_id=" + ph(), (order_id,))
                         conn.commit()
                     log.info(f"{symbol} {order_id} — no PnL match after {mins:.0f}m, marked skipped")
             except:
