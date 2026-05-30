@@ -22,7 +22,7 @@ import time
 import json
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string
-from pybit.unified_trading import HTTP
+from pybit.unified_trading import HTTP, WebSocket
 from dotenv import load_dotenv
 from journal import (log_order_placed, log_order_skipped, log_trade_closed,
                      get_all_trades, get_stats, get_db, ph, DATABASE_URL)
@@ -714,16 +714,126 @@ def calculate_qty(symbol: str, entry: float, sl: float, balance_pct: float, leve
 
 def poll_closed_trades():
     """
-    Background thread — runs every poll_interval seconds.
-    Checks Bybit order history for any open journal entries that have
-    now been filled, cancelled, or had their SL/TP triggered.
+    Background thread — tries WebSocket first, falls back to REST polling.
+    WebSocket is preferred as it avoids IP rate limits on REST endpoints.
     """
-    while True:
-        try:
-            _check_closed_trades()
-        except Exception as e:
-            log.error(f"Poller error: {e}")
-        time.sleep(get_config()["poll_interval"])
+    # Try WebSocket first
+    ws_started = False
+    try:
+        log.info("Starting Bybit WebSocket stream...")
+        ws = WebSocket(
+            testnet=TESTNET,
+            channel_type="private",
+            api_key=API_KEY,
+            api_secret=API_SECRET,
+        )
+        ws.order_stream(callback=_handle_order_update)
+        ws.execution_stream(callback=_handle_execution_update)
+        log.info("✅ WebSocket connected — listening for real-time order updates")
+        ws_started = True
+        # Keep thread alive — WebSocket runs its own callbacks
+        while True:
+            time.sleep(60)
+    except Exception as e:
+        log.error(f"WebSocket failed: {e} — falling back to REST poller")
+
+    # Fallback to REST polling
+    if not ws_started:
+        log.info("Background REST poller thread started")
+        while True:
+            try:
+                _check_closed_trades()
+            except Exception as e:
+                log.error(f"Poller error: {e}")
+            time.sleep(get_config()["poll_interval"])
+
+
+def _handle_order_update(msg):
+    """Handle real-time order updates from Bybit WebSocket."""
+    try:
+        orders = msg.get("data", [])
+        for o in orders:
+            order_id = o.get("orderId", "")
+            symbol   = o.get("symbol", "")
+            status   = o.get("orderStatus", "")
+            log.info(f"WS order: {symbol} {order_id} status={status}")
+            if status in ("Cancelled", "Rejected", "Deactivated"):
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s AND status='open'",
+                        (f"Order {status.lower()}", order_id)
+                    )
+                conn.commit()
+                conn.close()
+                log.info(f"WS: {symbol} {order_id} marked skipped")
+    except Exception as e:
+        log.error(f"WS order handler error: {e}")
+
+
+def _handle_execution_update(msg):
+    """Handle execution updates — catches TP/SL fills with PnL."""
+    try:
+        execs = msg.get("data", [])
+        for e in execs:
+            order_id   = e.get("orderId", "")
+            symbol     = e.get("symbol", "")
+            exec_type  = e.get("execType", "")
+            exec_price = float(e.get("execPrice", 0) or 0)
+            closed_pnl = float(e.get("closedPnl", 0) or 0)
+            side       = e.get("side", "")
+
+            if exec_type not in ("TakeProfit", "StopLoss", "Trade") or exec_price <= 0:
+                continue
+
+            log.info(f"WS execution: {symbol} {exec_type} @ {exec_price} PnL={closed_pnl}")
+
+            entry_side = "Sell" if side == "Buy" else "Buy"
+            conn = get_db()
+            import psycopg2.extras as _pge
+            with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM trades
+                    WHERE symbol=%s AND side=%s AND status='open'
+                    ORDER BY opened_at DESC LIMIT 1
+                """, (symbol, entry_side))
+                trade = cur.fetchone()
+
+            if not trade:
+                log.warning(f"WS: no open {symbol} {entry_side} trade found")
+                conn.close()
+                continue
+
+            outcome   = "tp" if exec_type == "TakeProfit" else "sl"
+            closed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            entry     = float(trade.get("entry") or exec_price)
+            qty       = float(trade.get("qty") or 0)
+            pnl_pct   = round(closed_pnl / (entry * qty) * 100, 2) if entry > 0 and qty > 0 else 0.0
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
+                        pnl=%s, pnl_pct=%s, closed_at=%s
+                    WHERE id=%s AND status='open'
+                """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
+            conn.commit()
+            conn.close()
+
+            emoji = "✅" if outcome == "tp" else "🔴"
+            log.info(f"{emoji} WS closed {symbol} — {outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
+
+            try:
+                if gsheets.is_configured():
+                    gsheets.push_trade_closed(
+                        order_id=trade.get("order_id", ""), exit_price=exec_price,
+                        pnl=closed_pnl, outcome=outcome
+                    )
+            except Exception as gs_err:
+                log.warning(f"Sheets update failed: {gs_err}")
+
+    except Exception as e:
+        import traceback
+        log.error(f"WS execution handler error: {e}\n{traceback.format_exc()}")
 
 
 import threading as _threading
