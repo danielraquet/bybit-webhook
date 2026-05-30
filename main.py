@@ -735,7 +735,9 @@ def poll_closed_trades():
         while True:
             time.sleep(60)
     except Exception as e:
-        log.error(f"WebSocket failed: {e} — falling back to REST poller")
+        import traceback
+        log.error(f"WebSocket failed to connect: {e}\n{traceback.format_exc()}")
+        log.info("Falling back to REST poller...")
 
     # Fallback to REST polling
     if not ws_started:
@@ -1185,6 +1187,11 @@ def webhook():
     if len(_last_webhooks) > 5:
         _last_webhooks.pop(0)
     if not data:
+        # Zone entry alerts are notification-only (no JSON) — silently ignore
+        if "zone entered" in raw_body or "zone entered" in raw_body.lower():
+            log.info(f"Zone entry notification received (no JSON expected): {raw_body[:80]}")
+            return jsonify({"status": "ok", "message": "Zone entry notification received"}), 200
+
         log.warning(f"JSON extraction FAILED — raw_body={repr(raw_body[:300])}")
         return jsonify({"status": "ok", "message": "Notification received — no order placed"}), 200
 
