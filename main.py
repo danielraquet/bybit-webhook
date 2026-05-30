@@ -314,6 +314,11 @@ JOURNAL_HTML = """
   <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
   <button class="filter-btn" onclick="runDeleteOlderThan(this)" style="color:var(--amber)">🗓️ Delete Older Than</button>
   <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
+  <span style="margin-left:12px;color:var(--dim);font-size:11px">Show:</span>
+  {% for d in [7, 14, 30, 90] %}
+  <a href="/journal?days={{ d }}" class="filter-btn" style="color:{{ 'var(--blue)' if days == d else 'var(--dim)' }}">{{ d }}d</a>
+  {% endfor %}
+  <a href="/journal" class="filter-btn" style="color:{{ 'var(--blue)' if not days else 'var(--dim)' }}">All</a>
 </div>
 
 <div class="table-wrap">
@@ -1925,9 +1930,14 @@ def auto_cancel_opposite(symbol: str, new_side: str):
 def journal():
     """Trading journal dashboard."""
     try:
-        trades = get_all_trades(200)
+        days   = request.args.get("days", "30")
+        try:
+            days = int(days)
+        except:
+            days = 30
+        trades = get_all_trades(500, days=days)
         stats  = get_stats()
-        return render_template_string(JOURNAL_HTML, trades=trades, stats=stats)
+        return render_template_string(JOURNAL_HTML, trades=trades, stats=stats, days=days)
     except Exception as e:
         log.error(f"Journal error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
