@@ -1450,6 +1450,27 @@ def manual_poll():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
+@app.route("/debug/auth", methods=["GET"])
+def debug_auth():
+    """Test Bybit auth with a simple authenticated call."""
+    try:
+        resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+        bal  = resp.get("result", {}).get("list", [{}])[0].get("totalWalletBalance", "?")
+        resp2 = session.get_positions(category="linear", settleCoin="USDT", limit=1)
+        pos_ok = resp2.get("retCode", -1) == 0
+        resp3 = session.get_open_orders(category="linear", symbol="BTCUSDT")
+        orders_ok = resp3.get("retCode", -1) == 0
+        return jsonify({
+            "wallet_balance": bal,
+            "positions_ok":   pos_ok,
+            "open_orders_ok": orders_ok,
+            "open_orders_ret": resp3.get("retCode"),
+            "open_orders_msg": resp3.get("retMsg"),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/ip", methods=["GET"])
 def check_ip():
     """Check what IP Railway is using."""
