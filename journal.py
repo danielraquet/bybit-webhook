@@ -143,11 +143,18 @@ if DATABASE_URL:
                       datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), reason))
             conn.commit()
 
-    def get_all_trades(limit=200):
+    def get_all_trades(limit=200, days=None):
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(
-                    "SELECT * FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
+                if days:
+                    cur.execute(
+                        "SELECT * FROM trades WHERE opened_at::timestamp >= NOW() - INTERVAL '1 day' * %s ORDER BY opened_at DESC, id DESC LIMIT %s",
+                        (days, limit)
+                    )
+                else:
+                    cur.execute(
+                        "SELECT * FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
+                    )
                 )
                 return [dict(r) for r in cur.fetchall()]
 
