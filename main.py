@@ -622,34 +622,34 @@ def get_open_orders(symbol: str) -> list:
         return []
 
 
+_last_known_balance = 0.0
+_last_balance_time  = 0.0
+
 def get_available_balance() -> float:
-    """Return available USDT balance."""
+    """Return available USDT balance. Falls back to last known balance if API fails."""
+    global _last_known_balance, _last_balance_time
     try:
         resp = _api_call(session.get_wallet_balance, accountType="UNIFIED", coin="USDT")
-        result = resp.get("result", {}).get("list", [{}])[0]
-        # Try account-level total equity first
-        for field in ["totalAvailableBalance", "totalEquity", "totalWalletBalance"]:
-            val = result.get(field, "")
-            if val and val != "":
-                try:
-                    return float(val)
-                except (ValueError, TypeError):
-                    continue
-        # Try coin-level fields
-        coins = result.get("coin", [])
-        for coin in coins:
-            if coin.get("coin") == "USDT":
-                for field in ["walletBalance", "equity", "availableToWithdraw"]:
-                    val = coin.get(field, "")
-                    if val and val != "":
-                        try:
-                            return float(val)
-                        except (ValueError, TypeError):
-                            continue
-        return 0.0
+        for item in resp.get("result", {}).get("list", []):
+            for coin in item.get("coin", []):
+                if coin.get("coin") == "USDT":
+                    bal = float(coin.get("availableToWithdraw") or coin.get("walletBalance") or 0)
+                    if bal > 0:
+                        _last_known_balance = bal
+                        _last_balance_time  = time.time()
+                        log.info(f"Balance: {bal:.2f} USDT (live)")
+                        return bal
     except Exception as e:
-        log.error(f"Error fetching balance: {e}")
-        return 0.0
+        log.warning(f"Error fetching balance: {e}")
+        if _last_known_balance > 0:
+            age = (time.time() - _last_balance_time) / 60
+            log.warning(f"Using cached balance: {_last_known_balance:.2f} USDT (from {age:.0f}m ago)")
+            return _last_known_balance
+        log.error("No cached balance available")
+    return _last_known_balance
+
+
+
 
 
 def get_instrument_info(symbol: str) -> dict:
