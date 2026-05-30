@@ -567,9 +567,8 @@ try:
         } if BYBIT_PROXY else {})
     )
     log.info(f"Bybit session created {'with proxy' if BYBIT_PROXY else 'without proxy'}")
-except TypeError:
-    # pybit version doesn't support proxies parameter — create without
-    log.warning("pybit doesn't support proxies parameter — creating session without proxy")
+except Exception:
+    log.warning("Session creation with proxy failed — retrying without proxy")
     session = HTTP(
         testnet=TESTNET,
         api_key=API_KEY,
