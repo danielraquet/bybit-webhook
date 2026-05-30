@@ -457,13 +457,18 @@ function runImport(btn) {
 
 function runPoll(btn) {
   const base = window.location.origin;
-  btn.innerText = '⏳ Polling...';
+  btn.innerText = '⏳ Checking...';
   btn.disabled = true;
   fetch(base + '/poll', {method: 'POST'})
     .then(r => r.json())
     .then(data => {
-      btn.innerText = '✅ Done';
-      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.disabled = false; location.reload(); }, 2000);
+      if (data.ws_connected) {
+        btn.innerText = '⚡ WS Active';
+        btn.style.color = 'var(--green)';
+      } else {
+        btn.innerText = '✅ Done';
+      }
+      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.style.color = ''; btn.disabled = false; location.reload(); }, 2000);
     })
     .catch(err => { btn.innerText = '❌ ' + err; btn.disabled = false; });
 }
@@ -730,6 +735,7 @@ def poll_closed_trades():
         ws.order_stream(callback=_handle_order_update)
         ws.execution_stream(callback=_handle_execution_update)
         log.info("✅ WebSocket connected — listening for real-time order updates")
+        _ws_connected = True
         ws_started = True
         # Keep thread alive — WebSocket runs its own callbacks
         while True:
@@ -838,8 +844,10 @@ def _handle_execution_update(msg):
         log.error(f"WS execution handler error: {e}\n{traceback.format_exc()}")
 
 
-import threading as _threading
-_poll_lock = _threading.Lock()
+_ws_connected = False
+
+
+
 
 
 def _check_closed_trades():
@@ -1542,10 +1550,8 @@ def status():
 
 @app.route("/poll", methods=["GET", "POST"])
 def manual_poll():
-    """Manually trigger a check of closed trades."""
+    """Show journal state. Skips REST calls if WebSocket is active."""
     try:
-        _check_closed_trades()
-
         import psycopg2.extras
         conn = get_db()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -1555,16 +1561,28 @@ def manual_poll():
             open_count = cur.fetchone()["cnt"]
         conn.close()
 
+        if _ws_connected:
+            msg = f"WebSocket active — {open_count} open trades updating in real-time"
+        else:
+            # WebSocket not connected — try REST
+            if _poll_lock.acquire(blocking=False):
+                try:
+                    _check_closed_trades()
+                finally:
+                    _poll_lock.release()
+            msg = f"Poll complete — found {open_count} open trades"
+
         return jsonify({
-            "status":        "ok",
-            "open_count":    open_count,
+            "status":       "ok",
+            "open_count":   open_count,
             "recent_trades": all_trades,
-            "message":       f"Poll complete — found {open_count} open trades",
+            "message":      msg,
+            "ws_connected": _ws_connected,
         }), 200
     except Exception as e:
         import traceback
         log.error(f"Poll error: {traceback.format_exc()}")
-        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/debug/auth", methods=["GET"])
