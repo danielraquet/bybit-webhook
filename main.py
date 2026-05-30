@@ -310,7 +310,6 @@ JOURNAL_HTML = """
   <span style="margin:0 8px;color:var(--dim)">|</span>
   <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
-  <button class="filter-btn" onclick="runImport(this)" style="color:var(--amber)">📥 Import Bybit</button>
   <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
   <button class="filter-btn" onclick="runDeleteOlderThan(this)" style="color:var(--amber)">🗓️ Delete Older Than</button>
   <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
