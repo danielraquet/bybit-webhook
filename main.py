@@ -554,17 +554,27 @@ function updateStats() {
 # ─── BYBIT SESSION ────────────────────────────────────────────────────────────
 BYBIT_PROXY = os.environ.get("BYBIT_PROXY", "")
 
-session = HTTP(
-    testnet=TESTNET,
-    api_key=API_KEY,
-    api_secret=API_SECRET,
-    **({
-        "proxies": {
-            "http":  BYBIT_PROXY,
-            "https": BYBIT_PROXY,
-        }
-    } if BYBIT_PROXY else {})
-)
+try:
+    session = HTTP(
+        testnet=TESTNET,
+        api_key=API_KEY,
+        api_secret=API_SECRET,
+        **({
+            "proxies": {
+                "http":  BYBIT_PROXY,
+                "https": BYBIT_PROXY,
+            }
+        } if BYBIT_PROXY else {})
+    )
+    log.info(f"Bybit session created {'with proxy' if BYBIT_PROXY else 'without proxy'}")
+except TypeError:
+    # pybit version doesn't support proxies parameter — create without
+    log.warning("pybit doesn't support proxies parameter — creating session without proxy")
+    session = HTTP(
+        testnet=TESTNET,
+        api_key=API_KEY,
+        api_secret=API_SECRET,
+    )
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
