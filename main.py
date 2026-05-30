@@ -622,7 +622,7 @@ def get_open_orders(symbol: str) -> list:
         return []
 
 
-_last_known_balance = 0.0
+_last_known_balance = float(os.environ.get("FALLBACK_BALANCE", "1040.0"))
 _last_balance_time  = 0.0
 
 def get_available_balance() -> float:
