@@ -349,7 +349,7 @@ JOURNAL_HTML = """
       {% for t in trades %}
       {% if t.status == 'note' %}
       <tr style="background:color-mix(in srgb, var(--blue) 8%, transparent);border-left:3px solid var(--blue)">
-        <td colspan="15" style="padding:8px 12px;color:var(--blue);font-style:italic">
+        <td colspan="17" style="padding:8px 12px;color:var(--blue);font-style:italic">
           📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes or '' }}
         </td>
       </tr>
@@ -372,7 +372,7 @@ JOURNAL_HTML = """
         <td style="color:var(--red)">{{ t.sl }}</td>
         <td style="color:var(--green)">{{ t.tp }}</td>
         <td class="{{ 'pnl-pos' if t.pnl and t.pnl > 0 else 'pnl-neg' if t.pnl and t.pnl < 0 else '' }}"
-            onclick="editPnl({{ t.id }}, '{{ t.pnl or '' }}')" title="Click to edit PnL" style="cursor:pointer">
+            {% if t.id %}onclick="editPnl({{ t.id }}, '{{ t.pnl or '' }}')" title="Click to edit PnL" style="cursor:pointer"{% endif %}>
           {% if t.pnl %}{{ '+' if t.pnl > 0 else '' }}{{ t.pnl }}{% else %}—{% endif %}
         </td>
         <td class="{{ 'pnl-pos' if t.pnl_pct and t.pnl_pct > 0 else 'pnl-neg' if t.pnl_pct and t.pnl_pct < 0 else '' }}">
@@ -380,9 +380,9 @@ JOURNAL_HTML = """
         </td>
         <td>
           {% if t.outcome %}
-          <span class="badge badge-{{ t.outcome }}" onclick="editOutcome({{ t.id }}, '{{ t.outcome }}', this)" title="Click to edit" style="cursor:pointer">{{ t.outcome.upper() }}</span>
+          <span class="badge badge-{{ t.outcome }}" {% if t.id %}onclick="editOutcome({{ t.id }}, '{{ t.outcome }}', this)" title="Click to edit" style="cursor:pointer"{% endif %}>{{ t.outcome.upper() }}</span>
           {% else %}
-          <span style="color:var(--dim);cursor:pointer" onclick="editOutcome({{ t.id }}, '', this)" title="Click to set">—</span>
+          <span style="color:var(--dim);{% if t.id %}cursor:pointer{% endif %}" {% if t.id %}onclick="editOutcome({{ t.id }}, '', this)" title="Click to set"{% endif %}>—</span>
           {% endif %}
         </td>
         <td class="dim">{{ t.source or '—' }}</td>
