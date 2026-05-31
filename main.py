@@ -372,7 +372,7 @@ JOURNAL_HTML = """
         <td style="color:var(--red)">{{ t.sl }}</td>
         <td style="color:var(--green)">{{ t.tp }}</td>
         <td class="{{ 'pnl-pos' if t.pnl and t.pnl > 0 else 'pnl-neg' if t.pnl and t.pnl < 0 else '' }}"
-            {% if t.id %}onclick="editPnl({{ t.id }}, '{{ t.pnl or '' }}')" title="Click to edit PnL" style="cursor:pointer"{% endif %}>
+            data-edit-pnl="{{ t.id }}" data-pnl-val="{{ t.pnl or '' }}" title="Click to edit PnL" style="cursor:pointer">
           {% if t.pnl %}{{ '+' if t.pnl > 0 else '' }}{{ t.pnl }}{% else %}—{% endif %}
         </td>
         <td class="{{ 'pnl-pos' if t.pnl_pct and t.pnl_pct > 0 else 'pnl-neg' if t.pnl_pct and t.pnl_pct < 0 else '' }}">
@@ -380,9 +380,9 @@ JOURNAL_HTML = """
         </td>
         <td>
           {% if t.outcome %}
-          <span class="badge badge-{{ t.outcome }}" {% if t.id %}onclick="editOutcome({{ t.id }}, '{{ t.outcome }}', this)" title="Click to edit" style="cursor:pointer"{% endif %}>{{ t.outcome.upper() }}</span>
+          <span class="badge badge-{{ t.outcome }}" data-edit-outcome="{{ t.id }}" data-outcome-val="{{ t.outcome }}" title="Click to edit" style="cursor:pointer">{{ t.outcome.upper() }}</span>
           {% else %}
-          <span style="color:var(--dim);{% if t.id %}cursor:pointer{% endif %}" {% if t.id %}onclick="editOutcome({{ t.id }}, '', this)" title="Click to set"{% endif %}>—</span>
+          <span style="color:var(--dim);cursor:pointer" data-edit-outcome="{{ t.id }}" data-outcome-val="" title="Click to set">—</span>
           {% endif %}
         </td>
         <td class="dim">{{ t.source or '—' }}</td>
@@ -441,11 +441,11 @@ function editPnl(tradeId, current) {
   });
 }
 
-function editOutcome(tradeId, current, el) {
+function editOutcome(tradeId, current) {
   const options = ['tp', 'sl', ''];
   const labels  = {'tp': 'TP ✅', 'sl': 'SL 🔴', '': 'Clear —'};
   const next    = options[(options.indexOf(current) + 1) % options.length];
-  if (!confirm(`Change outcome to: ${labels[next] || 'Clear'}?`)) return;
+  if (!confirm('Change outcome to: ' + (labels[next] || 'Clear') + '?')) return;
   fetch('/journal/set-outcome', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -455,6 +455,20 @@ function editOutcome(tradeId, current, el) {
     else alert('Error: ' + d.message);
   });
 }
+
+// Event delegation — attach once, handles all rows including dynamically added ones
+document.addEventListener('click', function(e) {
+  const pnlEl = e.target.closest('[data-edit-pnl]');
+  if (pnlEl) {
+    editPnl(pnlEl.dataset.editPnl, pnlEl.dataset.pnlVal);
+    return;
+  }
+  const outEl = e.target.closest('[data-edit-outcome]');
+  if (outEl) {
+    editOutcome(outEl.dataset.editOutcome, outEl.dataset.outcomeVal);
+    return;
+  }
+});
 
 function runDeleteOlderThan(btn) {
   const days = prompt('Delete trades older than how many days?', '7');
