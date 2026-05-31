@@ -60,7 +60,7 @@ def get_config():
 
     return {
         "enabled":              _str("ENABLED", "true").lower() == "true",
-        "balance_pct":          _float("BALANCE_PCT",   1.0),  # % of wallet to RISK per trade (SL-based)
+        "journal_only":         os.environ.get("JOURNAL_ONLY", "false").lower() == "true",  # log only, Bybit places orders natively
         "max_trades":           _int("MAX_TRADES",       3),
         "leverage":             _int("LEVERAGE",         5),
         "poll_interval":        _int("POLL_INTERVAL",    600),  # 10 min default
@@ -908,7 +908,83 @@ def _handle_execution_update(msg):
         log.error(f"WS execution handler error: {e}\n{traceback.format_exc()}")
 
 
-_ws_connected = False
+_ws_trade = None  # separate WebSocket connection for order placement
+
+
+def _get_ws_trade():
+    """Get or create the Trade WebSocket connection for order placement."""
+    global _ws_trade
+    if _ws_trade is not None:
+        return _ws_trade
+    try:
+        from pybit.unified_trading import WebSocket as _WS
+        _ws_trade = _WS(
+            testnet=TESTNET,
+            channel_type="private",
+            api_key=API_KEY,
+            api_secret=API_SECRET,
+        )
+        log.info("✅ Trade WebSocket connected for order placement")
+    except Exception as e:
+        log.error(f"Trade WebSocket failed: {e}")
+        _ws_trade = None
+    return _ws_trade
+
+
+def place_order_ws(symbol, side, qty, entry, sl, tp, order_type="Limit"):
+    """Place order via WebSocket Trade API — bypasses IP rate limits."""
+    try:
+        ws = _get_ws_trade()
+        if not ws:
+            return None, "Trade WebSocket not available"
+
+        info        = _instrument_cache.get(symbol, {"price_scale": 5, "qty_step": 0.001})
+        price_scale = info.get("price_scale", 5)
+        qty_step    = info.get("qty_step", 0.001)
+
+        # Infer price scale from actual values if needed
+        if price_scale == 5:
+            for p in [entry, sl, tp]:
+                if p > 0:
+                    s = str(p)
+                    if "." in s:
+                        price_scale = max(price_scale, len(s.rstrip("0").split(".")[1]))
+
+        entry_str = f"{entry:.{price_scale}f}"
+        sl_str    = f"{sl:.{price_scale}f}"
+        tp_str    = f"{tp:.{price_scale}f}"
+        qty_str   = str(round(round(qty / qty_step) * qty_step, 8)).rstrip("0").rstrip(".")
+
+        params = {
+            "category":      "linear",
+            "symbol":        symbol,
+            "side":          side,
+            "orderType":     order_type,
+            "qty":           qty_str,
+            "price":         entry_str if order_type == "Limit" else None,
+            "stopLoss":      sl_str,
+            "takeProfit":    tp_str,
+            "slTriggerBy":   "LastPrice",
+            "tpTriggerBy":   "LastPrice",
+            "timeInForce":   "GTC",
+            "reduceOnly":    False,
+            "closeOnTrigger": False,
+        }
+        # Remove None values
+        params = {k: v for k, v in params.items() if v is not None}
+
+        result = ws.send_ws_api_request(
+            path="/v5/order/create",
+            req_id=f"order_{symbol}_{int(datetime.utcnow().timestamp())}",
+            **params
+        )
+        log.info(f"WS order placed: {symbol} {side} {qty_str} @ {entry_str} | result={result}")
+        order_id = result.get("result", {}).get("orderId", "")
+        return order_id, None
+
+    except Exception as e:
+        log.error(f"WS order placement failed: {e}")
+        return None, str(e)
 
 
 
@@ -1386,6 +1462,25 @@ def webhook():
     if side not in ("Buy", "Sell"):
         return jsonify({"status": "error", "message": f"Invalid side: {side}"}), 400
 
+    # ── JOURNAL ONLY MODE ─────────────────────────────────────────────────────
+    # When JOURNAL_ONLY=true, Bybit places orders natively via their webhook.
+    # This server just logs the alert for journal tracking.
+    if cfg.get("journal_only"):
+        notes = json_lib.dumps({
+            "rr":          data.get("rr"),
+            "slBuf":       data.get("slBuf"),
+            "minImpulse":  data.get("minImpulse"),
+            "entryOffset": data.get("entryOffset"),
+        }) if data.get("rr") else None
+        # Use a placeholder order_id — will be matched by WebSocket on fill
+        placeholder_id = f"bybit_native_{symbol}_{side}_{int(datetime.utcnow().timestamp())}"
+        row_id = log_order_placed(
+            symbol, side, 0, entry, sl, tp, placeholder_id,
+            source=source, timeframe=tf_label, leverage=cfg["leverage"], notes=notes
+        )
+        log.info(f"📝 Journal-only mode: logged {symbol} {side} @ {entry} SL={sl} TP={tp} (row {row_id})")
+        return jsonify({"status": "ok", "message": f"Logged to journal — Bybit places order natively"}), 200
+
     # ── Everything from here is locked — one trade at a time ─────────────────
     with trade_lock:
         # ── Check max simultaneous trades ─────────────────────────────────────
@@ -1530,11 +1625,26 @@ def webhook():
             if order_type == "Limit":
                 order_params["price"] = entry_str
 
-            resp = session.place_order(**order_params)
+            # Try WebSocket order placement first (bypasses IP rate limits)
+            order_id = None
+            order_err = None
+            try:
+                order_id, order_err = place_order_ws(symbol, side, qty, entry, sl, tp, order_type)
+            except Exception as ws_err:
+                order_err = str(ws_err)
+                log.warning(f"WS order placement failed: {ws_err} — trying REST")
 
-            ret_code = resp.get("retCode", -1)
-            if ret_code == 0:
-                order_id = resp.get("result", {}).get("orderId", "?")
+            # Fall back to REST if WebSocket failed
+            if not order_id:
+                log.info(f"Falling back to REST order placement (WS error: {order_err})")
+                resp = session.place_order(**order_params)
+                ret_code = resp.get("retCode", -1)
+                if ret_code == 0:
+                    order_id = resp.get("result", {}).get("orderId", "?")
+                else:
+                    raise Exception(f"REST order failed: retCode={ret_code} msg={resp.get('retMsg')}")
+
+            if order_id:
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
