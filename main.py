@@ -310,6 +310,7 @@ JOURNAL_HTML = """
   <span style="margin:0 8px;color:var(--dim)">|</span>
   <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
   <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
+  <button class="filter-btn" onclick="addNote(this)" style="color:var(--blue);font-weight:500">📝 Add Note</button>
   <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
   <button class="filter-btn" onclick="runDeleteOlderThan(this)" style="color:var(--amber)">🗓️ Delete Older Than</button>
   <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
@@ -346,6 +347,13 @@ JOURNAL_HTML = """
     </thead>
     <tbody>
       {% for t in trades %}
+      {% if t.status == 'note' %}
+      <tr style="background:color-mix(in srgb, var(--blue) 8%, transparent);border-left:3px solid var(--blue)">
+        <td colspan="15" style="padding:8px 12px;color:var(--blue);font-style:italic">
+          📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes or '' }}
+        </td>
+      </tr>
+      {% else %}
       <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}" data-source="{{ t.source or '' }}">
         <td class="dim">{{ trades|length - loop.index0 }}</td>
         <td style="color:var(--white);font-weight:500">{{ t.symbol }}</td>
@@ -393,6 +401,7 @@ JOURNAL_HTML = """
           {% else %}—{% endif %}
         </td>
       </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
@@ -404,6 +413,19 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function addNote(btn) {
+  const note = prompt('Enter note / settings change:\n(e.g. "Changed klMinScore to 8, pvLen to 20, FILTER_MIN_WR=35")');
+  if (!note || !note.trim()) return;
+  fetch('/journal/add-note', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note: note.trim()})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') location.reload();
+    else alert('Error: ' + d.message);
+  });
+}
+
 function editPnl(tradeId, current) {
   const val = prompt('Enter PnL in USDT (e.g. -3.75 or 8.42):', current);
   if (val === null) return;
@@ -1708,6 +1730,28 @@ def check_ip():
         return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/journal/add-note", methods=["POST"])
+def add_note():
+    """Add a manual note/milestone row to the journal."""
+    try:
+        body  = request.get_json(force=True)
+        note  = body.get("note", "").strip()
+        if not note:
+            return jsonify({"status": "error", "message": "Note cannot be empty"}), 400
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trades
+                    (symbol, side, status, qty, entry, sl, tp, source, opened_at, notes)
+                VALUES (%s, %s, 'note', 0, 0, 0, 0, 'manual', %s, %s)
+            """, ('—', '—', datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), note))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/set-pnl", methods=["POST"])
