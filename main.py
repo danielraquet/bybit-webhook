@@ -371,8 +371,10 @@ JOURNAL_HTML = """
         </td>
         <td>
           {% if t.outcome %}
-          <span class="badge badge-{{ t.outcome }}">{{ t.outcome.upper() }}</span>
-          {% else %}—{% endif %}
+          <span class="badge badge-{{ t.outcome }}" onclick="editOutcome({{ t.id }}, '{{ t.outcome }}', this)" title="Click to edit" style="cursor:pointer">{{ t.outcome.upper() }}</span>
+          {% else %}
+          <span style="color:var(--dim);cursor:pointer" onclick="editOutcome({{ t.id }}, '', this)" title="Click to set">—</span>
+          {% endif %}
         </td>
         <td class="dim">{{ t.source or '—' }}</td>
         <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
@@ -401,6 +403,21 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function editOutcome(tradeId, current, el) {
+  const options = ['tp', 'sl', ''];
+  const labels  = {'tp': 'TP ✅', 'sl': 'SL 🔴', '': 'Clear —'};
+  const next    = options[(options.indexOf(current) + 1) % options.length];
+  if (!confirm(`Change outcome to: ${labels[next] || 'Clear'}?`)) return;
+  fetch('/journal/set-outcome', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: tradeId, outcome: next})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') location.reload();
+    else alert('Error: ' + d.message);
+  });
+}
+
 function runDeleteOlderThan(btn) {
   const days = prompt('Delete trades older than how many days?', '7');
   if (!days || isNaN(days)) return;
@@ -1642,6 +1659,29 @@ def check_ip():
         return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/journal/set-outcome", methods=["POST"])
+def set_outcome():
+    """Manually set TP/SL outcome for a trade."""
+    try:
+        body    = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+        outcome  = body.get("outcome", "").strip().lower()
+        if outcome not in ("tp", "sl", ""):
+            return jsonify({"status": "error", "message": "outcome must be tp, sl or empty"}), 400
+        conn = get_db()
+        with conn.cursor() as cur:
+            if outcome:
+                cur.execute("UPDATE trades SET outcome=%s WHERE id=%s", (outcome, trade_id))
+            else:
+                cur.execute("UPDATE trades SET outcome=NULL WHERE id=%s", (trade_id,))
+        conn.commit()
+        conn.close()
+        log.info(f"Manual outcome set: trade {trade_id} → {outcome or 'NULL'}")
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/delete-older-than/<int:days>", methods=["GET", "POST"])
