@@ -363,7 +363,8 @@ JOURNAL_HTML = """
         <td>{{ t.exit_price if t.exit_price else '—' }}</td>
         <td style="color:var(--red)">{{ t.sl }}</td>
         <td style="color:var(--green)">{{ t.tp }}</td>
-        <td class="{{ 'pnl-pos' if t.pnl and t.pnl > 0 else 'pnl-neg' if t.pnl and t.pnl < 0 else '' }}">
+        <td class="{{ 'pnl-pos' if t.pnl and t.pnl > 0 else 'pnl-neg' if t.pnl and t.pnl < 0 else '' }}"
+            onclick="editPnl({{ t.id }}, '{{ t.pnl or '' }}')" title="Click to edit PnL" style="cursor:pointer">
           {% if t.pnl %}{{ '+' if t.pnl > 0 else '' }}{{ t.pnl }}{% else %}—{% endif %}
         </td>
         <td class="{{ 'pnl-pos' if t.pnl_pct and t.pnl_pct > 0 else 'pnl-neg' if t.pnl_pct and t.pnl_pct < 0 else '' }}">
@@ -403,6 +404,21 @@ JOURNAL_HTML = """
 </div>
 
 <script>
+function editPnl(tradeId, current) {
+  const val = prompt('Enter PnL in USDT (e.g. -3.75 or 8.42):', current);
+  if (val === null) return;
+  const num = parseFloat(val);
+  if (isNaN(num)) { alert('Invalid number'); return; }
+  fetch('/journal/set-pnl', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({id: tradeId, pnl: num})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') location.reload();
+    else alert('Error: ' + d.message);
+  });
+}
+
 function editOutcome(tradeId, current, el) {
   const options = ['tp', 'sl', ''];
   const labels  = {'tp': 'TP ✅', 'sl': 'SL 🔴', '': 'Clear —'};
@@ -1659,6 +1675,24 @@ def check_ip():
         return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/journal/set-pnl", methods=["POST"])
+def set_pnl():
+    """Manually set PnL for a trade."""
+    try:
+        body     = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+        pnl      = float(body.get("pnl", 0))
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET pnl=%s WHERE id=%s", (pnl, trade_id))
+        conn.commit()
+        conn.close()
+        log.info(f"Manual PnL set: trade {trade_id} → {pnl}")
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/set-outcome", methods=["POST"])
