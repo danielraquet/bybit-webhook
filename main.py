@@ -551,6 +551,7 @@ function filterTable(filter, btn) {
   btn.classList.add('active');
   document.querySelectorAll('#journal-table tbody tr').forEach(row => {
     const status  = row.dataset.status;
+    if (!status) { row.style.display = ''; return; }  // always show note rows
     const outcome = row.dataset.outcome;
     const source  = row.dataset.source;
     let show = false;
@@ -572,6 +573,7 @@ function updateStats() {
   rows.forEach(row => {
     if (row.style.display === 'none') return;
     const status  = row.dataset.status;
+    if (!status) return;  // skip note rows (no data-status)
     const outcome = row.dataset.outcome;
     const cells   = row.querySelectorAll('td');
     const pnlText = cells[10] ? cells[10].innerText.trim().replace('+','') : '';
