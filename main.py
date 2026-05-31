@@ -378,15 +378,16 @@ JOURNAL_HTML = """
         <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
         <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
         <td class="dim" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">
-          {% set kl = t.notes and '"klLevel"' in (t.notes or '') %}
+          {% set raw_notes = (t.notes or '').split('|sheet_row:')[0].strip() %}
+          {% set kl = '"klLevel"' in raw_notes %}
           {% if kl %}
-            {% set kl_val = t.notes.split('"klLevel":')[1].split(',')[0].split('}')[0].strip() %}
+            {% set kl_val = raw_notes.split('"klLevel":')[1].split(',')[0].split('}')[0].strip() %}
             {% if kl_val != 'null' %}
-            <span class="tag tag-blue" title="S/R level that triggered this alert">S/R {{ kl_val }}</span>
+            <span class="tag tag-blue" title="S/R level">S/R {{ kl_val }}</span>
             {% else %}—{% endif %}
-          {% else %}
-            {{ t.notes or '—' }}
-          {% endif %}
+          {% elif raw_notes and raw_notes != 'null' and raw_notes != 'None' %}
+            {{ raw_notes[:40] }}
+          {% else %}—{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -826,6 +827,12 @@ def _handle_execution_update(msg):
                 continue
 
             outcome   = "tp" if exec_type == "TakeProfit" else "sl"
+            # Verify SL outcome with PnL — positive PnL on SL = likely TP
+            if outcome == "sl" and closed_pnl > 0:
+                tp_price = float(trade.get("tp") or 0)
+                if tp_price > 0:
+                    outcome = "tp"
+                    log.info(f"WS {symbol}: SL execType but PnL={closed_pnl:.4f} positive — classifying as TP")
             closed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             entry     = float(trade.get("entry") or exec_price)
             qty       = float(trade.get("qty") or 0)
@@ -1040,12 +1047,19 @@ def _check_closed_pnl(trade):
         realised_pnl = float(best.get("closedPnl", 0) or 0)
         exec_type    = best.get("execType", "")
 
-        # Determine outcome
+        # Determine outcome — trust execType first, verify with PnL as fallback
         if exec_type == "TakeProfit":
             outcome = "tp"
         elif exec_type == "StopLoss":
-            outcome = "sl"
+            # Verify — if PnL is clearly positive it might be a TP that fired via SL order
+            tp = float(trade.get("tp") or 0)
+            if realised_pnl > 0 and tp > 0:
+                outcome = "tp"
+                log.info(f"{symbol}: SL execType but positive PnL {realised_pnl:.4f} — classifying as TP")
+            else:
+                outcome = "sl"
         else:
+            # Unknown execType — use PnL and TP price to determine
             tp = float(trade.get("tp") or 0)
             if side == "Buy":
                 outcome = "tp" if exit_price >= tp * 0.999 else "sl"
