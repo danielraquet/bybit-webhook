@@ -908,136 +908,6 @@ def _handle_execution_update(msg):
         log.error(f"WS execution handler error: {e}\n{traceback.format_exc()}")
 
 
-_ws_trade      = None
-_ws_trade_lock = threading.Lock()
-_ws_trade_responses = {}  # req_id -> response
-
-
-def _start_trade_websocket():
-    """Start a raw WebSocket connection for order placement."""
-    global _ws_trade
-    import websocket, hmac, hashlib, json as _j, threading as _t
-
-    url = "wss://stream-testnet.bybit.com/v5/trade" if TESTNET else "wss://stream.bybit.com/v5/trade"
-
-    def on_message(ws, msg):
-        try:
-            data = _j.loads(msg)
-            req_id = data.get("reqId", data.get("req_id", ""))
-            if req_id:
-                _ws_trade_responses[req_id] = data
-            log.info(f"WS Trade response: {msg[:200]}")
-        except Exception as e:
-            log.error(f"WS Trade msg error: {e}")
-
-    def on_open(ws):
-        expires = int((time.time() + 10) * 1000)
-        sig = hmac.new(
-            bytes(API_SECRET, "utf-8"),
-            bytes(f"GET/realtime{expires}", "utf-8"),
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        ws.send(_j.dumps({"op": "auth", "args": [API_KEY, expires, sig]}))
-        log.info("✅ Trade WebSocket authenticated")
-
-    def on_error(ws, err):
-        log.error(f"Trade WebSocket error: {err}")
-
-    def on_close(ws, *args):
-        log.warning("Trade WebSocket closed — will reconnect on next order")
-        global _ws_trade
-        _ws_trade = None
-
-    wsa = websocket.WebSocketApp(
-        url,
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-    )
-    _ws_trade = wsa
-    t = threading.Thread(target=wsa.run_forever, daemon=True)
-    t.start()
-    time.sleep(1)  # wait for auth
-    return wsa
-
-
-def place_order_ws(symbol, side, qty, entry, sl, tp, order_type="Limit"):
-    """Place order via WebSocket Trade API — bypasses IP rate limits."""
-    import json as _j, time as _t
-    global _ws_trade
-
-    try:
-        with _ws_trade_lock:
-            if _ws_trade is None:
-                _start_trade_websocket()
-                time.sleep(1)
-
-        info        = _instrument_cache.get(symbol, {"price_scale": 5, "qty_step": 0.001})
-        price_scale = info.get("price_scale", 5)
-        qty_step    = info.get("qty_step", 0.001)
-
-        # Infer price scale from actual values
-        if price_scale >= 5:
-            for p in [entry, sl, tp]:
-                if p > 0:
-                    s = str(p)
-                    if "." in s:
-                        price_scale = max(price_scale, len(s.rstrip("0").split(".")[1]))
-            price_scale = min(price_scale, 8)
-
-        entry_str = f"{entry:.{price_scale}f}"
-        sl_str    = f"{sl:.{price_scale}f}"
-        tp_str    = f"{tp:.{price_scale}f}"
-        qty_str   = str(round(round(qty / qty_step) * qty_step, 8)).rstrip("0").rstrip(".")
-        req_id    = f"order_{symbol}_{int(time.time())}"
-
-        payload = {
-            "reqId":   req_id,
-            "header":  {"X-BAPI-TIMESTAMP": str(int(time.time() * 1000)), "X-BAPI-RECV-WINDOW": "8000"},
-            "op":      "order.create",
-            "args":    [{
-                "category":       "linear",
-                "symbol":         symbol,
-                "side":           side,
-                "orderType":      order_type,
-                "qty":            qty_str,
-                "stopLoss":       sl_str,
-                "takeProfit":     tp_str,
-                "slTriggerBy":    "LastPrice",
-                "tpTriggerBy":    "LastPrice",
-                "timeInForce":    "IOC" if order_type == "Market" else "GTC",
-                "reduceOnly":     False,
-                "closeOnTrigger": False,
-                **({"price": entry_str} if order_type == "Limit" else {}),
-            }]
-        }
-
-        _ws_trade.send(_j.dumps(payload))
-        log.info(f"WS Trade order sent: {symbol} {side} {qty_str} @ {entry_str}")
-
-        # Wait for response
-        for _ in range(30):  # 3 second timeout
-            time.sleep(0.1)
-            if req_id in _ws_trade_responses:
-                resp    = _ws_trade_responses.pop(req_id)
-                ret_msg = resp.get("retMsg", "")
-                ret_code = resp.get("retCode", -1)
-                if ret_code == 0 or ret_msg == "OK":
-                    order_id = resp.get("data", {}).get("orderId", "") or resp.get("result", {}).get("orderId", "")
-                    log.info(f"✅ WS order confirmed: {symbol} {order_id}")
-                    return order_id, None
-                else:
-                    return None, f"WS order failed: {ret_msg} (code {ret_code})"
-
-        return None, "WS order timeout — no response after 3s"
-
-    except Exception as e:
-        log.error(f"WS order placement error: {e}")
-        return None, str(e)
-
-
-
 
 
 def _check_closed_trades():
@@ -1675,26 +1545,10 @@ def webhook():
             if order_type == "Limit":
                 order_params["price"] = entry_str
 
-            # Try WebSocket order placement first (bypasses IP rate limits)
-            order_id = None
-            order_err = None
-            try:
-                order_id, order_err = place_order_ws(symbol, side, qty, entry, sl, tp, order_type)
-            except Exception as ws_err:
-                order_err = str(ws_err)
-                log.warning(f"WS order placement failed: {ws_err} — trying REST")
-
-            # Fall back to REST if WebSocket failed
-            if not order_id:
-                log.info(f"Falling back to REST order placement (WS error: {order_err})")
-                resp = session.place_order(**order_params)
-                ret_code = resp.get("retCode", -1)
-                if ret_code == 0:
-                    order_id = resp.get("result", {}).get("orderId", "?")
-                else:
-                    raise Exception(f"REST order failed: retCode={ret_code} msg={resp.get('retMsg')}")
-
-            if order_id:
+            resp     = session.place_order(**order_params)
+            ret_code = resp.get("retCode", -1)
+            if ret_code == 0:
+                order_id = resp.get("result", {}).get("orderId", "?")
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
