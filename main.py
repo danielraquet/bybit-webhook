@@ -686,23 +686,34 @@ def get_available_balance() -> float:
 
 
 
+_instrument_cache = {}
+
 def get_instrument_info(symbol: str) -> dict:
-    """Get min qty, qty step, price decimals for a symbol."""
+    """Get min qty, qty step, price decimals for a symbol. Cached."""
+    if symbol in _instrument_cache:
+        return _instrument_cache[symbol]
     try:
-        resp = session.get_instruments_info(category="linear", symbol=symbol)
+        resp = _api_call(session.get_instruments_info, category="linear", symbol=symbol)
         items = resp.get("result", {}).get("list", [])
         if items:
             lot   = items[0].get("lotSizeFilter", {})
             price = items[0].get("priceFilter", {})
-            return {
+            tick  = str(price.get("tickSize", "0.01"))
+            scale = len(tick.rstrip("0").split(".")[1]) if "." in tick else 0
+            info  = {
                 "min_qty":     float(lot.get("minOrderQty",  0.001)),
                 "qty_step":    float(lot.get("qtyStep",       0.001)),
-                "price_scale": int(price.get("tickSize", "0.01").split(".")[1].__len__()
-                                   if "." in str(price.get("tickSize", "0.01")) else 0),
+                "price_scale": scale,
             }
+            _instrument_cache[symbol] = info
+            log.info(f"Instrument info cached: {symbol} tick={tick} scale={scale}")
+            return info
     except Exception as e:
         log.error(f"Error fetching instrument info for {symbol}: {e}")
-    return {"min_qty": 0.001, "qty_step": 0.001, "price_scale": 2}
+
+    # Smarter fallback — infer scale from entry price if known
+    # e.g. 0.93962 → needs 5 decimal places, not 2
+    return {"min_qty": 0.001, "qty_step": 0.001, "price_scale": 5}
 
 
 def round_to_step(value: float, step: float) -> float:
@@ -1487,6 +1498,14 @@ def webhook():
 
         info        = get_instrument_info(symbol)
         price_scale = info["price_scale"]
+        # If instrument info unavailable, infer from actual prices
+        if price_scale == 5:
+            for p in [entry, sl, tp]:
+                if p > 0:
+                    s = str(p)
+                    if "." in s:
+                        price_scale = max(price_scale, len(s.rstrip("0").split(".")[1]))
+            price_scale = min(price_scale, 8)  # cap at 8
         entry_str   = f"{entry:.{price_scale}f}"
         sl_str      = f"{sl:.{price_scale}f}"
         tp_str      = f"{tp:.{price_scale}f}"
