@@ -398,7 +398,7 @@ JOURNAL_HTML = """
             <span class="tag tag-blue" title="S/R level">S/R {{ kl_val }}</span>
             {% else %}—{% endif %}
           {% elif raw_notes and raw_notes != 'null' and raw_notes != 'None' %}
-            {{ raw_notes[:40] }}
+            {{ raw_notes[:40] | e }}
           {% else %}—{% endif %}
         </td>
       </tr>
