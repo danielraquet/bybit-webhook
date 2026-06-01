@@ -81,543 +81,203 @@ trade_lock = threading.Lock()
 # ─── JOURNAL DASHBOARD HTML ───────────────────────────────────────────────────
 JOURNAL_HTML = """
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Trade Journal</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-  :root {
-    --bg:       #0a0c10;
-    --surface:  #111318;
-    --border:   #1e2128;
-    --text:     #c8cdd8;
-    --dim:      #5a6070;
-    --green:    #00c896;
-    --red:      #ff4d6a;
-    --yellow:   #f5a623;
-    --blue:     #4d9fff;
-    --white:    #eef0f5;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'IBM Plex Sans', sans-serif;
-    font-size: 14px;
-    min-height: 100vh;
-  }
-  header {
-    border-bottom: 1px solid var(--border);
-    padding: 20px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  header h1 {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 18px;
-    font-weight: 600;
-    color: var(--white);
-    letter-spacing: 0.05em;
-  }
-  header span {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    color: var(--dim);
-  }
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 1px;
-    background: var(--border);
-    border-bottom: 1px solid var(--border);
-  }
-  .stat {
-    background: var(--surface);
-    padding: 20px 24px;
-  }
-  .stat-label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--dim);
-    margin-bottom: 8px;
-  }
-  .stat-value {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 22px;
-    font-weight: 600;
-    color: var(--white);
-  }
-  .stat-value.green { color: var(--green); }
-  .stat-value.red   { color: var(--red); }
-  .stat-value.yellow{ color: var(--yellow); }
-  .filters {
-    padding: 16px 32px;
-    display: flex;
-    gap: 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .filter-btn {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    padding: 6px 14px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--dim);
-    cursor: pointer;
-    border-radius: 3px;
-    transition: all 0.15s;
-  }
-  .filter-btn.active, .filter-btn:hover {
-    border-color: var(--blue);
-    color: var(--blue);
-    background: rgba(77,159,255,0.06);
-  }
-  .table-wrap {
-    overflow-x: auto;
-    padding: 0 32px 32px;
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 16px;
-  }
-  th {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--dim);
-    padding: 10px 12px;
-    text-align: left;
-    border-bottom: 1px solid var(--border);
-    white-space: nowrap;
-  }
-  td {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 12px;
-    padding: 11px 12px;
-    border-bottom: 1px solid rgba(30,33,40,0.6);
-    white-space: nowrap;
-    color: var(--text);
-  }
-  tr:hover td { background: rgba(255,255,255,0.02); }
-  .badge {
-    display: inline-block;
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 3px;
-    font-weight: 500;
-    letter-spacing: 0.05em;
-  }
-  .badge-buy     { background: rgba(0,200,150,0.12); color: var(--green); }
-  .badge-sell    { background: rgba(255,77,106,0.12); color: var(--red); }
-  .badge-open    { background: rgba(77,159,255,0.12); color: var(--blue); }
-  .badge-closed  { background: rgba(90,96,112,0.15); color: var(--dim); }
-  .badge-skipped { background: rgba(245,166,35,0.12); color: var(--yellow); }
-  .badge-tp      { background: rgba(0,200,150,0.12); color: var(--green); }
-  .badge-sl      { background: rgba(255,77,106,0.12); color: var(--red); }
-  .pnl-pos { color: var(--green); }
-  .pnl-neg { color: var(--red); }
-  .mono { font-family: 'IBM Plex Mono', monospace; }
-  .dim  { color: var(--dim); }
-  .refresh {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11px;
-    padding: 6px 14px;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--dim);
-    cursor: pointer;
-    border-radius: 3px;
-  }
-  .refresh:hover { color: var(--white); border-color: var(--dim); }
-  .empty {
-    text-align: center;
-    padding: 60px;
-    color: var(--dim);
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 13px;
-  }
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--dim:#6b7280;--blue:#60a5fa;--green:#4ade80;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,sans-serif;font-size:13px;padding:16px}
+h1{font-size:18px;margin-bottom:12px}
+.toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px;align-items:center}
+.btn{background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+.btn:hover{border-color:var(--blue)}
+.days-filter{display:flex;gap:4px;margin-left:8px}
+.days-filter a{padding:4px 10px;border-radius:4px;border:1px solid var(--border);color:var(--dim);text-decoration:none;font-size:11px}
+.days-filter a.active{border-color:var(--blue);color:var(--blue)}
+.stats{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:100px}
+.stat-label{color:var(--dim);font-size:11px;margin-bottom:4px}
+.stat-value{font-size:18px;font-weight:600}
+.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:var(--card);padding:8px 10px;text-align:left;color:var(--dim);font-weight:500;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:hover td{background:rgba(255,255,255,0.02)}
+.badge{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-tp{background:rgba(74,222,128,0.15);color:var(--green)}
+.badge-sl{background:rgba(248,113,113,0.15);color:var(--red)}
+.badge-open{background:rgba(96,165,250,0.15);color:var(--blue)}
+.badge-skipped{background:rgba(107,114,128,0.15);color:var(--dim)}
+.pnl-pos{color:var(--green)}.pnl-neg{color:var(--red)}
+.editable{cursor:pointer;border-bottom:1px dashed var(--dim)}
+.editable:hover{border-bottom-color:var(--blue);color:var(--blue)}
+.note-row td{background:rgba(96,165,250,0.05);color:var(--blue);font-style:italic;border-left:3px solid var(--blue)}
 </style>
 </head>
 <body>
+<h1>📒 Trade Journal</h1>
 
-<header>
-  <h1>// TRADE JOURNAL</h1>
-  <div style="display:flex;align-items:center;gap:16px;">
-    <a href="/analysis" style="color:var(--blue);font-size:12px;text-decoration:none;">📊 Analysis</a>
-    <a href="/recommendations" style="color:var(--blue);font-size:12px;text-decoration:none;">🎯 Recommendations</a>
-    <a href="/watchlist" style="color:var(--blue);font-size:12px;text-decoration:none;">📋 Watchlist</a>
-    <span id="last-update">updated just now</span>
-    <button class="refresh" onclick="location.reload()">↻ refresh</button>
+<div class="toolbar">
+  <button class="btn" id="btn-poll">🔄 Poll Now</button>
+  <button class="btn" id="btn-note">📝 Add Note</button>
+  <button class="btn" id="btn-del-old">🗓️ Delete Older Than</button>
+  <button class="btn" id="btn-reset" style="color:var(--red)">⚠️ Reset All</button>
+  <div class="days-filter">
+    <a href="/journal?days=7"  class="{{ 'active' if days==7  else '' }}">7d</a>
+    <a href="/journal?days=14" class="{{ 'active' if days==14 else '' }}">14d</a>
+    <a href="/journal?days=30" class="{{ 'active' if days==30 else '' }}">30d</a>
+    <a href="/journal?days=90" class="{{ 'active' if days==90 else '' }}">90d</a>
+    <a href="/journal"         class="{{ 'active' if not days else '' }}">All</a>
   </div>
-</header>
+</div>
 
 <div class="stats">
-  <div class="stat">
-    <div class="stat-label">Total Trades</div>
-    <div class="stat-value" id="stat-total">{{ stats.total_closed }}</div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Win Rate</div>
-    <div class="stat-value" id="stat-wr" class="{{ 'green' if stats.win_rate >= 50 else 'red' }}">
-      {{ stats.win_rate }}%
-    </div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Wins / Losses</div>
-    <div class="stat-value">
-      <span style="color:var(--green)" id="stat-wins">{{ stats.wins }}</span>
-      <span style="color:var(--dim);font-size:16px"> / </span>
-      <span style="color:var(--red)" id="stat-losses">{{ stats.losses }}</span>
-    </div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Total PnL</div>
-    <div class="stat-value" id="stat-pnl" class="{{ 'green' if stats.total_pnl >= 0 else 'red' }}">
-      {{ '+' if stats.total_pnl >= 0 else '' }}{{ stats.total_pnl }} USDT
-    </div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Avg Win</div>
-    <div class="stat-value green" id="stat-avg-win">+{{ stats.avg_win }} USDT</div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Avg Loss</div>
-    <div class="stat-value red" id="stat-avg-loss">{{ stats.avg_loss }} USDT</div>
-  </div>
-  <div class="stat">
-    <div class="stat-label">Open Now</div>
-    <div class="stat-value" style="color:var(--blue)" id="stat-open">{{ stats.open_count }}</div>
-  </div>
+  <div class="stat"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div>
+  <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="s-wr">—</div></div>
+  <div class="stat"><div class="stat-label">Wins</div><div class="stat-value green" id="s-wins">—</div></div>
+  <div class="stat"><div class="stat-label">Losses</div><div class="stat-value red" id="s-losses">—</div></div>
+  <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" id="s-pnl">—</div></div>
+  <div class="stat"><div class="stat-label">Open</div><div class="stat-value amber" id="s-open">—</div></div>
 </div>
 
-<div class="filters">
-  <button class="filter-btn active" onclick="filterTable('all', this)">All</button>
-  <button class="filter-btn" onclick="filterTable('open', this)">Open</button>
-  <button class="filter-btn" onclick="filterTable('closed', this)">Closed</button>
-  <button class="filter-btn" onclick="filterTable('skipped', this)">Skipped</button>
-  <button class="filter-btn" onclick="filterTable('tp', this)">TP Hit</button>
-  <button class="filter-btn" onclick="filterTable('sl', this)">SL Hit</button>
-  <span style="margin:0 8px;color:var(--dim)">|</span>
-  <button class="filter-btn" onclick="filterTable('src:ob', this)">OB</button>
-  <button class="filter-btn" onclick="filterTable('src:fib', this)">FIB</button>
-  <button class="filter-btn" onclick="filterTable('src:fibob', this)">FIBOB</button>
-  <button class="filter-btn" onclick="filterTable('src:manual', this)">Manual</button>
-  <span style="margin:0 8px;color:var(--dim)">|</span>
-  <button class="filter-btn" onclick="runPoll(this)" style="color:var(--blue)">🔄 Poll Now</button>
-  <button class="filter-btn" onclick="runFix(this)" style="color:var(--dim)">🔧 Fix Stale</button>
-  <button class="filter-btn" onclick="addNote(this)" style="color:var(--blue);font-weight:500">📝 Add Note</button>
-  <button class="filter-btn" onclick="runDeleteDupes(this)" style="color:var(--red)">🗑️ Delete Dupes</button>
-  <button class="filter-btn" onclick="runDeleteOlderThan(this)" style="color:var(--amber)">🗓️ Delete Older Than</button>
-  <button class="filter-btn" onclick="runReset(this)" style="color:var(--red);font-weight:600">⚠️ Reset All</button>
-  <span style="margin-left:12px;color:var(--dim);font-size:11px">Show:</span>
-  {% for d in [7, 14, 30, 90] %}
-  <a href="/journal?days={{ d }}" class="filter-btn" style="color:{{ 'var(--blue)' if days == d else 'var(--dim)' }}">{{ d }}d</a>
-  {% endfor %}
-  <a href="/journal" class="filter-btn" style="color:{{ 'var(--blue)' if not days else 'var(--dim)' }}">All</a>
-</div>
-
-<div class="table-wrap">
-  {% if trades %}
-  <table id="journal-table">
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Symbol</th>
-        <th>Side</th>
-        <th>TF</th>
-        <th>Status</th>
-        <th>Qty</th>
-        <th>Entry</th>
-        <th>Exit</th>
-        <th>Stop Loss</th>
-        <th>Take Profit</th>
-        <th>PnL (USDT)</th>
-        <th>PnL %</th>
-        <th>Outcome</th>
-        <th>Source</th>
-        <th>Opened</th>
-        <th>Closed</th>
-        <th>Notes</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for t in trades %}
-      {% if t.status == 'note' %}
-      <tr style="background:color-mix(in srgb, var(--blue) 8%, transparent);border-left:3px solid var(--blue)">
-        <td colspan="17" style="padding:8px 12px;color:var(--blue);font-style:italic">
-          📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes or '' }}
-        </td>
-      </tr>
-      {% else %}
-      <tr data-status="{{ t.status }}" data-outcome="{{ t.outcome or '' }}" data-source="{{ t.source or '' }}">
-        <td class="dim">{{ trades|length - loop.index0 }}</td>
-        <td style="color:var(--white);font-weight:500">{{ t.symbol }}</td>
-        <td>
-          <span class="badge {{ 'badge-buy' if t.side == 'Buy' else 'badge-sell' }}">
-            {{ t.side }}
-          </span>
-        </td>
-        <td class="dim">{{ t.timeframe if t.timeframe else '—' }}</td>
-        <td>
-          <span class="badge badge-{{ t.status }}">{{ t.status }}</span>
-        </td>
-        <td>{{ t.qty if t.qty else '—' }}</td>
-        <td>{{ t.entry }}</td>
-        <td>{{ t.exit_price if t.exit_price else '—' }}</td>
-        <td style="color:var(--red)">{{ t.sl }}</td>
-        <td style="color:var(--green)">{{ t.tp }}</td>
-        <td class="{{ 'pnl-pos' if t.pnl and t.pnl > 0 else 'pnl-neg' if t.pnl and t.pnl < 0 else '' }}"
-            data-edit-pnl="{{ t.id }}" data-pnl-val="{{ t.pnl or '' }}" title="Click to edit PnL" style="cursor:pointer">
-          {% if t.pnl %}{{ '+' if t.pnl > 0 else '' }}{{ t.pnl }}{% else %}—{% endif %}
-        </td>
-        <td class="{{ 'pnl-pos' if t.pnl_pct and t.pnl_pct > 0 else 'pnl-neg' if t.pnl_pct and t.pnl_pct < 0 else '' }}">
-          {% if t.pnl_pct %}{{ '+' if t.pnl_pct > 0 else '' }}{{ t.pnl_pct }}%{% else %}—{% endif %}
-        </td>
-        <td>
-          {% if t.outcome %}
-          <span class="badge badge-{{ t.outcome }}" data-edit-outcome="{{ t.id }}" data-outcome-val="{{ t.outcome }}" title="Click to edit" style="cursor:pointer">{{ t.outcome.upper() }}</span>
-          {% else %}
-          <span style="color:var(--dim);cursor:pointer" data-edit-outcome="{{ t.id }}" data-outcome-val="" title="Click to set">—</span>
-          {% endif %}
-        </td>
-        <td class="dim">{{ t.source or '—' }}</td>
-        <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
-        <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
-        <td class="dim" style="max-width:160px;overflow:hidden;text-overflow:ellipsis">
-          {% set raw_notes = (t.notes or '').split('|sheet_row:')[0].strip() %}
-          {% set kl = '"klLevel"' in raw_notes %}
-          {% if kl %}
-            {% set kl_val = raw_notes.split('"klLevel":')[1].split(',')[0].split('}')[0].strip() %}
-            {% if kl_val != 'null' %}
-            <span class="tag tag-blue" title="S/R level">S/R {{ kl_val }}</span>
-            {% else %}—{% endif %}
-          {% elif raw_notes and raw_notes != 'null' and raw_notes != 'None' %}
-            {{ raw_notes[:40] | e }}
-          {% else %}—{% endif %}
-        </td>
-      </tr>
-      {% endif %}
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty">
-    no trades yet — waiting for alerts...
-  </div>
-  {% endif %}
-</div>
+<table>
+<thead>
+<tr>
+  <th>#</th><th>Symbol</th><th>Side</th><th>TF</th><th>Status</th>
+  <th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th>
+  <th>PnL</th><th>PnL%</th><th>Outcome</th><th>Source</th>
+  <th>Opened</th><th>Closed</th><th>Notes</th>
+</tr>
+</thead>
+<tbody>
+{% for t in trades %}
+{% if t.status == 'note' %}
+<tr class="note-row">
+  <td colspan="17">📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes | e }}</td>
+</tr>
+{% else %}
+<tr>
+  <td class="dim">{{ trades|length - loop.index0 }}</td>
+  <td><strong>{{ t.symbol }}</strong></td>
+  <td>{{ t.side or '—' }}</td>
+  <td class="dim">{{ t.timeframe or '—' }}</td>
+  <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+  <td class="dim">{{ t.qty or '—' }}</td>
+  <td>{{ t.entry or '—' }}</td>
+  <td>{{ t.exit_price or '—' }}</td>
+  <td style="color:var(--red)">{{ t.sl or '—' }}</td>
+  <td style="color:var(--green)">{{ t.tp or '—' }}</td>
+  <td class="pnl-{{ 'pos' if t.pnl and t.pnl > 0 else 'neg' if t.pnl and t.pnl < 0 else 'dim' }} editable"
+      data-id="{{ t.id }}" data-type="pnl" data-val="{{ t.pnl or '' }}">
+    {{ ('+' if t.pnl > 0 else '') + '%.4f'|format(t.pnl) if t.pnl else '—' }}
+  </td>
+  <td class="pnl-{{ 'pos' if t.pnl_pct and t.pnl_pct > 0 else 'neg' if t.pnl_pct and t.pnl_pct < 0 else 'dim' }}">
+    {{ ('+' if t.pnl_pct > 0 else '') + '%.2f'|format(t.pnl_pct) + '%' if t.pnl_pct else '—' }}
+  </td>
+  <td class="editable" data-id="{{ t.id }}" data-type="outcome" data-val="{{ t.outcome or '' }}">
+    {% if t.outcome %}<span class="badge badge-{{ t.outcome }}">{{ t.outcome.upper() }}</span>{% else %}—{% endif %}
+  </td>
+  <td class="dim">{{ t.source or '—' }}</td>
+  <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
+  <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
+  <td class="dim" style="max-width:140px;overflow:hidden;text-overflow:ellipsis" title="{{ t.notes | e if t.notes else '' }}">
+    {% set n = (t.notes or '').split('|sheet_row:')[0].strip() %}
+    {{ n[:35] | e if n and n not in ('null','None') else '—' }}
+  </td>
+</tr>
+{% endif %}
+{% endfor %}
+</tbody>
+</table>
 
 <script>
-function addNote(btn) {
-  const note = prompt('Enter note / settings change:\n(e.g. "Changed klMinScore to 8, pvLen to 20, FILTER_MIN_WR=35")');
+// Toolbar buttons
+document.getElementById('btn-poll').onclick = function() {
+  var btn = this; btn.textContent = '⏳'; btn.disabled = true;
+  fetch('/poll', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    btn.textContent = d.ws_connected ? '⚡ WS Active' : '✅ Done';
+    setTimeout(function(){ btn.textContent='🔄 Poll Now'; btn.disabled=false; location.reload(); }, 2000);
+  }).catch(function(){ btn.textContent='❌'; btn.disabled=false; });
+};
+
+document.getElementById('btn-note').onclick = function() {
+  var note = prompt('Enter note (e.g. settings change):');
   if (!note || !note.trim()) return;
-  fetch('/journal/add-note', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({note: note.trim()})
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') location.reload();
-    else alert('Error: ' + d.message);
-  });
-}
+  fetch('/journal/add-note', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note:note.trim()})})
+    .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+};
 
-function editPnl(tradeId, current) {
-  const val = prompt('Enter PnL in USDT (e.g. -3.75 or 8.42):', current);
-  if (val === null) return;
-  const num = parseFloat(val);
-  if (isNaN(num)) { alert('Invalid number'); return; }
-  fetch('/journal/set-pnl', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({id: tradeId, pnl: num})
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') location.reload();
-    else alert('Error: ' + d.message);
-  });
-}
+document.getElementById('btn-del-old').onclick = function() {
+  var days = prompt('Delete trades older than how many days?', '7');
+  if (!days || isNaN(days)) return;
+  if (!confirm('Delete trades older than ' + days + ' days?')) return;
+  fetch('/journal/delete-older-than/' + parseInt(days), {method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){ alert(d.message); location.reload(); });
+};
 
-function editOutcome(tradeId, current) {
-  const options = ['tp', 'sl', ''];
-  const labels  = {'tp': 'TP ✅', 'sl': 'SL 🔴', '': 'Clear —'};
-  const next    = options[(options.indexOf(current) + 1) % options.length];
-  if (!confirm('Change outcome to: ' + (labels[next] || 'Clear') + '?')) return;
-  fetch('/journal/set-outcome', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({id: tradeId, outcome: next})
-  }).then(r => r.json()).then(d => {
-    if (d.status === 'ok') location.reload();
-    else alert('Error: ' + d.message);
-  });
-}
+document.getElementById('btn-reset').onclick = function() {
+  if (!confirm('DELETE ALL TRADES? Cannot be undone.')) return;
+  if (!confirm('Are you sure?')) return;
+  fetch('/journal/reset', {method:'POST'}).then(function(r){return r.json();}).then(function(d){ alert(d.message); location.reload(); });
+};
 
-// Event delegation — attach once, handles all rows including dynamically added ones
+// Edit PnL and Outcome via event delegation
 document.addEventListener('click', function(e) {
-  const pnlEl = e.target.closest('[data-edit-pnl]');
-  if (pnlEl) {
-    editPnl(pnlEl.dataset.editPnl, pnlEl.dataset.pnlVal);
-    return;
+  var el = e.target.closest('.editable[data-id]');
+  if (!el) return;
+  var id   = el.dataset.id;
+  var type = el.dataset.type;
+  var val  = el.dataset.val;
+
+  if (type === 'pnl') {
+    var newVal = prompt('Enter PnL in USDT:', val);
+    if (newVal === null) return;
+    var num = parseFloat(newVal);
+    if (isNaN(num)) { alert('Invalid number'); return; }
+    fetch('/journal/set-pnl', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), pnl:num})})
+      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
   }
-  const outEl = e.target.closest('[data-edit-outcome]');
-  if (outEl) {
-    editOutcome(outEl.dataset.editOutcome, outEl.dataset.outcomeVal);
-    return;
+
+  if (type === 'outcome') {
+    var opts   = ['tp','sl',''];
+    var labels = {'tp':'TP','sl':'SL','':'Clear'};
+    var next   = opts[(opts.indexOf(val)+1) % opts.length];
+    if (!confirm('Change outcome to: ' + (labels[next]||'Clear') + '?')) return;
+    fetch('/journal/set-outcome', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), outcome:next})})
+      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
   }
 });
 
-function runDeleteOlderThan(btn) {
-  const days = prompt('Delete trades older than how many days?', '7');
-  if (!days || isNaN(days)) return;
-  if (!confirm(`Delete all trades older than ${days} days? This cannot be undone.`)) return;
-  const base = window.location.origin;
-  btn.innerText = '⏳ Deleting...';
-  btn.disabled = true;
-  fetch(base + '/journal/delete-older-than/' + parseInt(days), {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      btn.innerText = '✅ ' + (data.message || 'Done');
-      setTimeout(() => { btn.innerText = '🗓️ Delete Older Than'; btn.disabled = false; location.reload(); }, 2000);
-    })
-    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
-}
-
-function runReset(btn) {
-  if (!confirm('⚠️ DELETE ALL TRADES? This cannot be undone.')) return;
-  if (!confirm('Are you sure? All journal entries will be permanently deleted.')) return;
-  const base = window.location.origin;
-  btn.innerText = '⏳ Deleting...';
-  btn.disabled = true;
-  fetch(base + '/journal/reset', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      btn.innerText = '✅ ' + (data.message || 'Done');
-      setTimeout(() => { btn.innerText = '⚠️ Reset All'; btn.disabled = false; location.reload(); }, 2000);
-    })
-    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
-}
-
-function runDeleteDupes(btn) {
-  if (!confirm('Delete duplicate imported trades? This removes imports where a matching native trade already exists.')) return;
-  const base = window.location.origin;
-  btn.innerText = '⏳ Deleting...';
-  btn.disabled = true;
-  fetch(base + '/journal/delete-duplicates', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      btn.innerText = '✅ ' + (data.message || 'Done');
-      setTimeout(() => { btn.innerText = '🗑️ Delete Dupes'; btn.disabled = false; location.reload(); }, 2000);
-    })
-    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
-}
-
-function runImport(btn) {
-  if (!confirm('Import missing trades from Bybit history? This will add closed trades not yet in the journal.')) return;
-  const base = window.location.origin;
-  btn.innerText = '⏳ Importing...';
-  btn.disabled = true;
-  fetch(base + '/journal/import', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      btn.innerText = '✅ ' + (data.message || 'Done');
-      setTimeout(() => { btn.innerText = '📥 Import Bybit'; btn.disabled = false; location.reload(); }, 3000);
-    })
-    .catch(err => { btn.innerText = '❌ Error'; btn.disabled = false; });
-}
-
-function runPoll(btn) {
-  const base = window.location.origin;
-  btn.innerText = '⏳ Checking...';
-  btn.disabled = true;
-  fetch(base + '/poll', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      if (data.ws_connected) {
-        btn.innerText = '⚡ WS Active';
-        btn.style.color = 'var(--green)';
-      } else {
-        btn.innerText = '✅ Done';
-      }
-      setTimeout(() => { btn.innerText = '🔄 Poll Now'; btn.style.color = ''; btn.disabled = false; location.reload(); }, 2000);
-    })
-    .catch(err => { btn.innerText = '❌ ' + err; btn.disabled = false; });
-}
-
-function runFix(btn) {
-  const base = window.location.origin;
-  btn.innerText = '⏳ Fixing...';
-  btn.disabled = true;
-  fetch(base + '/journal/fix', {method: 'POST'})
-    .then(r => r.json())
-    .then(data => {
-      btn.innerText = '✅ Done';
-      setTimeout(() => { btn.innerText = '🔧 Fix Stale'; btn.disabled = false; location.reload(); }, 2000);
-    })
-    .catch(err => { btn.innerText = '❌ ' + err; btn.disabled = false; });
-}
-
-function filterTable(filter, btn) {
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('#journal-table tbody tr').forEach(row => {
-    const status  = row.dataset.status;
-    if (!status) { row.style.display = ''; return; }  // always show note rows
-    const outcome = row.dataset.outcome;
-    const source  = row.dataset.source;
-    let show = false;
-    if (filter === 'all')               show = true;
-    else if (filter === 'tp')           show = outcome === 'tp';
-    else if (filter === 'sl')           show = outcome === 'sl';
-    else if (filter.startsWith('src:')) show = source === filter.slice(4);
-    else                                show = status === filter;
-    row.style.display = show ? '' : 'none';
-  });
-  updateStats();
-}
-
-function updateStats() {
-  const rows = document.querySelectorAll('#journal-table tbody tr');
-  let total = 0, wins = 0, losses = 0, totalPnl = 0;
-  let winPnls = [], lossPnls = [], openCount = 0;
-
-  rows.forEach(row => {
-    if (row.style.display === 'none') return;
-    const status  = row.dataset.status;
-    if (!status) return;  // skip note rows (no data-status)
-    const outcome = row.dataset.outcome;
-    const cells   = row.querySelectorAll('td');
-    const pnlText = cells[10] ? cells[10].innerText.trim().replace('+','') : '';
-    const pnl     = parseFloat(pnlText) || 0;
-
+// Stats calculation
+(function() {
+  var rows = document.querySelectorAll('tbody tr:not(.note-row)');
+  var total=0, wins=0, losses=0, pnlSum=0, open=0;
+  rows.forEach(function(row) {
+    var cells   = row.querySelectorAll('td');
+    var status  = cells[4] ? cells[4].textContent.trim() : '';
+    var outcome = cells[12] ? cells[12].textContent.trim().toLowerCase() : '';
+    var pnlText = cells[10] ? cells[10].textContent.trim().replace('+','') : '';
+    var pnl     = parseFloat(pnlText) || 0;
     if (status === 'closed') {
       total++;
-      if (outcome === 'tp') { wins++; winPnls.push(pnl); }
-      if (outcome === 'sl') { losses++; lossPnls.push(pnl); }
-      if (outcome === 'tp' || outcome === 'sl') totalPnl += pnl;
+      if (outcome === 'tp') { wins++; pnlSum += pnl; }
+      if (outcome === 'sl') { losses++; pnlSum += pnl; }
     }
-    if (status === 'open') openCount++;
+    if (status === 'open') open++;
   });
-
-  const wr     = total > 0 ? Math.round(wins / total * 100) : 0;
-  const avgWin  = winPnls.length  > 0 ? (winPnls.reduce((a,b)=>a+b,0)  / winPnls.length).toFixed(2)  : 0;
-  const avgLoss = lossPnls.length > 0 ? (lossPnls.reduce((a,b)=>a+b,0) / lossPnls.length).toFixed(2) : 0;
-
-  document.getElementById('stat-total').innerText    = total;
-  document.getElementById('stat-wr').innerText       = wr + '%';
-  document.getElementById('stat-wr').className       = 'stat-value ' + (wr >= 50 ? 'green' : 'red');
-  document.getElementById('stat-wins').innerText     = wins;
-  document.getElementById('stat-losses').innerText   = losses;
-  document.getElementById('stat-pnl').innerText      = (totalPnl >= 0 ? '+' : '') + totalPnl.toFixed(2) + ' USDT';
-  document.getElementById('stat-pnl').className      = 'stat-value ' + (totalPnl >= 0 ? 'green' : 'red');
-  document.getElementById('stat-avg-win').innerText  = '+' + avgWin + ' USDT';
-  document.getElementById('stat-avg-loss').innerText = avgLoss + ' USDT';
-  document.getElementById('stat-open').innerText     = openCount;
-}
+  var wr = total > 0 ? Math.round(wins/total*100) : 0;
+  document.getElementById('s-total').textContent   = total;
+  document.getElementById('s-wr').textContent      = wr + '%';
+  document.getElementById('s-wr').className        = 'stat-value ' + (wr >= 50 ? 'green' : 'red');
+  document.getElementById('s-wins').textContent    = wins;
+  document.getElementById('s-losses').textContent  = losses;
+  document.getElementById('s-pnl').textContent     = (pnlSum >= 0 ? '+' : '') + pnlSum.toFixed(2) + ' USDT';
+  document.getElementById('s-pnl').className       = 'stat-value ' + (pnlSum >= 0 ? 'green' : 'red');
+  document.getElementById('s-open').textContent    = open;
+})();
 </script>
 </body>
 </html>
