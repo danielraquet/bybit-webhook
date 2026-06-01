@@ -60,10 +60,11 @@ def get_config():
 
     return {
         "enabled":              _str("ENABLED", "true").lower() == "true",
-        "journal_only":         os.environ.get("JOURNAL_ONLY", "false").lower() == "true",  # log only, Bybit places orders natively
+        "journal_only":         os.environ.get("JOURNAL_ONLY", "false").lower() == "true",
+        "balance_pct":          _float("BALANCE_PCT",   1.0),
         "max_trades":           _int("MAX_TRADES",       3),
         "leverage":             _int("LEVERAGE",         5),
-        "poll_interval":        _int("POLL_INTERVAL",    600),  # 10 min default
+        "poll_interval":        _int("POLL_INTERVAL",    600),
         "filter_side":          _str("FILTER_SIDE").lower(),
         "filter_min_wr":        _float("FILTER_MIN_WR",  0),
         "filter_sources":       _str("FILTER_SOURCES").lower(),
