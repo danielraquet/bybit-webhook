@@ -119,6 +119,12 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 </head>
 <body>
 <h1>📒 Trade Journal</h1>
+<div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
+  <a href="/journal" style="color:var(--blue);text-decoration:none">📒 Journal</a>
+  <a href="/analysis" style="color:var(--dim);text-decoration:none">📊 Analysis</a>
+  <a href="/recommendations" style="color:var(--dim);text-decoration:none">🎯 Recommendations</a>
+  <a href="/watchlist" style="color:var(--dim);text-decoration:none">👁️ Watchlist</a>
+</div>
 
 <div class="toolbar">
   <button class="btn" id="btn-poll">🔄 Poll Now</button>
