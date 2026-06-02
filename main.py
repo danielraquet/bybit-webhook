@@ -155,14 +155,14 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <th>#</th><th>Symbol</th><th>Side</th><th>TF</th><th>Status</th>
   <th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th>
   <th>PnL</th><th>PnL%</th><th>Outcome</th><th>Source</th>
-  <th>Opened</th><th>Closed</th><th>Notes</th>
+  <th>Opened</th><th>Closed</th><th>Notes</th><th>📎</th>
 </tr>
 </thead>
 <tbody>
 {% for t in trades %}
 {% if t.status == 'note' %}
 <tr class="note-row">
-  <td colspan="17">📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes | e }}</td>
+  <td colspan="18">📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes | e }}</td>
 </tr>
 {% else %}
 <tr>
@@ -192,6 +192,16 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <td class="dim" style="max-width:140px;overflow:hidden;text-overflow:ellipsis" title="{{ t.notes | e if t.notes else '' }}">
     {% set n = (t.notes or '').split('|sheet_row:')[0].strip() %}
     {{ n[:35] | e if n and n not in ('null','None') else '—' }}
+  </td>
+  <td style="min-width:80px">
+    {% if t.media %}
+      {% for link in t.media.split('|') %}
+        {% if link.strip() %}
+          <a href="{{ link.strip() }}" target="_blank" style="color:var(--blue);font-size:11px;display:block;overflow:hidden;text-overflow:ellipsis;max-width:80px" title="{{ link.strip() }}">🔗 link</a>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+    <span class="editable" data-id="{{ t.id }}" data-type="media" data-val="{{ t.media or '' }}" style="color:var(--dim);font-size:11px;cursor:pointer" title="Click to add link/screenshot URL">{{ '＋' if not t.media else '✏️' }}</span>
   </td>
 </tr>
 {% endif %}
@@ -244,6 +254,13 @@ document.addEventListener('click', function(e) {
     var num = parseFloat(newVal);
     if (isNaN(num)) { alert('Invalid number'); return; }
     fetch('/journal/set-pnl', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), pnl:num})})
+      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+  }
+
+  if (type === 'media') {
+    var newVal = prompt('Enter URL (paste screenshot link, TradingView chart link etc).\nSeparate multiple links with |:', val);
+    if (newVal === null) return;
+    fetch('/journal/set-media', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), media:newVal.trim()})})
       .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
   }
 
@@ -1437,6 +1454,23 @@ def add_note():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/journal/set-media", methods=["POST"])
+def set_media():
+    """Set media links for a trade."""
+    try:
+        body     = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+        media    = body.get("media", "").strip()
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET media=%s WHERE id=%s", (media or None, trade_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/journal/set-pnl", methods=["POST"])
 def set_pnl():
     """Manually set PnL for a trade."""
@@ -2004,6 +2038,7 @@ ANALYSIS_HTML = """
   </table>
 </div>
 
+{% if kl_analysis.with_kl.count > 0 %}
 <div class="section" style="margin-bottom:16px">
   <div class="section-title">🎯 Key Level Filter Impact</div>
   <p style="font-size:11px;color:var(--dim);margin-bottom:10px">Comparing trades that triggered at a key S/R level vs those without — shows whether the filter improves results</p>
@@ -2039,6 +2074,7 @@ ANALYSIS_HTML = """
   <p style="font-size:11px;margin-top:8px;color:var(--dim)">Need 5+ trades in each group for meaningful comparison</p>
   {% endif %}
 </div>
+{% endif %}
 
 <div class="section" style="margin-bottom:16px">
   <div class="section-title">Best &amp; Worst — Timeframe + Source</div>
