@@ -1984,6 +1984,25 @@ ANALYSIS_HTML = """
 </div>
 
 <div class="section">
+  <div class="section-title">By symbol + side</div>
+  <table>
+    <tr><th>Symbol</th><th>Side</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_symbol_side %}
+    <tr style="{{ 'opacity:0.5' if r.total < 3 else '' }}">
+      <td>{{ r.symbol }}</td>
+      <td><span class="tag {{ 'tag-green' if r.side == 'Buy' else 'tag-red' }}">{{ 'LONG' if r.side == 'Buy' else 'SHORT' }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+
+<div class="section">
   <div class="section-title">By timeframe</div>
   <table>
     <tr><th>TF</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
@@ -2286,6 +2305,14 @@ def _analyse_trades(trades):
         return rows
 
     by_symbol = [{"symbol": r["key"], **r} for r in by_symbol_raw]
+
+    by_symbol_side_raw = group_stats(lambda t: t["symbol"] + "|" + (t.get("side") or ""))
+    by_symbol_side = sorted([{
+        "symbol": r["key"].split("|")[0],
+        "side":   r["key"].split("|")[1] if "|" in r["key"] else "—",
+        "wins":   r["wins"], "losses": r["losses"],
+        "total":  r["total"], "wr": r["wr"], "pnl": r["pnl"],
+    } for r in by_symbol_side_raw], key=lambda x: -x["wr"])
     by_source = [{"source": r["key"], **r} for r in by_source_raw]
     by_side   = [{"side":   r["key"], **r} for r in by_side_raw]
     by_tf     = [{"tf":     r["key"], **r} for r in by_tf_raw]
@@ -2485,6 +2512,7 @@ def _analyse_trades(trades):
         "profit_factor":  profit_factor,
         "expectancy":     expectancy,
         "by_symbol":      by_symbol,
+        "by_symbol_side": by_symbol_side,
         "by_source":      by_source,
         "by_side":        by_side,
         "by_tf":          by_tf,
