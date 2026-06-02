@@ -194,14 +194,15 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     {{ n[:35] | e if n and n not in ('null','None') else '—' }}
   </td>
   <td style="min-width:80px">
-    {% if t.media %}
-      {% for link in t.media.split('|') %}
+    {% set media_val = t.media or '' %}
+    {% if media_val %}
+      {% for link in media_val.split('|') %}
         {% if link.strip() %}
-          <a href="{{ link.strip() }}" target="_blank" style="color:var(--blue);font-size:11px;display:block;overflow:hidden;text-overflow:ellipsis;max-width:80px" title="{{ link.strip() }}">🔗 link</a>
+          <a href="{{ link.strip() | e }}" target="_blank" style="color:var(--blue);font-size:11px;display:block" title="{{ link.strip() | e }}">🔗 link</a>
         {% endif %}
       {% endfor %}
     {% endif %}
-    <span class="editable" data-id="{{ t.id }}" data-type="media" data-val="{{ t.media or '' }}" style="color:var(--dim);font-size:11px;cursor:pointer" title="Click to add link/screenshot URL">{{ '＋' if not t.media else '✏️' }}</span>
+    <span class="editable" data-id="{{ t.id }}" data-type="media" style="color:var(--dim);font-size:11px;cursor:pointer" title="Add link">{{ '✏️' if media_val else '＋' }}</span>
   </td>
 </tr>
 {% endif %}
@@ -258,10 +259,13 @@ document.addEventListener('click', function(e) {
   }
 
   if (type === 'media') {
-    var newVal = prompt('Enter URL (paste screenshot link, TradingView chart link etc).\nSeparate multiple links with |:', val);
-    if (newVal === null) return;
-    fetch('/journal/set-media', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), media:newVal.trim()})})
-      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+    fetch('/journal/get-media?id=' + id).then(function(r){return r.json();}).then(function(d){
+      var newVal = prompt('Enter URL (paste screenshot/chart link).\nSeparate multiple with |:', d.media || '');
+      if (newVal === null) return;
+      fetch('/journal/set-media', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), media:newVal.trim()})})
+        .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+    });
+    return;
   }
 
   if (type === 'outcome') {
@@ -1452,6 +1456,21 @@ def add_note():
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/get-media", methods=["GET"])
+def get_media():
+    """Get media links for a trade."""
+    try:
+        trade_id = int(request.args.get("id", 0))
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT media FROM trades WHERE id=%s", (trade_id,))
+            row = cur.fetchone()
+        conn.close()
+        return jsonify({"status": "ok", "media": row[0] if row and row[0] else ""}), 200
+    except Exception as e:
+        return jsonify({"status": "ok", "media": ""}), 200
 
 
 @app.route("/journal/set-media", methods=["POST"])
