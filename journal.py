@@ -65,6 +65,7 @@ if DATABASE_URL:
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS timeframe TEXT")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes TEXT")
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS media TEXT")
             conn.commit()
             log.info("PostgreSQL journal initialised")
         finally:
