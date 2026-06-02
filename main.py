@@ -283,11 +283,13 @@ document.addEventListener('click', function(e) {
   var rows = document.querySelectorAll('tbody tr:not(.note-row)');
   var total=0, wins=0, losses=0, pnlSum=0, open=0;
   rows.forEach(function(row) {
-    var cells   = row.querySelectorAll('td');
-    var status  = cells[4] ? cells[4].textContent.trim() : '';
-    var outcome = cells[12] ? cells[12].textContent.trim().toLowerCase() : '';
-    var pnlText = cells[10] ? cells[10].textContent.trim().replace('+','') : '';
-    var pnl     = parseFloat(pnlText) || 0;
+    var statusEl  = row.querySelector('[data-type="outcome"]');
+    var pnlEl     = row.querySelector('[data-type="pnl"]');
+    var statusBadge = row.querySelector('.badge');
+    var status    = statusBadge ? statusBadge.textContent.trim().toLowerCase() : '';
+    var outcome   = statusEl ? statusEl.dataset.val : '';
+    var pnl       = pnlEl ? parseFloat(pnlEl.dataset.val) || 0 : 0;
+
     if (status === 'closed') {
       total++;
       if (outcome === 'tp') { wins++; pnlSum += pnl; }
@@ -298,7 +300,7 @@ document.addEventListener('click', function(e) {
   var wr = total > 0 ? Math.round(wins/total*100) : 0;
   document.getElementById('s-total').textContent   = total;
   document.getElementById('s-wr').textContent      = wr + '%';
-  document.getElementById('s-wr').className        = 'stat-value ' + (wr >= 50 ? 'green' : 'red');
+  document.getElementById('s-wr').className        = 'stat-value ' + (wr >= 50 ? 'green' : wr > 0 ? 'red' : '');
   document.getElementById('s-wins').textContent    = wins;
   document.getElementById('s-losses').textContent  = losses;
   document.getElementById('s-pnl').textContent     = (pnlSum >= 0 ? '+' : '') + pnlSum.toFixed(2) + ' USDT';
