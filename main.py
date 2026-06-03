@@ -194,7 +194,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     {{ n[:35] | e if n and n not in ('null','None') else '—' }}
   </td>
   <td style="min-width:80px">
-    {% set media_val = t.media or '' %}
+    {% set media_val = (t.media or '') if t.media is defined else '' %}
     {% if media_val %}
       {% for link in media_val.split('|') %}
         {% if link.strip() %}
