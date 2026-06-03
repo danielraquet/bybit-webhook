@@ -182,6 +182,45 @@ def push_trade_closed(sheet_row: int, exit_price: float, qty: float):
         log.error(f"Google Sheets push_trade_closed error: {e}")
 
 
+def push_closed_trade(symbol: str, side: str, qty: float, entry: float,
+                      sl: float, tp: float, exit_price: float, pnl: float,
+                      outcome: str, source: str, timeframe: str,
+                      leverage: int, opened_at: str, closed_at: str) -> int:
+    """Push a complete closed trade as a new row to Google Sheets."""
+    service = _get_service()
+    if not service:
+        return -1
+    try:
+        row      = _next_row(service)
+        row_data = [""] * 30
+
+        row_data[COL_PAIR      - 1] = symbol
+        row_data[COL_SIDE      - 1] = "Long" if side == "Buy" else "Short"
+        row_data[COL_STRATEGY  - 1] = source or "ob"
+        row_data[COL_TIMEFRAME - 1] = timeframe or ""
+        row_data[COL_ENTRY     - 1] = entry
+        row_data[COL_SL        - 1] = sl
+        row_data[COL_TP        - 1] = tp
+        row_data[COL_QTY       - 1] = qty
+        row_data[COL_LEVERAGE  - 1] = leverage
+        row_data[COL_ENTRY_DT  - 1] = opened_at or ""
+        row_data[COL_EXIT_DT   - 1] = closed_at or ""
+        row_data[COL_EXIT_QTY  - 1] = qty
+        row_data[COL_EXIT_PRICE- 1] = exit_price
+
+        service.spreadsheets().values().update(
+            spreadsheetId    = SHEET_ID,
+            range            = f"'{SHEET_TAB}'!A{row}",
+            valueInputOption = "USER_ENTERED",
+            body             = {"values": [row_data]}
+        ).execute()
+        log.info(f"📊 Sheets: pushed closed trade {symbol} {outcome} PnL={pnl} row {row}")
+        return row
+    except Exception as e:
+        log.error(f"Sheets push_closed_trade error: {e}")
+        return -1
+
+
 def is_configured() -> bool:
     """Check if Google Sheets integration is configured."""
     return bool(SHEET_ID and CREDS_JSON)
