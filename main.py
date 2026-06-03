@@ -2834,6 +2834,21 @@ function runBacktest(btn) {
 """
 
 
+def _get_backtest_results():
+    """Fetch all backtest results from DB."""
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM backtest_results ORDER BY win_rate DESC")
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        log.warning(f"_get_backtest_results: {e}")
+        return []
+
+
 def _build_recommendations(trades, min_trades=3):
     from datetime import datetime as _dt
 
@@ -3626,42 +3641,6 @@ def backtest_status():
 
 
 
-    """Daily alert recommendation page."""
-    try:
-        trades = get_all_trades(500)
-        data   = _build_recommendations(trades)
-        bt_rows = _get_backtest_results()
-
-        # Build OB vs OB+KL comparison
-        ob_results  = {(r["symbol"], r["timeframe"]): r for r in bt_rows if r["source"] == "ob"}
-        kl_results  = {(r["symbol"], r["timeframe"]): r for r in bt_rows if r["source"] == "ob_kl"}
-        bt_comparison = []
-        for key, ob in sorted(ob_results.items(), key=lambda x: -x[1]["win_rate"]):
-            kl    = kl_results.get(key)
-            delta = round(kl["win_rate"] - ob["win_rate"], 1) if kl else None
-            bt_comparison.append({
-                "symbol":   key[0],
-                "tf":       key[1],
-                "ob_wr":    ob["win_rate"],
-                "ob_total": ob["total"],
-                "kl_wr":    kl["win_rate"] if kl else None,
-                "kl_total": kl["total"]    if kl else None,
-                "delta":    delta,
-            })
-
-        data["bt_rows"]       = bt_rows
-        data["bt_comparison"] = bt_comparison
-        data["bt_available"]  = len(bt_rows) > 0
-        data["bt_updated"]    = bt_rows[0]["run_at"] if bt_rows else None
-        data["bt_status"]     = _bt_status
-        data["bt_analysis"]   = _build_bt_recommendations(bt_rows)
-        return render_template_string(RECOMMENDATIONS_HTML, **data)
-    except Exception as e:
-        import traceback
-        log.error(f"Recommendations error: {traceback.format_exc()}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
 WATCHLIST_HTML = """
 <!DOCTYPE html>
 <html>
@@ -3911,17 +3890,6 @@ def recommendations_data():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
-
-    """Trade analysis dashboard."""
-    try:
-        trades = get_all_trades(500)
-        data   = _analyse_trades(trades)
-        return render_template_string(ANALYSIS_HTML, **data)
-    except Exception as e:
-        import traceback
-        log.error(f"Analysis error: {traceback.format_exc()}")
-        return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
 @app.route("/analysis")
