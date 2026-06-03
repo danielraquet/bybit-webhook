@@ -149,12 +149,12 @@ if DATABASE_URL:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if days:
                     cur.execute(
-                        "SELECT * FROM trades WHERE opened_at::timestamp >= NOW() - INTERVAL '1 day' * %s ORDER BY opened_at DESC, id DESC LIMIT %s",
+                        "SELECT *, COALESCE(media, '') as media FROM trades WHERE opened_at::timestamp >= NOW() - INTERVAL '1 day' * %s ORDER BY opened_at DESC, id DESC LIMIT %s",
                         (days, limit)
                     )
                 else:
                     cur.execute(
-                        "SELECT * FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
+                        "SELECT *, COALESCE(media, '') as media FROM trades ORDER BY opened_at DESC, id DESC LIMIT %s", (limit,)
                     )
                 return [dict(r) for r in cur.fetchall()]
 
