@@ -177,6 +177,19 @@ function badge(cls,txt){ return '<span class="badge badge-'+cls+'">'+txt+'</span
 function pnlClass(v){ return v>0?'pnl-pos':v<0?'pnl-neg':''; }
 
 // Load trades via JSON API
+function showNotes(el) {
+  var full = el.dataset.full;
+  if (!full || full === 'undefined') { alert('No notes'); return; }
+  // Try to pretty-print JSON
+  try {
+    var jsonPart = full.split('|sheet_row:')[0].trim();
+    var obj = JSON.parse(jsonPart);
+    alert(JSON.stringify(obj, null, 2));
+  } catch(e) {
+    alert(full);
+  }
+}
+
 function loadTrades(){
   var params = [];
   if(DAYS_PARAM) params.push('days='+DAYS_PARAM);
@@ -203,7 +216,8 @@ function renderTrades(trades){
     var pnlPct = parseFloat(t.pnl_pct)||0;
     var pnlPctStr = pnlPct ? (pnlPct>0?'+':'')+pnlPct.toFixed(2)+'%' : '—';
     var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
-    var notesShort = esc((t.notes||'').split('|sheet_row:')[0].slice(0,35));
+    var notesFull  = (t.notes||'').split('|sheet_row:')[0];
+    var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
     var mediaHtml = '';
     if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
     mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
@@ -225,7 +239,7 @@ function renderTrades(trades){
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td>'
       + '<td class="dim">'+esc((t.closed_at||'').slice(0,16))+'</td>'
-      + '<td class="dim">'+notesShort+'</td>'
+      + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
       + '<td>'+mediaHtml+'</td>'
       + '</tr>';
   }
