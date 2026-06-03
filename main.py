@@ -128,8 +128,13 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <div class="toolbar">
   <button class="btn" id="btn-poll">Poll Now</button>
   <button class="btn" id="btn-note">Add Note</button>
+  <button class="btn" id="btn-sheets">📊 Sync Sheets</button>
   <button class="btn" id="btn-del-old">Delete Older Than</button>
   <button class="btn" id="btn-reset" style="color:var(--red)">Reset All</button>
+  <span style="margin-left:8px;color:var(--dim);font-size:11px">Show:</span>
+  <button class="btn filter-status active" data-status="all">All</button>
+  <button class="btn filter-status" data-status="closed">Closed</button>
+  <button class="btn filter-status" data-status="open">Open</button>
   <div class="days-filter">
     <span id="day-links"></span>
   </div>
@@ -147,7 +152,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <tbody id="tbody"></tbody>
 </table>
 <script>
-var DAYS_PARAM = parseInt(new URLSearchParams(location.search).get('days')) || 0;
+var DAYS_PARAM   = parseInt(new URLSearchParams(location.search).get('days')) || 0;
+var STATUS_FILTER = 'all';
 
 // Render day filter links
 (function(){
@@ -172,7 +178,10 @@ function pnlClass(v){ return v>0?'pnl-pos':v<0?'pnl-neg':''; }
 
 // Load trades via JSON API
 function loadTrades(){
-  var url = '/journal/data' + (DAYS_PARAM ? '?days='+DAYS_PARAM : '');
+  var params = [];
+  if(DAYS_PARAM) params.push('days='+DAYS_PARAM);
+  if(STATUS_FILTER !== 'all') params.push('status='+STATUS_FILTER);
+  var url = '/journal/data' + (params.length ? '?'+params.join('&') : '');
   fetch(url).then(function(r){return r.json();}).then(function(d){
     renderTrades(d.trades || []);
     updateStats(d.trades || []);
@@ -270,6 +279,18 @@ document.addEventListener('click', function(e){
   }
 });
 
+// Status filter buttons
+document.querySelectorAll('.filter-status').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    document.querySelectorAll('.filter-status').forEach(function(b){ b.classList.remove('active'); b.style.borderColor=''; b.style.color=''; });
+    this.classList.add('active');
+    this.style.borderColor = 'var(--blue)';
+    this.style.color = 'var(--blue)';
+    STATUS_FILTER = this.dataset.status;
+    loadTrades();
+  });
+});
+
 // Toolbar buttons
 document.getElementById('btn-poll').onclick = function(){
   var btn=this; btn.textContent='...'; btn.disabled=true;
@@ -277,6 +298,13 @@ document.getElementById('btn-poll').onclick = function(){
     btn.textContent=d.ws_connected?'WS Active':'Done'; loadTrades();
     setTimeout(function(){btn.textContent='Poll Now';btn.disabled=false;},2000);
   }).catch(function(){btn.textContent='Error';btn.disabled=false;});
+};
+document.getElementById('btn-sheets').onclick = function(){
+  var btn=this; btn.textContent='Syncing...'; btn.disabled=true;
+  fetch('/journal/sync-sheets',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    btn.textContent = d.status==='ok' ? '✅ '+d.message : '❌ '+d.message;
+    setTimeout(function(){btn.textContent='📊 Sync Sheets';btn.disabled=false;},3000);
+  }).catch(function(){btn.textContent='❌ Error';btn.disabled=false;});
 };
 document.getElementById('btn-note').onclick = function(){
   var note=prompt('Enter note:'); if(!note||!note.trim()) return;
@@ -1451,6 +1479,44 @@ def check_ip():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/journal/sync-sheets", methods=["POST"])
+def sync_sheets():
+    """Push all closed trades to Google Sheets."""
+    if not gsheets.is_configured():
+        return jsonify({"status": "error", "message": "Google Sheets not configured"}), 400
+    try:
+        import psycopg2.extras as _pge
+        conn = get_db()
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM trades WHERE status='closed' AND source != 'bybit_import' ORDER BY opened_at ASC LIMIT 200")
+            trades = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        synced = 0
+        for t in trades:
+            try:
+                notes_str = str(t.get("notes") or "")
+                if "sheet_row:" in notes_str:
+                    continue  # already in sheets
+                sheet_row = gsheets.push_trade_opened(
+                    symbol=t["symbol"], side=t["side"],
+                    qty=float(t.get("qty") or 0),
+                    entry=float(t.get("entry") or 0),
+                    sl=float(t.get("sl") or 0),
+                    tp=float(t.get("tp") or 0),
+                    leverage=int(t.get("leverage") or 1),
+                    balance=0, source=t.get("source","ob"),
+                    timeframe=t.get("timeframe","")
+                )
+                if sheet_row and sheet_row > 0 and t.get("exit_price"):
+                    gsheets.push_trade_closed(sheet_row, float(t["exit_price"]), float(t.get("qty") or 0))
+                synced += 1
+            except Exception as te:
+                log.warning(f"Sheets sync failed for trade {t.get('id')}: {te}")
+        return jsonify({"status": "ok", "message": f"Synced {synced} trades to Sheets"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/journal/add-note", methods=["POST"])
 def add_note():
     """Add a manual note/milestone row to the journal."""
@@ -1872,11 +1938,17 @@ def journal_data():
     """JSON endpoint for journal data — used by the journal page."""
     try:
         days = request.args.get("days")
+        status_filter = request.args.get("status", "all")
         try:
             days = int(days) if days else None
         except:
             days = None
         trades = get_all_trades(500, days=days)
+        # Apply status filter
+        if status_filter == "closed":
+            trades = [t for t in trades if t.get("status") in ("closed", "note")]
+        elif status_filter == "open":
+            trades = [t for t in trades if t.get("status") in ("open", "note")]
         return jsonify({"trades": trades, "stats": get_stats()})
     except Exception as e:
         log.error(f"Journal data error: {e}")
