@@ -189,9 +189,9 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <td class="dim">{{ t.source or '—' }}</td>
   <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
   <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
-  <td class="dim" style="max-width:140px;overflow:hidden;text-overflow:ellipsis" title="{{ t.notes | e if t.notes else '' }}">
+  <td class="dim" style="max-width:140px;overflow:hidden;text-overflow:ellipsis">
     {% set n = (t.notes or '').split('|sheet_row:')[0].strip() %}
-    {{ n[:35] | e if n and n not in ('null','None') else '—' }}
+    {{ n[:35] | e | replace('</','<\\/') if n and n not in ('null','None') else '—' }}
   </td>
   <td style="min-width:80px">
     {% set media_val = (t.media or '') if t.media is defined else '' %}
