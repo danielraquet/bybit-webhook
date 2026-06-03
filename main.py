@@ -598,6 +598,23 @@ def _handle_execution_update(msg):
                 conn.close()
                 continue
 
+            # If PnL is 0 (e.g. execType=Trade), try to get it from closed PnL API
+            if closed_pnl == 0.0:
+                try:
+                    opened_at = str(trade.get("opened_at") or "")
+                    start_ms  = int((datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S").timestamp() - 300) * 1000) if opened_at else None
+                    kwargs    = dict(category="linear", symbol=symbol, limit=10)
+                    if start_ms:
+                        kwargs["startTime"] = start_ms
+                    pnl_resp = _api_call(session.get_closed_pnl, **kwargs)
+                    for rec in pnl_resp.get("result", {}).get("list", []):
+                        if abs(float(rec.get("qty", 0)) - float(trade.get("qty") or 0)) < 0.01:
+                            closed_pnl = float(rec.get("closedPnl", 0) or 0)
+                            log.info(f"WS: fetched PnL from closed PnL API: {closed_pnl}")
+                            break
+                except Exception as pnl_err:
+                    log.warning(f"WS: could not fetch PnL from API: {pnl_err}")
+
             outcome   = "tp" if exec_type == "TakeProfit" else "sl"
             # Verify SL outcome with PnL — positive PnL on SL = likely TP
             if outcome == "sl" and closed_pnl > 0:
@@ -624,10 +641,16 @@ def _handle_execution_update(msg):
 
             try:
                 if gsheets.is_configured():
-                    gsheets.push_trade_closed(
-                        order_id=trade.get("order_id", ""), exit_price=exec_price,
-                        pnl=closed_pnl, outcome=outcome
-                    )
+                    # Get sheet_row from trade notes
+                    notes_str = str(trade.get("notes") or "")
+                    sheet_row = 0
+                    if "sheet_row:" in notes_str:
+                        try:
+                            sheet_row = int(notes_str.split("sheet_row:")[1].split("|")[0].strip())
+                        except:
+                            pass
+                    if sheet_row > 0:
+                        gsheets.push_trade_closed(sheet_row, exec_price, float(trade.get("qty") or 0))
             except Exception as gs_err:
                 log.warning(f"Sheets update failed: {gs_err}")
 
