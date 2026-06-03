@@ -2286,6 +2286,7 @@ def _analyse_trades(trades):
             total = v["wins"] + v["losses"]
             result.append({
                 "key": k, "wins": v["wins"], "losses": v["losses"],
+                "total": total,
                 "wr": round(v["wins"] / total * 100, 1) if total > 0 else 0,
                 "pnl": round(v["pnl"], 2)
             })
