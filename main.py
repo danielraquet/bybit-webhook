@@ -659,16 +659,19 @@ def _handle_execution_update(msg):
 
             try:
                 if gsheets.is_configured():
-                    # Get sheet_row from trade notes
-                    notes_str = str(trade.get("notes") or "")
-                    sheet_row = 0
-                    if "sheet_row:" in notes_str:
-                        try:
-                            sheet_row = int(notes_str.split("sheet_row:")[1].split("|")[0].strip())
-                        except:
-                            pass
-                    if sheet_row > 0:
-                        gsheets.push_trade_closed(sheet_row, exec_price, float(trade.get("qty") or 0))
+                    gsheets.push_closed_trade(
+                        symbol=symbol, side=entry_side,
+                        qty=float(trade.get("qty") or 0),
+                        entry=float(trade.get("entry") or exec_price),
+                        sl=float(trade.get("sl") or 0),
+                        tp=float(trade.get("tp") or 0),
+                        exit_price=exec_price, pnl=closed_pnl,
+                        outcome=outcome, source=trade.get("source","ob"),
+                        timeframe=trade.get("timeframe",""),
+                        leverage=int(trade.get("leverage") or 1),
+                        opened_at=str(trade.get("opened_at") or ""),
+                        closed_at=closed_at
+                    )
             except Exception as gs_err:
                 log.warning(f"Sheets update failed: {gs_err}")
 
@@ -1329,28 +1332,8 @@ def webhook():
                                      "minImpulse":  data.get("minImpulse"),
                                      "entryOffset": data.get("entryOffset"),
                                  }) if data.get("rr") else None)
-                # Push to Google Sheets if configured
-                if gsheets.is_configured():
-                    sheet_row = gsheets.push_trade_opened(
-                        symbol=symbol, side=side, qty=qty, entry=entry,
-                        sl=sl, tp=tp, leverage=actual_leverage,
-                        balance=trade_balance, source=source,
-                        bar_seconds=bar_seconds, order_id=order_id
-                    )
-                    # Store sheet row in journal for later update on close
-                    if sheet_row > 0:
-                        try:
-                            with get_db() as conn:
-                                with conn.cursor() as cur:
-                                    # Append sheet_row to existing notes
-                                    cur.execute("SELECT notes FROM trades WHERE order_id = " + ph(), (order_id,))
-                                    row = cur.fetchone()
-                                    existing = str(row[0]) if row and row[0] else ""
-                                    new_notes = f"{existing}|sheet_row:{sheet_row}" if existing else f"sheet_row:{sheet_row}"
-                                    cur.execute("UPDATE trades SET notes = " + ph() + " WHERE order_id = " + ph(), (new_notes, order_id))
-                                conn.commit()
-                        except Exception as e:
-                            log.error(f"Failed to store sheet row: {e}")
+                # Note: Google Sheets push happens when trade CLOSES via WebSocket
+                # This avoids cluttering the sheet with trades that never fill
                 # Schedule auto-cancel for limit orders only
                 if order_type == "Limit" and cancel_bars > 0:
                     cancel_time = time.time() + cancel_bars * bar_seconds
@@ -1488,7 +1471,7 @@ def sync_sheets():
         import psycopg2.extras as _pge
         conn = get_db()
         with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM trades WHERE status='closed' AND source != 'bybit_import' ORDER BY opened_at ASC LIMIT 200")
+            cur.execute("SELECT * FROM trades WHERE status='closed' AND outcome IN ('tp','sl') AND source != 'bybit_import' ORDER BY opened_at ASC LIMIT 200")
             trades = [dict(r) for r in cur.fetchall()]
         conn.close()
         synced = 0
@@ -1496,19 +1479,22 @@ def sync_sheets():
             try:
                 notes_str = str(t.get("notes") or "")
                 if "sheet_row:" in notes_str:
-                    continue  # already in sheets
-                sheet_row = gsheets.push_trade_opened(
-                    symbol=t["symbol"], side=t["side"],
+                    continue  # already synced
+                gsheets.push_closed_trade(
+                    symbol=t["symbol"], side=t.get("side","Buy"),
                     qty=float(t.get("qty") or 0),
                     entry=float(t.get("entry") or 0),
                     sl=float(t.get("sl") or 0),
                     tp=float(t.get("tp") or 0),
+                    exit_price=float(t.get("exit_price") or 0),
+                    pnl=float(t.get("pnl") or 0),
+                    outcome=t.get("outcome",""),
+                    source=t.get("source","ob"),
+                    timeframe=t.get("timeframe",""),
                     leverage=int(t.get("leverage") or 1),
-                    balance=0, source=t.get("source","ob"),
-                    timeframe=t.get("timeframe","")
+                    opened_at=str(t.get("opened_at") or ""),
+                    closed_at=str(t.get("closed_at") or "")
                 )
-                if sheet_row and sheet_row > 0 and t.get("exit_price"):
-                    gsheets.push_trade_closed(sheet_row, float(t["exit_price"]), float(t.get("qty") or 0))
                 synced += 1
             except Exception as te:
                 log.warning(f"Sheets sync failed for trade {t.get('id')}: {te}")
