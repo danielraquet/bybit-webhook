@@ -112,34 +112,28 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .badge-open{background:rgba(96,165,250,0.15);color:var(--blue)}
 .badge-skipped{background:rgba(107,114,128,0.15);color:var(--dim)}
 .pnl-pos{color:var(--green)}.pnl-neg{color:var(--red)}
-.editable{cursor:pointer;border-bottom:1px dashed var(--dim)}
+.editable{cursor:pointer;border-bottom:1px dashed rgba(107,114,128,0.5)}
 .editable:hover{border-bottom-color:var(--blue);color:var(--blue)}
-.note-row td{background:rgba(96,165,250,0.05);color:var(--blue);font-style:italic;border-left:3px solid var(--blue)}
+.note-row{background:rgba(96,165,250,0.05);border-left:3px solid var(--blue);font-style:italic;color:var(--blue)}
 </style>
 </head>
 <body>
-<h1>📒 Trade Journal</h1>
+<h1>Trade Journal</h1>
 <div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
-  <a href="/journal" style="color:var(--blue);text-decoration:none">📒 Journal</a>
-  <a href="/analysis" style="color:var(--dim);text-decoration:none">📊 Analysis</a>
-  <a href="/recommendations" style="color:var(--dim);text-decoration:none">🎯 Recommendations</a>
-  <a href="/watchlist" style="color:var(--dim);text-decoration:none">👁️ Watchlist</a>
+  <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
+  <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
+  <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
+  <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
 </div>
-
 <div class="toolbar">
-  <button class="btn" id="btn-poll">🔄 Poll Now</button>
-  <button class="btn" id="btn-note">📝 Add Note</button>
-  <button class="btn" id="btn-del-old">🗓️ Delete Older Than</button>
-  <button class="btn" id="btn-reset" style="color:var(--red)">⚠️ Reset All</button>
+  <button class="btn" id="btn-poll">Poll Now</button>
+  <button class="btn" id="btn-note">Add Note</button>
+  <button class="btn" id="btn-del-old">Delete Older Than</button>
+  <button class="btn" id="btn-reset" style="color:var(--red)">Reset All</button>
   <div class="days-filter">
-    <a href="/journal?days=7"  class="{{ 'active' if days==7  else '' }}">7d</a>
-    <a href="/journal?days=14" class="{{ 'active' if days==14 else '' }}">14d</a>
-    <a href="/journal?days=30" class="{{ 'active' if days==30 else '' }}">30d</a>
-    <a href="/journal?days=90" class="{{ 'active' if days==90 else '' }}">90d</a>
-    <a href="/journal"         class="{{ 'active' if not days else '' }}">All</a>
+    <span id="day-links"></span>
   </div>
 </div>
-
 <div class="stats">
   <div class="stat"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div>
   <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="s-wr">—</div></div>
@@ -148,165 +142,161 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" id="s-pnl">—</div></div>
   <div class="stat"><div class="stat-label">Open</div><div class="stat-value amber" id="s-open">—</div></div>
 </div>
-
 <table>
-<thead>
-<tr>
-  <th>#</th><th>Symbol</th><th>Side</th><th>TF</th><th>Status</th>
-  <th>Qty</th><th>Entry</th><th>Exit</th><th>SL</th><th>TP</th>
-  <th>PnL</th><th>PnL%</th><th>Outcome</th><th>Source</th>
-  <th>Opened</th><th>Closed</th><th>Notes</th><th>📎</th>
-</tr>
-</thead>
-<tbody>
-{% for t in trades %}
-{% if t.status == 'note' %}
-<tr class="note-row">
-  <td colspan="18">📝 <strong>{{ t.opened_at[:16] if t.opened_at else '' }}</strong> — {{ t.notes | e }}</td>
-</tr>
-{% else %}
-<tr>
-  <td class="dim">{{ trades|length - loop.index0 }}</td>
-  <td><strong>{{ t.symbol }}</strong></td>
-  <td>{{ t.side or '—' }}</td>
-  <td class="dim">{{ t.timeframe or '—' }}</td>
-  <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
-  <td class="dim">{{ t.qty or '—' }}</td>
-  <td>{{ t.entry or '—' }}</td>
-  <td>{{ t.exit_price or '—' }}</td>
-  <td style="color:var(--red)">{{ t.sl or '—' }}</td>
-  <td style="color:var(--green)">{{ t.tp or '—' }}</td>
-  <td class="pnl-{{ 'pos' if t.pnl and t.pnl > 0 else 'neg' if t.pnl and t.pnl < 0 else 'dim' }} editable"
-      data-id="{{ t.id }}" data-type="pnl" data-val="{{ t.pnl or '' }}">
-    {{ ('+' if t.pnl > 0 else '') + '%.4f'|format(t.pnl) if t.pnl else '—' }}
-  </td>
-  <td class="pnl-{{ 'pos' if t.pnl_pct and t.pnl_pct > 0 else 'neg' if t.pnl_pct and t.pnl_pct < 0 else 'dim' }}">
-    {{ ('+' if t.pnl_pct > 0 else '') + '%.2f'|format(t.pnl_pct) + '%' if t.pnl_pct else '—' }}
-  </td>
-  <td class="editable" data-id="{{ t.id }}" data-type="outcome" data-val="{{ t.outcome or '' }}">
-    {% if t.outcome %}<span class="badge badge-{{ t.outcome }}">{{ t.outcome.upper() }}</span>{% else %}—{% endif %}
-  </td>
-  <td class="dim">{{ t.source or '—' }}</td>
-  <td class="dim">{{ t.opened_at[:16] if t.opened_at else '—' }}</td>
-  <td class="dim">{{ t.closed_at[:16] if t.closed_at else '—' }}</td>
-  <td class="dim" style="max-width:140px;overflow:hidden;text-overflow:ellipsis">
-    {% set n = (t.notes or '').split('|sheet_row:')[0].strip() %}
-    {{ n[:35] | e | replace('</','<\\/') if n and n not in ('null','None') else '—' }}
-  </td>
-  <td style="min-width:80px">
-    {% set media_val = (t.media or '') if t.media is defined else '' %}
-    {% if media_val %}
-      {% for link in media_val.split('|') %}
-        {% if link.strip() %}
-          <a href="{{ link.strip() | e }}" target="_blank" style="color:var(--blue);font-size:11px;display:block" title="{{ link.strip() | e }}">🔗 link</a>
-        {% endif %}
-      {% endfor %}
-    {% endif %}
-    <span class="editable" data-id="{{ t.id }}" data-type="media" style="color:var(--dim);font-size:11px;cursor:pointer" title="Add link">{{ '✏️' if media_val else '＋' }}</span>
-  </td>
-</tr>
-{% endif %}
-{% endfor %}
-</tbody>
+<thead><tr id="thead-row"></tr></thead>
+<tbody id="tbody"></tbody>
 </table>
-
 <script>
-// Toolbar buttons
-document.getElementById('btn-poll').onclick = function() {
-  var btn = this; btn.textContent = '⏳'; btn.disabled = true;
-  fetch('/poll', {method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    btn.textContent = d.ws_connected ? '⚡ WS Active' : '✅ Done';
-    setTimeout(function(){ btn.textContent='🔄 Poll Now'; btn.disabled=false; location.reload(); }, 2000);
-  }).catch(function(){ btn.textContent='❌'; btn.disabled=false; });
-};
+var DAYS_PARAM = parseInt(new URLSearchParams(location.search).get('days')) || 0;
 
-document.getElementById('btn-note').onclick = function() {
-  var note = prompt('Enter note (e.g. settings change):');
-  if (!note || !note.trim()) return;
-  fetch('/journal/add-note', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({note:note.trim()})})
-    .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
-};
+// Render day filter links
+(function(){
+  var links = [{d:7,l:'7d'},{d:14,l:'14d'},{d:30,l:'30d'},{d:90,l:'90d'},{d:0,l:'All'}];
+  document.getElementById('day-links').innerHTML = links.map(function(x){
+    var active = (DAYS_PARAM === x.d) ? 'active' : '';
+    var href = x.d ? '/journal?days='+x.d : '/journal';
+    return '<a href="'+href+'" class="'+active+'">'+x.l+'</a>';
+  }).join('');
+})();
 
-document.getElementById('btn-del-old').onclick = function() {
-  var days = prompt('Delete trades older than how many days?', '7');
-  if (!days || isNaN(days)) return;
-  if (!confirm('Delete trades older than ' + days + ' days?')) return;
-  fetch('/journal/delete-older-than/' + parseInt(days), {method:'POST'})
-    .then(function(r){return r.json();}).then(function(d){ alert(d.message); location.reload(); });
-};
+// Render table headers
+document.getElementById('thead-row').innerHTML = [
+  '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
+  'PnL','PnL%','Outcome','Source','Opened','Closed','Notes','Links'
+].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
-document.getElementById('btn-reset').onclick = function() {
-  if (!confirm('DELETE ALL TRADES? Cannot be undone.')) return;
-  if (!confirm('Are you sure?')) return;
-  fetch('/journal/reset', {method:'POST'}).then(function(r){return r.json();}).then(function(d){ alert(d.message); location.reload(); });
-};
+// Helpers
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function badge(cls,txt){ return '<span class="badge badge-'+cls+'">'+txt+'</span>'; }
+function pnlClass(v){ return v>0?'pnl-pos':v<0?'pnl-neg':''; }
 
-// Edit PnL and Outcome via event delegation
-document.addEventListener('click', function(e) {
-  var el = e.target.closest('.editable[data-id]');
-  if (!el) return;
-  var id   = el.dataset.id;
-  var type = el.dataset.type;
-  var val  = el.dataset.val;
+// Load trades via JSON API
+function loadTrades(){
+  var url = '/journal/data' + (DAYS_PARAM ? '?days='+DAYS_PARAM : '');
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    renderTrades(d.trades || []);
+    updateStats(d.trades || []);
+  }).catch(function(e){ console.error('Load failed',e); });
+}
 
-  if (type === 'pnl') {
-    var newVal = prompt('Enter PnL in USDT:', val);
-    if (newVal === null) return;
-    var num = parseFloat(newVal);
-    if (isNaN(num)) { alert('Invalid number'); return; }
-    fetch('/journal/set-pnl', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), pnl:num})})
-      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+function renderTrades(trades){
+  var tbody = document.getElementById('tbody');
+  var rows = '';
+  for(var i=0; i<trades.length; i++){
+    var t = trades[i];
+    var num = trades.length - i;
+    if(t.status === 'note'){
+      rows += '<tr class="note-row"><td colspan="18"> ' + num + '  ' + esc(t.opened_at||'').slice(0,16) + ' — ' + esc(t.notes||'') + '</td></tr>';
+      continue;
+    }
+    var pnl = parseFloat(t.pnl)||0;
+    var pnlStr = pnl ? (pnl>0?'+':'')+pnl.toFixed(4) : '—';
+    var pnlPct = parseFloat(t.pnl_pct)||0;
+    var pnlPctStr = pnlPct ? (pnlPct>0?'+':'')+pnlPct.toFixed(2)+'%' : '—';
+    var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
+    var notesShort = esc((t.notes||'').split('|sheet_row:')[0].slice(0,35));
+    var mediaHtml = '';
+    if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
+    mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
+
+    rows += '<tr>'
+      + '<td class="dim">'+num+'</td>'
+      + '<td><strong>'+esc(t.symbol)+'</strong></td>'
+      + '<td>'+esc(t.side||'—')+'</td>'
+      + '<td class="dim">'+esc(t.timeframe||'—')+'</td>'
+      + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
+      + '<td class="dim">'+esc(t.qty||'—')+'</td>'
+      + '<td>'+esc(t.entry||'—')+'</td>'
+      + '<td>'+esc(t.exit_price||'—')+'</td>'
+      + '<td style="color:var(--red)">'+esc(t.sl||'—')+'</td>'
+      + '<td style="color:var(--green)">'+esc(t.tp||'—')+'</td>'
+      + '<td class="'+pnlClass(pnl)+' editable" data-id="'+t.id+'" data-type="pnl" data-val="'+(t.pnl||'')+'">'+pnlStr+'</td>'
+      + '<td class="'+pnlClass(pnlPct)+'">'+pnlPctStr+'</td>'
+      + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
+      + '<td class="dim">'+esc(t.source||'—')+'</td>'
+      + '<td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td>'
+      + '<td class="dim">'+esc((t.closed_at||'').slice(0,16))+'</td>'
+      + '<td class="dim">'+notesShort+'</td>'
+      + '<td>'+mediaHtml+'</td>'
+      + '</tr>';
   }
+  tbody.innerHTML = rows;
+}
 
-  if (type === 'media') {
-    fetch('/journal/get-media?id=' + id).then(function(r){return r.json();}).then(function(d){
-      var newVal = prompt('Enter URL (paste screenshot/chart link).\nSeparate multiple with |:', d.media || '');
-      if (newVal === null) return;
-      fetch('/journal/set-media', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), media:newVal.trim()})})
-        .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
-    });
-    return;
+function updateStats(trades){
+  var total=0,wins=0,losses=0,pnlSum=0,open=0;
+  trades.forEach(function(t){
+    if(t.status==='note') return;
+    if(t.status==='closed'){ total++; var pnl=parseFloat(t.pnl)||0; if(t.outcome==='tp'){wins++;pnlSum+=pnl;} if(t.outcome==='sl'){losses++;pnlSum+=pnl;} }
+    if(t.status==='open') open++;
+  });
+  var wr = total>0 ? Math.round(wins/total*100) : 0;
+  document.getElementById('s-total').textContent = total;
+  document.getElementById('s-wr').textContent = wr+'%';
+  document.getElementById('s-wr').className = 'stat-value '+(wr>=50?'green':wr>0?'red':'');
+  document.getElementById('s-wins').textContent = wins;
+  document.getElementById('s-losses').textContent = losses;
+  document.getElementById('s-pnl').textContent = (pnlSum>=0?'+':'')+pnlSum.toFixed(2)+' USDT';
+  document.getElementById('s-pnl').className = 'stat-value '+(pnlSum>=0?'green':'red');
+  document.getElementById('s-open').textContent = open;
+}
+
+// Event delegation for editable cells
+document.addEventListener('click', function(e){
+  var el = e.target.closest('[data-id][data-type]');
+  if(!el) return;
+  var id = el.dataset.id, type = el.dataset.type, val = el.dataset.val||'';
+
+  if(type==='pnl'){
+    var nv = prompt('Enter PnL in USDT:', val);
+    if(nv===null) return;
+    var num = parseFloat(nv);
+    if(isNaN(num)){alert('Invalid number');return;}
+    fetch('/journal/set-pnl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),pnl:num})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
-
-  if (type === 'outcome') {
-    var opts   = ['tp','sl',''];
-    var labels = {'tp':'TP','sl':'SL','':'Clear'};
-    var next   = opts[(opts.indexOf(val)+1) % opts.length];
-    if (!confirm('Change outcome to: ' + (labels[next]||'Clear') + '?')) return;
-    fetch('/journal/set-outcome', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:parseInt(id), outcome:next})})
-      .then(function(r){return r.json();}).then(function(d){ if(d.status==='ok') location.reload(); else alert(d.message); });
+  if(type==='outcome'){
+    var opts=['tp','sl',''], labels={'tp':'TP','sl':'SL','':'Clear'};
+    var next=opts[(opts.indexOf(val)+1)%opts.length];
+    if(!confirm('Change outcome to: '+(labels[next]||'Clear')+'?')) return;
+    fetch('/journal/set-outcome',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),outcome:next})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='media'){
+    var cur = prompt('Enter URL (separate multiple with |):','');
+    if(cur===null) return;
+    fetch('/journal/set-media',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),media:cur.trim()})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
 });
 
-// Stats calculation
-(function() {
-  var rows = document.querySelectorAll('tbody tr:not(.note-row)');
-  var total=0, wins=0, losses=0, pnlSum=0, open=0;
-  rows.forEach(function(row) {
-    var statusEl  = row.querySelector('[data-type="outcome"]');
-    var pnlEl     = row.querySelector('[data-type="pnl"]');
-    var statusBadge = row.querySelector('.badge');
-    var status    = statusBadge ? statusBadge.textContent.trim().toLowerCase() : '';
-    var outcome   = statusEl ? statusEl.dataset.val : '';
-    var pnl       = pnlEl ? parseFloat(pnlEl.dataset.val) || 0 : 0;
+// Toolbar buttons
+document.getElementById('btn-poll').onclick = function(){
+  var btn=this; btn.textContent='...'; btn.disabled=true;
+  fetch('/poll',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    btn.textContent=d.ws_connected?'WS Active':'Done'; loadTrades();
+    setTimeout(function(){btn.textContent='Poll Now';btn.disabled=false;},2000);
+  }).catch(function(){btn.textContent='Error';btn.disabled=false;});
+};
+document.getElementById('btn-note').onclick = function(){
+  var note=prompt('Enter note:'); if(!note||!note.trim()) return;
+  fetch('/journal/add-note',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({note:note.trim()})})
+    .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+};
+document.getElementById('btn-del-old').onclick = function(){
+  var days=prompt('Delete trades older than how many days?','7');
+  if(!days||isNaN(days)) return;
+  if(!confirm('Delete trades older than '+days+' days?')) return;
+  fetch('/journal/delete-older-than/'+parseInt(days),{method:'POST'})
+    .then(function(r){return r.json();}).then(function(d){alert(d.message);loadTrades();});
+};
+document.getElementById('btn-reset').onclick = function(){
+  if(!confirm('DELETE ALL TRADES?')) return;
+  if(!confirm('Are you sure?')) return;
+  fetch('/journal/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(d){alert(d.message);loadTrades();});
+};
 
-    if (status === 'closed') {
-      total++;
-      if (outcome === 'tp') { wins++; pnlSum += pnl; }
-      if (outcome === 'sl') { losses++; pnlSum += pnl; }
-    }
-    if (status === 'open') open++;
-  });
-  var wr = total > 0 ? Math.round(wins/total*100) : 0;
-  document.getElementById('s-total').textContent   = total;
-  document.getElementById('s-wr').textContent      = wr + '%';
-  document.getElementById('s-wr').className        = 'stat-value ' + (wr >= 50 ? 'green' : wr > 0 ? 'red' : '');
-  document.getElementById('s-wins').textContent    = wins;
-  document.getElementById('s-losses').textContent  = losses;
-  document.getElementById('s-pnl').textContent     = (pnlSum >= 0 ? '+' : '') + pnlSum.toFixed(2) + ' USDT';
-  document.getElementById('s-pnl').className       = 'stat-value ' + (pnlSum >= 0 ? 'green' : 'red');
-  document.getElementById('s-open').textContent    = open;
-})();
+loadTrades();
 </script>
 </body>
 </html>
@@ -1879,12 +1869,15 @@ def journal():
 
 @app.route("/journal/data")
 def journal_data():
-    """JSON endpoint for journal data."""
+    """JSON endpoint for journal data — used by the journal page."""
     try:
-        return jsonify({
-            "trades": get_all_trades(200),
-            "stats":  get_stats()
-        })
+        days = request.args.get("days")
+        try:
+            days = int(days) if days else None
+        except:
+            days = None
+        trades = get_all_trades(500, days=days)
+        return jsonify({"trades": trades, "stats": get_stats()})
     except Exception as e:
         log.error(f"Journal data error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
