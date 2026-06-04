@@ -468,6 +468,9 @@ def _check_cooldown(side: str, cfg: dict) -> tuple:
         log.warning(f"Cooldown check failed: {e}")
 
     return False, ""
+
+
+def get_available_balance() -> float:
     """Return available USDT balance. Falls back to last known balance if API fails."""
     global _last_known_balance, _last_balance_time
     try:
