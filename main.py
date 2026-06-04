@@ -1438,33 +1438,46 @@ def webhook():
 @app.route("/status", methods=["GET"])
 def status():
     """Health check — shows current config, open positions and balance."""
-    cfg       = get_config()
-    positions = get_open_positions()
-    balance   = get_available_balance()
-    return jsonify({
-        "status":          "running",
-        "enabled":         cfg["enabled"],
-        "testnet":         TESTNET,
-        "open_positions":  positions,
-        "position_count":  len(positions),
-        "max_trades":      cfg["max_trades"],
-        "balance_usdt":    balance,
-        "balance_pct":     cfg["balance_pct"],
-        "leverage":        cfg["leverage"],
-        "poll_interval":   cfg["poll_interval"],
-        "filters": {
-            "side":            cfg["filter_side"]            or "both",
-            "min_wr":          cfg["filter_min_wr"]          or "disabled",
-            "sources":         cfg["filter_sources"]         or "all",
-            "timeframes":      cfg["filter_timeframes"]      or "all",
-            "symbols_allow":   cfg["filter_symbols_allow"]   or "all",
-            "symbols_block":   cfg["filter_symbols_block"]   or "none",
-            "cooldown_losses": cfg["cooldown_losses"],
-            "cooldown_days":   cfg["cooldown_days"],
-            "buy_cooldown":    _check_cooldown("Buy",  cfg)[1] or "none",
-            "sell_cooldown":   _check_cooldown("Sell", cfg)[1] or "none",
-        },
-    })
+    try:
+        cfg       = get_config()
+        positions = get_open_positions()
+        balance   = get_available_balance()
+
+        try:
+            buy_cd  = _check_cooldown("Buy",  cfg)[1] or "none" if cfg["cooldown_losses"] else "disabled"
+            sell_cd = _check_cooldown("Sell", cfg)[1] or "none" if cfg["cooldown_losses"] else "disabled"
+        except Exception as cd_err:
+            buy_cd  = f"error: {cd_err}"
+            sell_cd = f"error: {cd_err}"
+
+        return jsonify({
+            "status":          "running",
+            "enabled":         cfg["enabled"],
+            "testnet":         TESTNET,
+            "open_positions":  positions,
+            "position_count":  len(positions),
+            "max_trades":      cfg["max_trades"],
+            "balance_usdt":    balance,
+            "balance_pct":     cfg["balance_pct"],
+            "leverage":        cfg["leverage"],
+            "poll_interval":   cfg["poll_interval"],
+            "filters": {
+                "side":            cfg["filter_side"]          or "both",
+                "min_wr":          cfg["filter_min_wr"]        or "disabled",
+                "sources":         cfg["filter_sources"]       or "all",
+                "timeframes":      cfg["filter_timeframes"]    or "all",
+                "symbols_allow":   cfg["filter_symbols_allow"] or "all",
+                "symbols_block":   cfg["filter_symbols_block"] or "none",
+                "cooldown_losses": cfg["cooldown_losses"],
+                "cooldown_days":   cfg["cooldown_days"],
+                "buy_cooldown":    buy_cd,
+                "sell_cooldown":   sell_cd,
+            },
+        })
+    except Exception as e:
+        import traceback
+        log.error(f"Status error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/poll", methods=["GET", "POST"])
