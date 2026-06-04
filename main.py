@@ -72,7 +72,7 @@ def get_config():
         "filter_symbols_allow": _str("FILTER_SYMBOLS_ALLOW").upper(),
         "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
         "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),   # consecutive losses to trigger cooldown (0=off)
-        "cooldown_days":        _float("COOLDOWN_DAYS",    3.0), # days to block that side after trigger
+        "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0), # hours to block that side after trigger
     }
 
 app = Flask(__name__)
@@ -430,14 +430,13 @@ def _check_cooldown(side: str, cfg: dict) -> tuple:
     if not max_losses:
         return False, ""  # cooldown disabled
 
-    cooldown_days = cfg.get("cooldown_days", 3.0)
-    cooldown_secs = cooldown_days * 86400
+    cooldown_hours = cfg.get("cooldown_hours", 48.0)
+    cooldown_secs  = cooldown_hours * 3600
 
     try:
         conn = get_db()
         import psycopg2.extras as _pge
         with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
-            # Get last N+1 closed trades for this side, ordered by most recent
             cur.execute("""
                 SELECT outcome, closed_at FROM trades
                 WHERE side = %s AND outcome IN ('tp','sl') AND status = 'closed'
@@ -447,22 +446,20 @@ def _check_cooldown(side: str, cfg: dict) -> tuple:
         conn.close()
 
         if len(recent) < max_losses:
-            return False, ""  # not enough trades yet
+            return False, ""
 
-        # Check if last max_losses trades are all SL
         last_n = recent[:max_losses]
         if not all(r["outcome"] == "sl" for r in last_n):
-            return False, ""  # not all losses
+            return False, ""
 
-        # All last N were losses — check if still in cooldown window
         most_recent_loss_at = str(last_n[0]["closed_at"])
         try:
-            loss_dt = datetime.strptime(most_recent_loss_at[:19], "%Y-%m-%d %H:%M:%S")
-            elapsed = (datetime.utcnow() - loss_dt).total_seconds()
+            loss_dt   = datetime.strptime(most_recent_loss_at[:19], "%Y-%m-%d %H:%M:%S")
+            elapsed   = (datetime.utcnow() - loss_dt).total_seconds()
             remaining = cooldown_secs - elapsed
             if remaining > 0:
-                hours = remaining / 3600
-                return True, f"Cooldown active — {max_losses} consecutive {side} losses. {hours:.1f}h remaining ({cooldown_days}d cooldown)"
+                hrs = remaining / 3600
+                return True, f"Cooldown active — {max_losses} consecutive {side} losses. {hrs:.1f}h remaining ({cooldown_hours:.0f}h cooldown)"
         except:
             pass
 
@@ -1469,7 +1466,7 @@ def status():
                 "symbols_allow":   cfg["filter_symbols_allow"] or "all",
                 "symbols_block":   cfg["filter_symbols_block"] or "none",
                 "cooldown_losses": cfg["cooldown_losses"],
-                "cooldown_days":   cfg["cooldown_days"],
+                "cooldown_hours":  cfg["cooldown_hours"],
                 "buy_cooldown":    buy_cd,
                 "sell_cooldown":   sell_cd,
             },
