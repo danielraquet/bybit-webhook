@@ -170,7 +170,7 @@ var STATUS_FILTER = 'all';
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Opened','Closed','Notes','Links'
+  'PnL','PnL%','Outcome','Source','Variant','Opened','Closed','Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -239,6 +239,7 @@ function renderTrades(trades){
       + '<td class="'+pnlClass(pnlPct)+'">'+pnlPctStr+'</td>'
       + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
+      + '<td class="dim">'+esc(t.variant||'—')+'</td>'
       + '<td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td>'
       + '<td class="dim">'+esc((t.closed_at||'').slice(0,16))+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
@@ -1131,6 +1132,7 @@ def webhook():
     cancel_bars   = int(data.get("cancelAfterBars", 0))  # 0 = never auto-cancel
     bar_seconds   = int(data.get("barSeconds", os.getenv("BAR_SECONDS", "180")))  # from alert, fallback to env
     source        = data.get("source",    "unknown")
+    variant       = data.get("variant",   "")
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
     test_bal_pct  = float(data.get("testBalancePct",  0.1))
     test_leverage = int(data.get("testLeverage", 2))
@@ -1235,7 +1237,7 @@ def webhook():
         placeholder_id = f"bybit_native_{symbol}_{side}_{int(datetime.utcnow().timestamp())}"
         row_id = log_order_placed(
             symbol, side, 0, entry, sl, tp, placeholder_id,
-            source=source, timeframe=tf_label, leverage=cfg["leverage"], notes=notes
+            source=source, timeframe=tf_label, leverage=cfg["leverage"], notes=notes, variant=variant
         )
         log.info(f"📝 Journal-only mode: logged {symbol} {side} @ {entry} SL={sl} TP={tp} (row {row_id})")
         return jsonify({"status": "ok", "message": f"Logged to journal — Bybit places order natively"}), 200
@@ -1393,6 +1395,7 @@ def webhook():
                                  source=source + ("_test" if test_mode else ""),
                                  timeframe=gsheets._bar_seconds_to_tf(bar_seconds),
                                  leverage=actual_leverage,
+                                 variant=variant,
                                  notes=json.dumps({
                                      "rr":          data.get("rr"),
                                      "slBuf":       data.get("slBuf"),
