@@ -71,6 +71,8 @@ def get_config():
         "filter_timeframes":    _str("FILTER_TIMEFRAMES").upper(),
         "filter_symbols_allow": _str("FILTER_SYMBOLS_ALLOW").upper(),
         "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
+        "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),   # consecutive losses to trigger cooldown (0=off)
+        "cooldown_days":        _float("COOLDOWN_DAYS",    3.0), # days to block that side after trigger
     }
 
 app = Flask(__name__)
@@ -419,7 +421,55 @@ def get_open_orders(symbol: str) -> list:
 _last_known_balance = float(os.environ.get("FALLBACK_BALANCE", "1040.0"))
 _last_balance_time  = 0.0
 
-def get_available_balance() -> float:
+def _check_cooldown(side: str, cfg: dict) -> tuple:
+    """
+    Check if a side is in cooldown.
+    Returns (blocked: bool, reason: str)
+    """
+    max_losses = cfg.get("cooldown_losses", 0)
+    if not max_losses:
+        return False, ""  # cooldown disabled
+
+    cooldown_days = cfg.get("cooldown_days", 3.0)
+    cooldown_secs = cooldown_days * 86400
+
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            # Get last N+1 closed trades for this side, ordered by most recent
+            cur.execute("""
+                SELECT outcome, closed_at FROM trades
+                WHERE side = %s AND outcome IN ('tp','sl') AND status = 'closed'
+                ORDER BY closed_at DESC LIMIT %s
+            """, (side, max_losses + 1))
+            recent = cur.fetchall()
+        conn.close()
+
+        if len(recent) < max_losses:
+            return False, ""  # not enough trades yet
+
+        # Check if last max_losses trades are all SL
+        last_n = recent[:max_losses]
+        if not all(r["outcome"] == "sl" for r in last_n):
+            return False, ""  # not all losses
+
+        # All last N were losses — check if still in cooldown window
+        most_recent_loss_at = str(last_n[0]["closed_at"])
+        try:
+            loss_dt = datetime.strptime(most_recent_loss_at[:19], "%Y-%m-%d %H:%M:%S")
+            elapsed = (datetime.utcnow() - loss_dt).total_seconds()
+            remaining = cooldown_secs - elapsed
+            if remaining > 0:
+                hours = remaining / 3600
+                return True, f"Cooldown active — {max_losses} consecutive {side} losses. {hours:.1f}h remaining ({cooldown_days}d cooldown)"
+        except:
+            pass
+
+    except Exception as e:
+        log.warning(f"Cooldown check failed: {e}")
+
+    return False, ""
     """Return available USDT balance. Falls back to last known balance if API fails."""
     global _last_known_balance, _last_balance_time
     try:
@@ -1128,6 +1178,12 @@ def webhook():
         if trade_side != cfg["filter_side"]:
             return _filter_skip(f"{symbol} {side} blocked — FILTER_SIDE={cfg['filter_side']}")
 
+    # Cooldown filter: COOLDOWN_LOSSES=3 COOLDOWN_DAYS=3
+    if cfg["cooldown_losses"] > 0:
+        blocked, reason = _check_cooldown(side, cfg)
+        if blocked:
+            return _filter_skip(f"{symbol} {side} — {reason}")
+
     # Min WR filter: FILTER_MIN_WR=49
     if cfg["filter_min_wr"] > 0:
         if alert_wr == 0.0:
@@ -1403,6 +1459,10 @@ def status():
             "timeframes":      cfg["filter_timeframes"]      or "all",
             "symbols_allow":   cfg["filter_symbols_allow"]   or "all",
             "symbols_block":   cfg["filter_symbols_block"]   or "none",
+            "cooldown_losses": cfg["cooldown_losses"],
+            "cooldown_days":   cfg["cooldown_days"],
+            "buy_cooldown":    _check_cooldown("Buy",  cfg)[1] or "none",
+            "sell_cooldown":   _check_cooldown("Sell", cfg)[1] or "none",
         },
     })
 
