@@ -66,21 +66,22 @@ if DATABASE_URL:
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS notes TEXT")
                 cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS media TEXT")
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS variant TEXT")
             conn.commit()
             log.info("PostgreSQL journal initialised")
         finally:
             conn.close()
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None, variant=None):
         try:
             with get_db() as conn:
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO trades
-                            (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, opened_at)
-                        VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            (symbol, side, status, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, variant, opened_at)
+                        VALUES (%s, %s, 'open', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
-                    """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes,
+                    """, (symbol, side, qty, entry, sl, tp, order_id, source, timeframe, leverage, notes, variant,
                           datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
                     row_id = cur.fetchone()[0]
                 conn.commit()
@@ -230,7 +231,7 @@ else:
             conn.commit()
         log.info("SQLite journal initialised")
 
-    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None):
+    def log_order_placed(symbol, side, qty, entry, sl, tp, order_id, source="fib", timeframe=None, leverage=None, notes=None, variant=None):
         with get_db() as conn:
             cur = conn.execute("""
                 INSERT INTO trades
