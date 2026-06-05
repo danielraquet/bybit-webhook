@@ -2111,6 +2111,47 @@ ANALYSIS_HTML = """
   </table>
 </div>
 
+{% if by_variant and by_variant|length > 1 %}
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">By variant</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:8px">Comparing indicator settings versions — set via "Indicator variant label" in Pine Script</p>
+  <table>
+    <tr><th>Variant</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_variant %}
+    <tr>
+      <td><strong>{{ r.variant }}</strong></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if by_source_full and by_source_full|length > 1 %}
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">OB vs OB Test</div>
+  <table>
+    <tr><th>Source</th><th>W</th><th>L</th><th>WR%</th><th>PnL</th></tr>
+    {% for r in by_source_full %}
+    <tr>
+      <td><span class="tag tag-blue">{{ r.source.upper() }}</span></td>
+      <td class="green">{{ r.wins }}</td>
+      <td class="red">{{ r.losses }}</td>
+      <td>{{ r.wr }}%
+        <span class="bar-wrap"><span class="bar" style="width:{{ r.wr }}%;background:{{ '#4caf50' if r.wr >= 50 else '#ffa726' if r.wr >= 35 else '#ef5350' }};"></span></span>
+      </td>
+      <td style="color:{{ 'var(--green)' if r.pnl >= 0 else 'var(--red)' }}">{{ '+' if r.pnl >= 0 else '' }}{{ '%.2f'|format(r.pnl) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
 <div class="section">
   <div class="section-title">By source</div>
   <table>
@@ -2458,6 +2499,8 @@ def _analyse_trades(trades):
 
     by_symbol_raw = group_stats(lambda t: t["symbol"])
     by_source_raw = group_stats(lambda t: (t.get("source") or "").replace("_test",""))
+    by_variant_raw = group_stats(lambda t: (t.get("variant") or "default"))
+    by_source_full_raw = group_stats(lambda t: (t.get("source") or "ob"))
     by_side_raw   = group_stats(lambda t: t["side"])
     by_tf_raw     = group_stats(lambda t: t.get("timeframe") or "—")
 
@@ -2679,6 +2722,8 @@ def _analyse_trades(trades):
         "by_symbol":      by_symbol,
         "by_symbol_side": by_symbol_side,
         "by_source":      by_source,
+        "by_source_full": [{**r, "source": r["key"]} for r in by_source_full_raw],
+        "by_variant":     sorted([{**r, "variant": r["key"]} for r in by_variant_raw], key=lambda x: -x["wr"]),
         "by_side":        by_side,
         "by_tf":          by_tf,
         "by_day":         by_day,
