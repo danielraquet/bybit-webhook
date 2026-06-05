@@ -179,6 +179,18 @@ function badge(cls,txt){ return '<span class="badge badge-'+cls+'">'+txt+'</span
 function pnlClass(v){ return v>0?'pnl-pos':v<0?'pnl-neg':''; }
 
 // Load trades via JSON API
+// Convert UTC timestamp string to local time for display
+function utcToLocal(utcStr) {
+  if (!utcStr) return '—';
+  // Parse as UTC (append Z if not present)
+  var s = utcStr.slice(0,16).replace(' ','T') + ':00Z';
+  var d = new Date(s);
+  if (isNaN(d)) return utcStr.slice(0,16);
+  var pad = function(n){ return String(n).padStart(2,'0'); };
+  return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+       + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
 function showNotes(el) {
   var full = el.dataset.full;
   if (!full || full === 'undefined') { alert('No notes'); return; }
@@ -210,7 +222,7 @@ function renderTrades(trades){
     var t = trades[i];
     var num = trades.length - i;
     if(t.status === 'note'){
-      rows += '<tr class="note-row"><td colspan="18"> ' + num + '  ' + esc(t.opened_at||'').slice(0,16) + ' — ' + esc(t.notes||'') + '</td></tr>';
+      rows += '<tr class="note-row"><td colspan="18"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — ' + esc(t.notes||'') + '</td></tr>';
       continue;
     }
     var pnl = parseFloat(t.pnl)||0;
@@ -240,8 +252,8 @@ function renderTrades(trades){
       + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
-      + '<td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td>'
-      + '<td class="dim">'+esc((t.closed_at||'').slice(0,16))+'</td>'
+      + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
+      + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
       + '<td>'+mediaHtml+'</td>'
       + '</tr>';
