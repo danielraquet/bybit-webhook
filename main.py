@@ -256,7 +256,7 @@ function renderTrades(trades){
     rows += '<tr>'
       + '<td class="dim">'+num+'</td>'
       + '<td><strong>' + (function(){
-          var url = 'https://www.tradingview.com/chart/?symbol=BYBIT:' + esc(t.symbol);
+          var url = 'https://www.tradingview.com/chart/?symbol=BYBIT:' + esc(t.symbol) + '.P';
           var iv = tfToTVInterval(t.timeframe||'');
           if (iv) url += '&interval=' + iv;
           var ts = tvTimestamp(t.opened_at||'');
