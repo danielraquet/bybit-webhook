@@ -191,6 +191,23 @@ function utcToLocal(utcStr) {
        + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
 
+function tfToTVInterval(tf) {
+  var map = {
+    '1m':'1','3m':'3','5m':'5','15m':'15','30m':'30',
+    '1h':'60','2h':'120','4h':'240','1D':'D','1W':'W',
+    'M3':'3','M5':'5','M15':'15','M30':'30',
+    'H1':'60','H2':'120','H4':'240','H12':'720','D1':'D'
+  };
+  return map[tf] || '';
+}
+
+function tvTimestamp(utcStr) {
+  if (!utcStr) return '';
+  var s = utcStr.slice(0,16).replace(' ','T') + ':00Z';
+  var d = new Date(s);
+  return isNaN(d) ? '' : Math.floor(d.getTime() / 1000);
+}
+
 function showNotes(el) {
   var full = el.dataset.full;
   if (!full || full === 'undefined') { alert('No notes'); return; }
@@ -238,7 +255,14 @@ function renderTrades(trades){
 
     rows += '<tr>'
       + '<td class="dim">'+num+'</td>'
-      + '<td><strong>'+esc(t.symbol)+'</strong></td>'
+      + '<td><strong>' + (function(){
+          var url = 'https://www.tradingview.com/chart/?symbol=BYBIT:' + esc(t.symbol);
+          var iv = tfToTVInterval(t.timeframe||'');
+          if (iv) url += '&interval=' + iv;
+          var ts = tvTimestamp(t.opened_at||'');
+          if (ts) url += '&time=' + ts;
+          return '<a href="'+url+'" target="_blank" style="color:var(--text);text-decoration:none;border-bottom:1px dashed rgba(96,165,250,0.5)" title="Open in TradingView at entry time">'+esc(t.symbol)+'</a>';
+        })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
       + '<td class="dim">'+esc(t.timeframe||'—')+'</td>'
       + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
