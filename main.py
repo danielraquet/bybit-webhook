@@ -746,12 +746,33 @@ def _handle_execution_update(msg):
             qty       = float(trade.get("qty") or 0)
             pnl_pct   = round(closed_pnl / (entry * qty) * 100, 2) if entry > 0 and qty > 0 else 0.0
 
+            # Get actual fill time from order history so opened_at = entry fill, not OB detection
+            fill_time = None
+            try:
+                hist_resp = _api_call(session.get_order_history, category="linear", symbol=symbol, limit=10)
+                for h in hist_resp.get("result", {}).get("list", []):
+                    if h.get("orderStatus") == "Filled" and h.get("side") == entry_side:
+                        updated_ms = int(h.get("updatedTime", 0) or 0)
+                        if updated_ms:
+                            fill_time = datetime.utcfromtimestamp(updated_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                            log.info(f"WS: fill time for {symbol} = {fill_time}")
+                            break
+            except Exception as ft_err:
+                log.warning(f"WS: could not fetch fill time: {ft_err}")
+
             with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
-                        pnl=%s, pnl_pct=%s, closed_at=%s
-                    WHERE id=%s AND status='open'
-                """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
+                if fill_time:
+                    cur.execute("""
+                        UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
+                            pnl=%s, pnl_pct=%s, closed_at=%s, opened_at=%s
+                        WHERE id=%s AND status='open'
+                    """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, fill_time, trade["id"]))
+                else:
+                    cur.execute("""
+                        UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
+                            pnl=%s, pnl_pct=%s, closed_at=%s
+                        WHERE id=%s AND status='open'
+                    """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
             conn.commit()
             conn.close()
 
@@ -960,6 +981,19 @@ def _check_closed_pnl(trade):
         realised_pnl = float(best.get("closedPnl", 0) or 0)
         exec_type    = best.get("execType", "")
 
+        # Get entry fill time from order history — updatedTime when order was Filled
+        fill_time = None
+        try:
+            hist_resp = _api_call(session.get_order_history, category="linear", symbol=symbol, orderId=order_id)
+            hist = hist_resp.get("result", {}).get("list", [])
+            if hist and hist[0].get("orderStatus") == "Filled":
+                updated_ms = int(hist[0].get("updatedTime", 0) or 0)
+                if updated_ms:
+                    fill_time = datetime.utcfromtimestamp(updated_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                    log.info(f"{symbol}: fill time = {fill_time}")
+        except Exception as ft_err:
+            log.warning(f"{symbol}: could not fetch fill time: {ft_err}")
+
         # Determine outcome — trust execType first, verify with PnL as fallback
         if exec_type == "TakeProfit":
             outcome = "tp"
@@ -980,6 +1014,17 @@ def _check_closed_pnl(trade):
                 outcome = "tp" if exit_price <= tp * 1.001 else "sl"
 
         success = log_trade_closed(order_id, exit_price, outcome, realised_pnl=realised_pnl)
+        # Update opened_at to actual fill time if we got it
+        if success and fill_time:
+            try:
+                conn2 = get_db()
+                with conn2.cursor() as cur:
+                    cur.execute("UPDATE trades SET opened_at=%s WHERE order_id=%s", (fill_time, order_id))
+                conn2.commit()
+                conn2.close()
+                log.info(f"{symbol}: opened_at updated to fill time {fill_time}")
+            except Exception as ft_upd_err:
+                log.warning(f"{symbol}: could not update opened_at: {ft_upd_err}")
         if success:
             log.info(f"✅ Closed {symbol} {order_id} — {outcome.upper()} @ {exit_price} PnL={realised_pnl:.4f}")
             if gsheets.is_configured():
