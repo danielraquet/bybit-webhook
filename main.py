@@ -458,9 +458,10 @@ def get_open_orders(symbol: str) -> list:
 _last_known_balance = float(os.environ.get("FALLBACK_BALANCE", "1040.0"))
 _last_balance_time  = 0.0
 
-def _check_cooldown(side: str, cfg: dict) -> tuple:
+def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
     """
-    Check if a side is in cooldown.
+    Check if a symbol+side is in cooldown (per-symbol).
+    Each symbol tracks its own consecutive-loss counter independently.
     Returns (blocked: bool, reason: str)
     """
     max_losses = cfg.get("cooldown_losses", 0)
@@ -474,11 +475,20 @@ def _check_cooldown(side: str, cfg: dict) -> tuple:
         conn = get_db()
         import psycopg2.extras as _pge
         with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
-            cur.execute("""
-                SELECT outcome, closed_at FROM trades
-                WHERE side = %s AND outcome IN ('tp','sl') AND status = 'closed'
-                ORDER BY closed_at DESC LIMIT %s
-            """, (side, max_losses + 1))
+            if symbol:
+                # Per-symbol: only look at this symbol's recent trades
+                cur.execute("""
+                    SELECT outcome, closed_at FROM trades
+                    WHERE symbol = %s AND side = %s AND outcome IN ('tp','sl') AND status = 'closed'
+                    ORDER BY closed_at DESC LIMIT %s
+                """, (symbol, side, max_losses + 1))
+            else:
+                # Fallback: global (used by /status endpoint summary)
+                cur.execute("""
+                    SELECT outcome, closed_at FROM trades
+                    WHERE side = %s AND outcome IN ('tp','sl') AND status = 'closed'
+                    ORDER BY closed_at DESC LIMIT %s
+                """, (side, max_losses + 1))
             recent = cur.fetchall()
         conn.close()
 
@@ -496,7 +506,8 @@ def _check_cooldown(side: str, cfg: dict) -> tuple:
             remaining = cooldown_secs - elapsed
             if remaining > 0:
                 hrs = remaining / 3600
-                return True, f"Cooldown active — {max_losses} consecutive {side} losses. {hrs:.1f}h remaining ({cooldown_hours:.0f}h cooldown)"
+                sym_txt = f"{symbol} " if symbol else ""
+                return True, f"Cooldown active — {sym_txt}{max_losses} consecutive {side} losses. {hrs:.1f}h remaining ({cooldown_hours:.0f}h cooldown)"
         except:
             pass
 
@@ -1261,9 +1272,9 @@ def webhook():
         if trade_side != cfg["filter_side"]:
             return _filter_skip(f"{symbol} {side} blocked — FILTER_SIDE={cfg['filter_side']}")
 
-    # Cooldown filter: COOLDOWN_LOSSES=3 COOLDOWN_DAYS=3
+    # Cooldown filter: COOLDOWN_LOSSES=3 COOLDOWN_HOURS=24 (per-symbol)
     if cfg["cooldown_losses"] > 0:
-        blocked, reason = _check_cooldown(side, cfg)
+        blocked, reason = _check_cooldown(side, cfg, symbol)
         if blocked:
             return _filter_skip(f"{symbol} {side} — {reason}")
 
