@@ -1724,16 +1724,30 @@ def get_media():
 
 @app.route("/journal/set-media", methods=["POST"])
 def set_media():
-    """Set media links for a trade."""
+    """Set media links for a trade — also syncs to Google Sheets column BE."""
     try:
         body     = request.get_json(force=True)
         trade_id = int(body.get("id", 0))
         media    = body.get("media", "").strip()
         conn = get_db()
-        with conn.cursor() as cur:
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
             cur.execute("UPDATE trades SET media=%s WHERE id=%s", (media or None, trade_id))
+            cur.execute("SELECT notes FROM trades WHERE id=%s", (trade_id,))
+            row = cur.fetchone()
         conn.commit()
         conn.close()
+
+        # Sync to Google Sheets column BE if this trade has a sheet row
+        if media and gsheets.is_configured() and row and row.get("notes"):
+            notes_str = str(row["notes"])
+            if "sheet_row:" in notes_str:
+                try:
+                    sheet_row = int(notes_str.split("sheet_row:")[1].split("|")[0])
+                    gsheets.push_media_link(sheet_row, media)
+                except Exception as gs_err:
+                    log.warning(f"Sheets media sync failed: {gs_err}")
+
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
