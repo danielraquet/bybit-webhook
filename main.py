@@ -4532,9 +4532,9 @@ function loadConfigs() {
       html += '<td>'+(c.kl_bonus > 0 ? '<span class="tag tag-green">'+c.kl_bonus+'×</span>' : '<span class="tag" style="background:rgba(107,114,128,.15);color:var(--dim)">off</span>')+'</td>';
       html += '<td style="color:var(--dim);font-size:11px">'+(c.created_at||'').slice(0,16)+'</td>';
       html += '<td><div style="display:flex;gap:6px">';
-      html += '<button class="btn btn-run" onclick="runConfig('+c.id+',\''+c.name+'\')">▶ Run</button>';
-      html += '<button class="btn btn-primary" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.3)" onclick="showResults('+c.id+',\''+c.name+'\')">Results</button>';
-      html += '<button class="btn btn-danger" onclick="deleteConfig('+c.id+',\''+c.name+'\')">Delete</button>';
+      html += '<button class="btn btn-run" data-id="'+c.id+'" data-name="'+c.name+'" data-action="run">▶ Run</button>';
+      html += '<button class="btn btn-primary" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.3)" data-id="'+c.id+'" data-name="'+c.name+'" data-action="results">Results</button>';
+      html += '<button class="btn btn-danger" data-id="'+c.id+'" data-name="'+c.name+'" data-action="delete">Delete</button>';
       html += '</div></td></tr>';
     });
     html += '</table>';
@@ -4574,6 +4574,18 @@ function pollStatus() {
 
 loadConfigs();
 pollStatus();
+
+// Delegated handler for dynamically created config buttons
+document.addEventListener('click', function(e) {
+  var btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  var id   = btn.dataset.id;
+  var name = btn.dataset.name;
+  var action = btn.dataset.action;
+  if (action === 'run')     runConfig(id, name);
+  if (action === 'results') showResults(id, name);
+  if (action === 'delete')  deleteConfig(id, name);
+});
 </script>
 </body>
 </html>
