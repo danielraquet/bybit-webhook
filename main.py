@@ -4374,7 +4374,11 @@ function parseStatusBar() {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({status_bar: raw})
-  }).then(r => r.json()).then(d => {
+  }).then(r => {
+    if (!r.ok) { alert('Server error ' + r.status + ' — is the latest main.py deployed?'); return null; }
+    return r.json();
+  }).then(d => {
+    if (!d) return;
     if (d.status === 'error') { alert('Parse error: ' + d.message); return; }
     parsedData = d.settings;
     // Fill form
