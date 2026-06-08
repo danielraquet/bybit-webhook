@@ -126,6 +126,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
   <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
   <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
+  <a href="/backtest/configs" style="color:var(--dim);text-decoration:none">Backtest</a>
 </div>
 <div class="toolbar">
   <button class="btn" id="btn-poll">Poll Now</button>
@@ -3513,7 +3514,6 @@ def _bt_ob_near_key_level(ob_top, ob_bot, ob_type, atr, key_levels, proximity=1.
     if not key_levels:
         return False
     slack = atr * proximity
-    # Use midpoint of current bars as proxy for "close" to determine S/R
     mid = (ob_top + ob_bot) / 2
     for lv in key_levels:
         lp     = lv["price"]
@@ -3525,8 +3525,310 @@ def _bt_ob_near_key_level(ob_top, ob_bot, ob_type, atr, key_levels, proximity=1.
     return False
 
 
+def _bt_ob_kl_score(ob_top, ob_bot, ob_type, atr, key_levels, proximity=1.0):
+    """Return KL match price if OB is near a qualifying key level, else None."""
+    if not key_levels:
+        return None
+    ob_height = ob_top - ob_bot
+    slack     = ob_height * proximity
+    mid       = (ob_top + ob_bot) / 2
+    for lv in key_levels:
+        lp     = lv["price"]
+        is_res = lp > mid
+        if ob_type == 1:  # bull OB — support near bottom
+            if not is_res and ob_bot - slack <= lp <= ob_bot + slack * 0.5:
+                return lp
+        else:  # bear OB — resistance near top
+            if is_res and ob_top - slack * 0.5 <= lp <= ob_top + slack:
+                return lp
+    return None
 
-    rr_ratio = rr if rr is not None else BT_RR_RATIO
+
+def _bt_remove_dominated(obs, key_levels, atrs, overlap_bars=5, kl_bonus=0.0, proximity=1.0):
+    """
+    Remove dominated OBs — mirrors Pine Script checkOverlap with KL significance scoring.
+    kl_bonus=0 → pure size wins (old behaviour)
+    kl_bonus=2 → KL-backed OB gets +2x its own height added to score
+    """
+    if not obs:
+        return obs
+    keep = list(range(len(obs)))
+    removed = set()
+    for i in range(len(obs)):
+        if i in removed:
+            continue
+        for j in range(i + 1, len(obs)):
+            if j in removed:
+                continue
+            oi, oj = obs[i], obs[j]
+            # Only compare OBs within overlapBars of each other
+            if abs(oi["bar"] - oj["bar"]) > overlap_bars:
+                continue
+            # Check overlap
+            overlaps = oi["top"] >= oj["bot"] and oi["bot"] <= oj["top"]
+            if not overlaps:
+                continue
+            # Score each
+            atr_i = atrs[oi["bar"]] or 0.001
+            atr_j = atrs[oj["bar"]] or 0.001
+            size_i = oi["top"] - oi["bot"]
+            size_j = oj["top"] - oj["bot"]
+            kl_i = _bt_ob_kl_score(oi["top"], oi["bot"], oi["type"], atr_i, key_levels, proximity) if key_levels else None
+            kl_j = _bt_ob_kl_score(oj["top"], oj["bot"], oj["type"], atr_j, key_levels, proximity) if key_levels else None
+            score_i = size_i + (size_i * kl_bonus if kl_i is not None else 0.0)
+            score_j = size_j + (size_j * kl_bonus if kl_j is not None else 0.0)
+            if score_i >= score_j:
+                removed.add(j)
+            else:
+                removed.add(i)
+                break
+    return [obs[i] for i in range(len(obs)) if i not in removed]
+
+
+# ── Status bar string parser ──────────────────────────────────────────────────
+# Maps the 48 non-bool/non-color input positions to setting names
+_STATUS_BAR_MAP = [
+    ("alertName",        str),
+    ("maxBlocks",        int),
+    ("extendBars",       int),
+    ("htfExtendBars",    int),
+    ("atrLength",        int),
+    ("impulseRatio",     float),
+    ("overlapBars",      int),
+    ("dojiPct",          float),
+    ("dirtyObRatio",     float),
+    ("cobMinAtrMult",    float),
+    ("rrRatio",          float),
+    ("winRateMinSamples",int),
+    ("winRateLookback",  int),
+    ("slAtrMult",        float),
+    ("slMinPct",         float),
+    ("coolOffBars",      int),
+    ("maxAlertsPerOB",   int),
+    ("cancelAfterBars",  int),
+    ("prepareAtrMult",   float),
+    ("entryOffset",      float),
+    ("alertBestWRMinSmp",int),
+    ("alertMinWR",       int),
+    ("klProximity",      float),
+    ("klLookback2",      int),
+    ("klMinScore",       int),
+    ("klTol2",           float),
+    ("klPvLen",          int),
+    ("klMaxLevels",      int),
+    ("klStrongOpacity",  int),
+    ("klWeakOpacity",    int),
+    ("klBorderOpacity",  int),
+    ("klSignificanceBonus", float),  # pos 31: 0=old script (klFlipSR bool skipped), 2=new script with bonus
+    ("webhookSecret",    str),
+    ("indicatorVariant", str),
+    ("testBalancePct",   float),
+    ("testLeverage",     int),
+    ("trendEmaLen",      int),
+    ("trendEmaTF",       str),
+    ("emaLookback",      int),
+    ("timezone",         str),
+    ("schedStartHour",   int),
+    ("schedStartMin",    int),
+    ("schedEndHour",     int),
+    ("schedEndMin",      int),
+    ("htf",              str),
+    ("trendTF",          str),
+    ("trendLookback",    int),
+    ("structureHistory", int),
+]
+
+def _parse_status_bar(status_bar_str: str) -> dict:
+    """
+    Parse TradingView indicator status bar string into a settings dict.
+    Format: "Indicator Name (val1, val2, ...): Any alert() function call"
+    """
+    import re
+    # Extract the values inside the outer parentheses
+    m = re.search(r'\((.+)\):', status_bar_str)
+    if not m:
+        raise ValueError("Could not find values in status bar string")
+    raw = m.group(1)
+    # Split on ", " but be careful with strings that contain commas
+    # The first value (alertName) may contain commas — it's everything up to the first number
+    # Split all values
+    parts = [p.strip() for p in raw.split(", ")]
+    result = {}
+    for i, (name, typ) in enumerate(_STATUS_BAR_MAP):
+        if i >= len(parts):
+            break
+        try:
+            val = parts[i]
+            if typ == float:
+                result[name] = float(val)
+            elif typ == int:
+                # Handle bool-as-int: 0/1 → but also real ints
+                result[name] = int(float(val))
+            else:
+                result[name] = val
+        except (ValueError, IndexError):
+            pass
+    return result
+
+
+def _bt_init_configs_table():
+    """Create backtest_configs table if not exists."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS backtest_configs (
+                    id            SERIAL PRIMARY KEY,
+                    name          TEXT NOT NULL UNIQUE,
+                    rr_ratio      REAL NOT NULL DEFAULT 3.0,
+                    sl_buf        REAL NOT NULL DEFAULT 0.1,
+                    min_impulse   REAL NOT NULL DEFAULT 1.3,
+                    entry_offset  REAL NOT NULL DEFAULT 0.0,
+                    overlap_bars  INT  NOT NULL DEFAULT 5,
+                    atr_length    INT  NOT NULL DEFAULT 17,
+                    cob_min_atr   REAL NOT NULL DEFAULT 0.8,
+                    doji_pct      REAL NOT NULL DEFAULT 15.0,
+                    kl_proximity  REAL NOT NULL DEFAULT 1.0,
+                    kl_min_score  INT  NOT NULL DEFAULT 6,
+                    kl_lookback   INT  NOT NULL DEFAULT 300,
+                    kl_bonus      REAL NOT NULL DEFAULT 0.0,
+                    raw_settings  TEXT,
+                    created_at    TEXT NOT NULL,
+                    is_active     BOOL NOT NULL DEFAULT true
+                )
+            """)
+        conn.commit()
+        conn.close()
+        log.info("backtest_configs table ready")
+    except Exception as e:
+        log.error(f"BT configs table init error: {e}")
+
+
+def _get_bt_configs() -> list:
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM backtest_configs ORDER BY created_at DESC")
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        log.error(f"_get_bt_configs error: {e}")
+        return []
+
+
+def run_backtest_for_config(cfg_id: int):
+    """Run backtest for a specific saved config."""
+    global _bt_running, _bt_last_run, _bt_status
+    if _bt_running:
+        log.info("Backtest already running — skipping")
+        return
+
+    # Load config
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM backtest_configs WHERE id=%s", (cfg_id,))
+            cfg = cur.fetchone()
+        conn.close()
+        if not cfg:
+            log.error(f"Config {cfg_id} not found")
+            return
+    except Exception as e:
+        log.error(f"Config load error: {e}")
+        return
+
+    _bt_running = True
+    cfg_name    = cfg["name"]
+    _bt_status  = f"Running config: {cfg_name}..."
+    log.info(f"Backtest started for config '{cfg_name}'")
+
+    rr           = cfg["rr_ratio"]
+    sl_buf       = cfg["sl_buf"]
+    min_impulse  = cfg["min_impulse"]
+    entry_offset = cfg["entry_offset"]
+    overlap_bars = cfg["overlap_bars"]
+    atr_len      = cfg["atr_length"]
+    kl_proximity = cfg["kl_proximity"]
+    kl_min_score = cfg["kl_min_score"]
+    kl_lookback  = cfg["kl_lookback"]
+    kl_bonus     = cfg["kl_bonus"]
+
+    # Use variant name = config name for storage
+    variant_no_kl = f"{cfg_name}_raw"
+    variant_kl    = f"{cfg_name}_kl"
+
+    saved = 0
+    total_combos = len(BT_SYMBOLS) * len(BT_TIMEFRAMES)
+    done  = 0
+
+    try:
+        for symbol in BT_SYMBOLS:
+            symbol = symbol.strip()
+            time.sleep(1.0)
+            for tf_str, tf_label in BT_TIMEFRAMES.items():
+                done += 1
+                tf_mins  = {"3":3,"5":5,"15":15,"30":30,"60":60,"240":240}[tf_str]
+                lookback = min(BT_LOOKBACK_DAYS, 30) if tf_mins <= 5 else \
+                           min(BT_LOOKBACK_DAYS, 60) if tf_mins <= 15 else BT_LOOKBACK_DAYS
+                try:
+                    bars = _bt_fetch_klines(symbol, tf_str, lookback)
+                    if len(bars) < 100:
+                        continue
+                    atrs       = _bt_calc_atr(bars, atr_len)
+                    key_levels = _bt_find_key_levels(bars, lookback=min(lookback, kl_lookback),
+                                                     min_score=kl_min_score)
+
+                    # Detect OBs
+                    obs_raw = _bt_detect_obs(bars, atrs, min_impulse, sl_buf, entry_offset)
+
+                    # ── Variant A: no overlap removal, no KL filter (pure signal) ──
+                    results_raw = _bt_simulate(bars, obs_raw, rr)
+                    stats_raw   = _bt_stats(results_raw)
+                    if stats_raw:
+                        _bt_save(symbol, tf_label, stats_raw, variant=variant_no_kl)
+                        saved += 1
+
+                    # ── Variant B: overlap removal + KL significance scoring ────
+                    obs_scored = _bt_remove_dominated(obs_raw, key_levels, atrs,
+                                                      overlap_bars=overlap_bars,
+                                                      kl_bonus=kl_bonus,
+                                                      proximity=kl_proximity)
+                    if key_levels:
+                        obs_kl = [ob for ob in obs_scored if _bt_ob_near_key_level(
+                                    ob["top"], ob["bot"], ob["type"],
+                                    atrs[ob["bar"]] or atrs[-1],
+                                    key_levels, kl_proximity)]
+                    else:
+                        obs_kl = obs_scored
+
+                    results_kl = _bt_simulate(bars, obs_kl, rr)
+                    stats_kl   = _bt_stats(results_kl)
+                    if stats_kl:
+                        _bt_save(symbol, tf_label, stats_kl, variant=variant_kl)
+                        saved += 1
+
+                    log.info(f"  [{done}/{total_combos}] {symbol}/{tf_label}: "
+                             f"raw={len(obs_raw)} scored={len(obs_scored)} kl={len(obs_kl) if key_levels else '—'} "
+                             f"→ {saved} saved")
+                except Exception as e:
+                    log.error(f"  {symbol}/{tf_label} [{cfg_name}]: {e}")
+                time.sleep(0.5)
+    finally:
+        _bt_running  = False
+        _bt_last_run = datetime.utcnow()
+        _bt_status   = f"Config '{cfg_name}' done {datetime.utcnow().strftime('%H:%M UTC')} — {saved} results"
+        log.info(f"Backtest complete for '{cfg_name}' — {saved} results")
+
+
+def _simulate(bars, obs, rr):
+    """Alias used by run_backtest_for_config."""
+    return _bt_simulate(bars, obs, rr)
+
+
+def _bt_simulate(bars, obs, rr=None, cancel_after=20):
     results  = []
     # Start active from bar AFTER detection (ob["bar"]+1) — same as indicator
     active   = [{**ob, "created": ob["bar"] + 1, "done": False} for ob in obs]
@@ -3939,6 +4241,431 @@ def backtest_status():
     })
 
 
+# ─── BACKTEST CONFIGS ─────────────────────────────────────────────────────────
+
+BACKTEST_CONFIGS_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backtest Configs</title>
+<style>
+:root{--bg:#0f0f0f;--surface:#1a1a1a;--border:#2a2a2a;--text:#e8e8e8;--dim:#888;--green:#4caf50;--red:#ef5350;--blue:#42a5f5;--amber:#ffa726}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,sans-serif;font-size:13px;padding:24px}
+h1{font-size:18px;font-weight:500;margin-bottom:4px}
+.nav{display:flex;gap:12px;margin-bottom:20px}
+.nav a{color:var(--dim);text-decoration:none;font-size:12px}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.section-title{font-size:12px;font-weight:500;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+textarea{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:6px;font-size:12px;font-family:monospace;resize:vertical;min-height:60px}
+textarea:focus{outline:none;border-color:var(--blue)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin:12px 0}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;color:var(--dim)}
+.field input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;width:100%}
+.field input:focus{outline:none;border-color:var(--blue)}
+.btn{padding:7px 14px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:500}
+.btn-primary{background:var(--blue);color:#000}
+.btn-primary:hover{opacity:.9}
+.btn-danger{background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.3)}
+.btn-run{background:rgba(76,175,80,.15);color:var(--green);border:1px solid rgba(76,175,80,.3)}
+.btn-run:hover{background:rgba(76,175,80,.25)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:400;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+.tag{display:inline-block;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:600}
+.tag-green{background:rgba(76,175,80,.15);color:var(--green)}
+.tag-red{background:rgba(248,113,113,.15);color:var(--red)}
+.tag-blue{background:rgba(96,165,250,.15);color:var(--blue)}
+.tag-amber{background:rgba(251,191,36,.15);color:var(--amber)}
+.status-bar{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:8px;font-size:11px;color:var(--dim);margin-bottom:12px;font-family:monospace;word-break:break-all}
+.parsed-preview{background:rgba(96,165,250,.05);border:1px solid rgba(96,165,250,.2);border-radius:6px;padding:10px;margin:10px 0;font-size:11px;display:none}
+.result-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;margin-top:12px}
+.result-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px}
+.result-card .symbol{font-weight:500;font-size:13px}
+.result-card .tf{color:var(--dim);font-size:11px}
+.result-card .wr{font-size:20px;font-weight:500}
+.running-badge{display:inline-block;padding:3px 10px;border-radius:4px;background:rgba(251,191,36,.15);color:var(--amber);font-size:11px;animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.bar-wrap{background:var(--border);border-radius:3px;height:5px;width:60px;display:inline-block;vertical-align:middle;margin-left:6px}
+.bar{height:5px;border-radius:3px}
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/journal">← Journal</a>
+  <a href="/analysis">Analysis</a>
+  <a href="/recommendations">Recommendations</a>
+</div>
+<h1>// Backtest Configs</h1>
+<p style="color:var(--dim);font-size:12px;margin-bottom:20px">Paste your TradingView indicator status bar string to import settings. Each config runs a backtest independently so you can compare variants.</p>
+
+<div id="running-status" style="display:none;margin-bottom:12px">
+  <span class="running-badge" id="running-text">⏳ Running...</span>
+</div>
+
+<div class="section">
+  <div class="section-title">Import from TradingView status bar</div>
+  <p style="font-size:11px;color:var(--dim);margin-bottom:8px">In TradingView: right-click the indicator name in the status bar → copy → paste below.</p>
+  <textarea id="status-bar-input" placeholder='Order Blocks [2-Candle Method] (benchmark, 10, 20, ...): Any alert() function call'></textarea>
+  <div class="parsed-preview" id="parsed-preview"></div>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button class="btn btn-primary" onclick="parseStatusBar()">Parse</button>
+    <button class="btn" onclick="clearForm()" style="background:var(--surface);border:1px solid var(--border)">Clear</button>
+  </div>
+</div>
+
+<div class="section" id="config-form-section" style="display:none">
+  <div class="section-title">Config details — edit before saving</div>
+  <div class="grid">
+    <div class="field"><label>Config name</label><input id="f-name" type="text" placeholder="e.g. v3-kl-test"></div>
+    <div class="field"><label>RR Ratio</label><input id="f-rr" type="number" step="0.1"></div>
+    <div class="field"><label>SL ATR Buffer</label><input id="f-sl" type="number" step="0.05"></div>
+    <div class="field"><label>Min Impulse</label><input id="f-impulse" type="number" step="0.1"></div>
+    <div class="field"><label>Entry Offset</label><input id="f-offset" type="number" step="0.05"></div>
+    <div class="field"><label>Overlap Bars</label><input id="f-overlap" type="number"></div>
+    <div class="field"><label>ATR Length</label><input id="f-atr" type="number"></div>
+    <div class="field"><label>COB Min ATR</label><input id="f-cobmult" type="number" step="0.1"></div>
+    <div class="field"><label>KL Proximity</label><input id="f-klprox" type="number" step="0.1"></div>
+    <div class="field"><label>KL Min Score</label><input id="f-klscore" type="number"></div>
+    <div class="field"><label>KL Lookback</label><input id="f-kllb" type="number"></div>
+    <div class="field"><label>KL Significance Bonus</label><input id="f-klbonus" type="number" step="0.5"></div>
+  </div>
+  <div style="display:flex;gap:8px;margin-top:12px">
+    <button class="btn btn-primary" onclick="saveConfig()">💾 Save Config</button>
+    <button class="btn" onclick="document.getElementById('config-form-section').style.display='none'" style="background:var(--surface);border:1px solid var(--border)">Cancel</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Saved configs</div>
+  <div id="configs-list"><p style="color:var(--dim);font-size:12px">Loading...</p></div>
+</div>
+
+<div class="section" id="results-section" style="display:none">
+  <div class="section-title" id="results-title">Results</div>
+  <div id="results-body"></div>
+</div>
+
+<script>
+var parsedData = {};
+
+function parseStatusBar() {
+  var raw = document.getElementById('status-bar-input').value.trim();
+  if (!raw) { alert('Paste a status bar string first'); return; }
+  fetch('/backtest/configs/parse', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({status_bar: raw})
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'error') { alert('Parse error: ' + d.message); return; }
+    parsedData = d.settings;
+    // Fill form
+    document.getElementById('f-name').value    = parsedData.alertName || '';
+    document.getElementById('f-rr').value      = parsedData.rrRatio || 3.0;
+    document.getElementById('f-sl').value      = parsedData.slAtrMult || 0.1;
+    document.getElementById('f-impulse').value = parsedData.impulseRatio || 1.3;
+    document.getElementById('f-offset').value  = parsedData.entryOffset || 0.0;
+    document.getElementById('f-overlap').value = parsedData.overlapBars || 5;
+    document.getElementById('f-atr').value     = parsedData.atrLength || 17;
+    document.getElementById('f-cobmult').value = parsedData.cobMinAtrMult || 0.8;
+    document.getElementById('f-klprox').value  = parsedData.klProximity || 1.0;
+    document.getElementById('f-klscore').value = parsedData.klMinScore || 6;
+    document.getElementById('f-kllb').value    = parsedData.klLookback2 || 300;
+    document.getElementById('f-klbonus').value = parsedData.klSignificanceBonus || 0.0;
+
+    // Show preview
+    var prev = document.getElementById('parsed-preview');
+    prev.style.display = 'block';
+    var keys = ['rrRatio','slAtrMult','impulseRatio','entryOffset','overlapBars','klProximity','klMinScore','klSignificanceBonus'];
+    prev.innerHTML = '<strong style="color:var(--blue)">✅ Parsed ' + Object.keys(parsedData).length + ' settings</strong><br>' +
+      keys.map(k => '<span style="color:var(--dim)">' + k + ':</span> ' + (parsedData[k] !== undefined ? parsedData[k] : '—')).join('  ·  ');
+    document.getElementById('config-form-section').style.display = 'block';
+  }).catch(e => alert('Error: ' + e));
+}
+
+function saveConfig() {
+  var payload = {
+    name:         document.getElementById('f-name').value.trim(),
+    rr_ratio:     parseFloat(document.getElementById('f-rr').value),
+    sl_buf:       parseFloat(document.getElementById('f-sl').value),
+    min_impulse:  parseFloat(document.getElementById('f-impulse').value),
+    entry_offset: parseFloat(document.getElementById('f-offset').value),
+    overlap_bars: parseInt(document.getElementById('f-overlap').value),
+    atr_length:   parseInt(document.getElementById('f-atr').value),
+    cob_min_atr:  parseFloat(document.getElementById('f-cobmult').value),
+    kl_proximity: parseFloat(document.getElementById('f-klprox').value),
+    kl_min_score: parseInt(document.getElementById('f-klscore').value),
+    kl_lookback:  parseInt(document.getElementById('f-kllb').value),
+    kl_bonus:     parseFloat(document.getElementById('f-klbonus').value),
+    raw_settings: JSON.stringify(parsedData),
+  };
+  if (!payload.name) { alert('Enter a config name'); return; }
+  fetch('/backtest/configs/save', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  }).then(r => r.json()).then(d => {
+    if (d.status === 'ok') {
+      document.getElementById('config-form-section').style.display = 'none';
+      document.getElementById('status-bar-input').value = '';
+      document.getElementById('parsed-preview').style.display = 'none';
+      loadConfigs();
+    } else {
+      alert('Save error: ' + d.message);
+    }
+  });
+}
+
+function clearForm() {
+  document.getElementById('status-bar-input').value = '';
+  document.getElementById('parsed-preview').style.display = 'none';
+  document.getElementById('config-form-section').style.display = 'none';
+}
+
+function runConfig(id, name) {
+  if (!confirm('Run backtest for "' + name + '"? This will take several minutes.')) return;
+  fetch('/backtest/configs/' + id + '/run', {method:'POST'})
+    .then(r => r.json()).then(d => {
+      alert(d.message || d.status);
+      pollStatus();
+    });
+}
+
+function deleteConfig(id, name) {
+  if (!confirm('Delete config "' + name + '"?')) return;
+  fetch('/backtest/configs/' + id, {method:'DELETE'})
+    .then(r => r.json()).then(() => loadConfigs());
+}
+
+function showResults(id, name) {
+  fetch('/backtest/configs/' + id + '/results')
+    .then(r => r.json()).then(d => {
+      var sec = document.getElementById('results-section');
+      sec.style.display = 'block';
+      document.getElementById('results-title').textContent = 'Results — ' + name;
+      var rows = d.results || [];
+      if (!rows.length) {
+        document.getElementById('results-body').innerHTML = '<p style="color:var(--dim);font-size:12px">No results yet — run the backtest first.</p>';
+        return;
+      }
+      // Group by variant
+      var byVariant = {};
+      rows.forEach(r => {
+        if (!byVariant[r.source]) byVariant[r.source] = [];
+        byVariant[r.source].push(r);
+      });
+      var html = '';
+      Object.keys(byVariant).forEach(v => {
+        var vrows = byVariant[v];
+        var totalW = vrows.reduce((s,r) => s+r.wins, 0);
+        var totalL = vrows.reduce((s,r) => s+r.losses, 0);
+        var totalT = totalW + totalL;
+        var wr = totalT > 0 ? Math.round(totalW/totalT*100) : 0;
+        var pnl = vrows.reduce((s,r) => s+(r.total_pnl||0), 0).toFixed(2);
+        var wrCol = wr >= 50 ? 'var(--green)' : wr >= 35 ? 'var(--amber)' : 'var(--red)';
+        html += '<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--dim)">' + v.toUpperCase() + '</div>';
+        html += '<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap">';
+        html += '<div><span style="color:var(--dim);font-size:11px">Overall WR</span><br><span style="font-size:22px;font-weight:500;color:'+wrCol+'">'+wr+'%</span></div>';
+        html += '<div><span style="color:var(--dim);font-size:11px">Trades</span><br><span style="font-size:18px;font-weight:500">'+totalT+'</span></div>';
+        html += '<div><span style="color:var(--dim);font-size:11px">Total PnL (R)</span><br><span style="font-size:18px;font-weight:500;color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+pnl+'</span></div>';
+        html += '</div>';
+        // Table of top results
+        var sorted = vrows.sort((a,b) => b.win_rate - a.win_rate).slice(0, 15);
+        html += '<table><tr><th>Symbol</th><th>TF</th><th>WR%</th><th>W</th><th>L</th><th>PnL-R</th></tr>';
+        sorted.forEach(r => {
+          var w = r.win_rate;
+          var wc = w >= 50 ? '#4caf50' : w >= 35 ? '#ffa726' : '#ef5350';
+          html += '<tr><td>'+r.symbol+'</td><td><span class="tag tag-blue">'+r.timeframe+'</span></td>';
+          html += '<td><span style="color:'+wc+';font-weight:500">'+w+'%</span><span class="bar-wrap"><span class="bar" style="width:'+w+'%;background:'+wc+'"></span></span></td>';
+          html += '<td style="color:var(--green)">'+r.wins+'</td><td style="color:var(--red)">'+r.losses+'</td>';
+          html += '<td style="color:'+(r.total_pnl>=0?'var(--green)':'var(--red))')">'+(r.total_pnl>=0?'+':'')+r.total_pnl.toFixed(2)+'</td></tr>';
+        });
+        html += '</table></div>';
+      });
+      document.getElementById('results-body').innerHTML = html;
+      sec.scrollIntoView({behavior:'smooth'});
+    });
+}
+
+function loadConfigs() {
+  fetch('/backtest/configs/list').then(r => r.json()).then(d => {
+    var configs = d.configs || [];
+    var el = document.getElementById('configs-list');
+    if (!configs.length) {
+      el.innerHTML = '<p style="color:var(--dim);font-size:12px">No configs saved yet. Paste a status bar string above to get started.</p>';
+      return;
+    }
+    var html = '<table><tr><th>Name</th><th>RR</th><th>SL Buf</th><th>Impulse</th><th>Overlap</th><th>KL Bonus</th><th>Saved</th><th>Actions</th></tr>';
+    configs.forEach(c => {
+      html += '<tr>';
+      html += '<td><strong>'+c.name+'</strong></td>';
+      html += '<td>'+c.rr_ratio+'×</td>';
+      html += '<td>'+c.sl_buf+'</td>';
+      html += '<td>'+c.min_impulse+'</td>';
+      html += '<td>'+c.overlap_bars+'</td>';
+      html += '<td>'+(c.kl_bonus > 0 ? '<span class="tag tag-green">'+c.kl_bonus+'×</span>' : '<span class="tag" style="background:rgba(107,114,128,.15);color:var(--dim)">off</span>')+'</td>';
+      html += '<td style="color:var(--dim);font-size:11px">'+(c.created_at||'').slice(0,16)+'</td>';
+      html += '<td><div style="display:flex;gap:6px">';
+      html += '<button class="btn btn-run" onclick="runConfig('+c.id+',\''+c.name+'\')">▶ Run</button>';
+      html += '<button class="btn btn-primary" style="background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.3)" onclick="showResults('+c.id+',\''+c.name+'\')">Results</button>';
+      html += '<button class="btn btn-danger" onclick="deleteConfig('+c.id+',\''+c.name+'\')">Delete</button>';
+      html += '</div></td></tr>';
+    });
+    html += '</table>';
+    el.innerHTML = html;
+  });
+}
+
+function pollStatus() {
+  fetch('/backtest/status').then(r => r.json()).then(d => {
+    var el = document.getElementById('running-status');
+    var txt = document.getElementById('running-text');
+    if (d.running) {
+      el.style.display = 'block';
+      txt.textContent = '⏳ ' + (d.status || 'Running...');
+      setTimeout(pollStatus, 3000);
+    } else {
+      el.style.display = 'none';
+      if (d.status && d.status !== 'Never run') {
+        loadConfigs();
+      }
+    }
+  });
+}
+
+loadConfigs();
+pollStatus();
+</script>
+</body>
+</html>
+"""
+
+
+@app.route("/backtest/configs")
+def backtest_configs_page():
+    return render_template_string(BACKTEST_CONFIGS_HTML)
+
+
+@app.route("/backtest/configs/parse", methods=["POST"])
+def backtest_configs_parse():
+    """Parse a TradingView status bar string into settings."""
+    try:
+        body = request.get_json(force=True)
+        raw  = body.get("status_bar", "").strip()
+        if not raw:
+            return jsonify({"status": "error", "message": "Empty string"}), 400
+        settings = _parse_status_bar(raw)
+        return jsonify({"status": "ok", "settings": settings})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route("/backtest/configs/save", methods=["POST"])
+def backtest_configs_save():
+    """Save a named backtest config."""
+    try:
+        body = request.get_json(force=True)
+        name = body.get("name", "").strip()
+        if not name:
+            return jsonify({"status": "error", "message": "Name required"}), 400
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO backtest_configs
+                    (name, rr_ratio, sl_buf, min_impulse, entry_offset,
+                     overlap_bars, atr_length, cob_min_atr, kl_proximity,
+                     kl_min_score, kl_lookback, kl_bonus, raw_settings, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (name) DO UPDATE SET
+                    rr_ratio=EXCLUDED.rr_ratio, sl_buf=EXCLUDED.sl_buf,
+                    min_impulse=EXCLUDED.min_impulse, entry_offset=EXCLUDED.entry_offset,
+                    overlap_bars=EXCLUDED.overlap_bars, atr_length=EXCLUDED.atr_length,
+                    cob_min_atr=EXCLUDED.cob_min_atr, kl_proximity=EXCLUDED.kl_proximity,
+                    kl_min_score=EXCLUDED.kl_min_score, kl_lookback=EXCLUDED.kl_lookback,
+                    kl_bonus=EXCLUDED.kl_bonus, raw_settings=EXCLUDED.raw_settings
+            """, (name,
+                  float(body.get("rr_ratio", 3.0)),
+                  float(body.get("sl_buf", 0.1)),
+                  float(body.get("min_impulse", 1.3)),
+                  float(body.get("entry_offset", 0.0)),
+                  int(body.get("overlap_bars", 5)),
+                  int(body.get("atr_length", 17)),
+                  float(body.get("cob_min_atr", 0.8)),
+                  float(body.get("kl_proximity", 1.0)),
+                  int(body.get("kl_min_score", 6)),
+                  int(body.get("kl_lookback", 300)),
+                  float(body.get("kl_bonus", 0.0)),
+                  body.get("raw_settings", ""),
+                  datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
+        conn.commit()
+        conn.close()
+        log.info(f"Backtest config saved: {name}")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/backtest/configs/list")
+def backtest_configs_list():
+    return jsonify({"configs": _get_bt_configs()})
+
+
+@app.route("/backtest/configs/<int:cfg_id>/run", methods=["POST"])
+def backtest_configs_run(cfg_id):
+    if _bt_running:
+        return jsonify({"status": "already_running", "message": "Backtest already in progress"}), 200
+    threading.Thread(target=run_backtest_for_config, args=(cfg_id,), daemon=True).start()
+    return jsonify({"status": "started", "message": f"Backtest started for config {cfg_id}"}), 200
+
+
+@app.route("/backtest/configs/<int:cfg_id>/results")
+def backtest_configs_results(cfg_id):
+    """Get backtest results for a specific config."""
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            # Get config name first
+            cur.execute("SELECT name FROM backtest_configs WHERE id=%s", (cfg_id,))
+            cfg = cur.fetchone()
+            if not cfg:
+                return jsonify({"results": []})
+            name = cfg["name"]
+            # Results are stored with variant = "{name}_raw" or "{name}_kl"
+            cur.execute("""
+                SELECT * FROM backtest_results
+                WHERE source LIKE %s OR source LIKE %s
+                ORDER BY win_rate DESC
+            """, (f"{name}_%", f"{name}_%"))
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"results": rows, "config_name": name})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/backtest/configs/<int:cfg_id>", methods=["DELETE"])
+def backtest_configs_delete(cfg_id):
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT name FROM backtest_configs WHERE id=%s", (cfg_id,))
+            row = cur.fetchone()
+            if row:
+                name = row[0]
+                cur.execute("DELETE FROM backtest_configs WHERE id=%s", (cfg_id,))
+                cur.execute("DELETE FROM backtest_results WHERE source LIKE %s OR source LIKE %s",
+                           (f"{name}_%", f"{name}_%"))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 
 WATCHLIST_HTML = """
 <!DOCTYPE html>
@@ -4227,6 +4954,10 @@ def analysis_data():
             _bt_init_table()
         except Exception as e:
             log.error(f"BT init error: {e}")
+        try:
+            _bt_init_configs_table()
+        except Exception as e:
+            log.error(f"BT configs init error: {e}")
         try:
             _start_backtest_scheduler()
         except Exception as e:
