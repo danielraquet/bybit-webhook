@@ -3834,6 +3834,7 @@ def _simulate(bars, obs, rr):
 
 
 def _bt_simulate(bars, obs, rr=None, cancel_after=20):
+    rr_ratio = rr if rr is not None else BT_RR_RATIO
     results  = []
     # Start active from bar AFTER detection (ob["bar"]+1) — same as indicator
     active   = [{**ob, "created": ob["bar"] + 1, "done": False} for ob in obs]
