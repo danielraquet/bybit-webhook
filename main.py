@@ -4500,7 +4500,7 @@ function showResults(id, name) {
           html += '<tr><td>'+r.symbol+'</td><td><span class="tag tag-blue">'+r.timeframe+'</span></td>';
           html += '<td><span style="color:'+wc+';font-weight:500">'+w+'%</span><span class="bar-wrap"><span class="bar" style="width:'+w+'%;background:'+wc+'"></span></span></td>';
           html += '<td style="color:var(--green)">'+r.wins+'</td><td style="color:var(--red)">'+r.losses+'</td>';
-          html += '<td style="color:'+(r.total_pnl>=0?'var(--green)':'var(--red))')">'+(r.total_pnl>=0?'+':'')+r.total_pnl.toFixed(2)+'</td></tr>';
+          html += '<td style="color:'+(r.total_pnl>=0?'var(--green)':'var(--red)')+'">'+( r.total_pnl>=0?'+':'')+r.total_pnl.toFixed(2)+'</td></tr>';
         });
         html += '</table></div>';
       });
