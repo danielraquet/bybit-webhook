@@ -3693,12 +3693,20 @@ def _bt_init_configs_table():
                     kl_min_score  INT  NOT NULL DEFAULT 6,
                     kl_lookback   INT  NOT NULL DEFAULT 300,
                     kl_bonus      REAL NOT NULL DEFAULT 0.0,
+                    lookback_days INT  NOT NULL DEFAULT 30,
                     raw_settings  TEXT,
                     created_at    TEXT NOT NULL,
                     is_active     BOOL NOT NULL DEFAULT true
                 )
             """)
         conn.commit()
+        # Migration: add lookback_days if missing (existing tables)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("ALTER TABLE backtest_configs ADD COLUMN IF NOT EXISTS lookback_days INT NOT NULL DEFAULT 30")
+            conn.commit()
+        except Exception:
+            pass
         conn.close()
         log.info("backtest_configs table ready")
     except Exception as e:
@@ -3757,6 +3765,7 @@ def run_backtest_for_config(cfg_id: int):
     kl_min_score = cfg["kl_min_score"]
     kl_lookback  = cfg["kl_lookback"]
     kl_bonus     = cfg["kl_bonus"]
+    lookback_days = int(cfg.get("lookback_days") or 30)
 
     # Use variant name = config name for storage
     variant_no_kl = f"{cfg_name}_raw"
@@ -3776,8 +3785,8 @@ def run_backtest_for_config(cfg_id: int):
                 _bt_progress["current"] = f"{symbol} {tf_label}"
                 _bt_progress["saved"]   = saved
                 tf_mins  = {"3":3,"5":5,"15":15,"30":30,"60":60,"240":240}[tf_str]
-                lookback = min(BT_LOOKBACK_DAYS, 30) if tf_mins <= 5 else \
-                           min(BT_LOOKBACK_DAYS, 60) if tf_mins <= 15 else BT_LOOKBACK_DAYS
+                lookback = min(lookback_days, 30) if tf_mins <= 5 else \
+                           min(lookback_days, 60) if tf_mins <= 15 else lookback_days
                 try:
                     bars = _bt_fetch_klines(symbol, tf_str, lookback)
                     if len(bars) < 100:
@@ -4348,6 +4357,7 @@ td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
     <div class="field"><label>KL Min Score</label><input id="f-klscore" type="number"></div>
     <div class="field"><label>KL Lookback</label><input id="f-kllb" type="number"></div>
     <div class="field"><label>KL Significance Bonus</label><input id="f-klbonus" type="number" step="0.5"></div>
+    <div class="field"><label>Lookback Days</label><input id="f-lookback" type="number" min="7" max="90" title="More days = more data but slower. 30 recommended."></div>
   </div>
   <div style="display:flex;gap:8px;margin-top:12px">
     <button class="btn btn-primary" onclick="saveConfig()">💾 Save Config</button>
@@ -4395,6 +4405,7 @@ function parseStatusBar() {
     document.getElementById('f-klscore').value = parsedData.klMinScore || 6;
     document.getElementById('f-kllb').value    = parsedData.klLookback2 || 300;
     document.getElementById('f-klbonus').value = parsedData.klSignificanceBonus || 0.0;
+    document.getElementById('f-lookback').value = 30;
 
     // Show preview
     var prev = document.getElementById('parsed-preview');
@@ -4420,6 +4431,7 @@ function saveConfig() {
     kl_min_score: parseInt(document.getElementById('f-klscore').value),
     kl_lookback:  parseInt(document.getElementById('f-kllb').value),
     kl_bonus:     parseFloat(document.getElementById('f-klbonus').value),
+    lookback_days: parseInt(document.getElementById('f-lookback').value) || 30,
     raw_settings: JSON.stringify(parsedData),
   };
   if (!payload.name) { alert('Enter a config name'); return; }
@@ -4522,7 +4534,7 @@ function loadConfigs() {
       el.innerHTML = '<p style="color:var(--dim);font-size:12px">No configs saved yet — paste a status bar string above to get started.</p>';
       return;
     }
-    var html = '<table><tr><th>Name</th><th>RR</th><th>SL Buf</th><th>Impulse</th><th>Overlap</th><th>KL Bonus</th><th>Saved</th><th>Actions</th></tr>';
+    var html = '<table><tr><th>Name</th><th>RR</th><th>SL Buf</th><th>Impulse</th><th>Overlap</th><th>KL Bonus</th><th>Lookback</th><th>Saved</th><th>Actions</th></tr>';
     configs.forEach(c => {
       html += '<tr>';
       html += '<td><strong>'+c.name+'</strong></td>';
@@ -4531,6 +4543,7 @@ function loadConfigs() {
       html += '<td>'+c.min_impulse+'</td>';
       html += '<td>'+c.overlap_bars+'</td>';
       html += '<td>'+(c.kl_bonus > 0 ? '<span class="tag tag-green">'+c.kl_bonus+'×</span>' : '<span class="tag" style="background:rgba(107,114,128,.15);color:var(--dim)">off</span>')+'</td>';
+      html += '<td style="color:var(--dim)">'+(c.lookback_days||30)+'d</td>';
       html += '<td style="color:var(--dim);font-size:11px">'+(c.created_at||'').slice(0,16)+'</td>';
       html += '<td><div style="display:flex;gap:6px">';
       html += '<button class="btn btn-run" data-id="'+c.id+'" data-name="'+c.name+'" data-action="run">▶ Run</button>';
@@ -4636,15 +4649,16 @@ def backtest_configs_save():
                 INSERT INTO backtest_configs
                     (name, rr_ratio, sl_buf, min_impulse, entry_offset,
                      overlap_bars, atr_length, cob_min_atr, kl_proximity,
-                     kl_min_score, kl_lookback, kl_bonus, raw_settings, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     kl_min_score, kl_lookback, kl_bonus, lookback_days, raw_settings, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (name) DO UPDATE SET
                     rr_ratio=EXCLUDED.rr_ratio, sl_buf=EXCLUDED.sl_buf,
                     min_impulse=EXCLUDED.min_impulse, entry_offset=EXCLUDED.entry_offset,
                     overlap_bars=EXCLUDED.overlap_bars, atr_length=EXCLUDED.atr_length,
                     cob_min_atr=EXCLUDED.cob_min_atr, kl_proximity=EXCLUDED.kl_proximity,
                     kl_min_score=EXCLUDED.kl_min_score, kl_lookback=EXCLUDED.kl_lookback,
-                    kl_bonus=EXCLUDED.kl_bonus, raw_settings=EXCLUDED.raw_settings
+                    kl_bonus=EXCLUDED.kl_bonus, lookback_days=EXCLUDED.lookback_days,
+                    raw_settings=EXCLUDED.raw_settings
             """, (name,
                   float(body.get("rr_ratio", 3.0)),
                   float(body.get("sl_buf", 0.1)),
@@ -4657,6 +4671,7 @@ def backtest_configs_save():
                   int(body.get("kl_min_score", 6)),
                   int(body.get("kl_lookback", 300)),
                   float(body.get("kl_bonus", 0.0)),
+                  int(body.get("lookback_days", 30)),
                   body.get("raw_settings", ""),
                   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit()
