@@ -4514,10 +4514,11 @@ function loadConfigs() {
     if (!r.ok) throw new Error('HTTP ' + r.status);
     return r.json();
   }).then(d => {
-    var configs = d.configs || [];
+    var configs = (d && d.configs) ? d.configs : [];
     var el = document.getElementById('configs-list');
+    if (!el) return;
     if (!configs.length) {
-      el.innerHTML = '<p style="color:var(--dim);font-size:12px">No configs saved yet. Paste a status bar string above to get started.</p>';
+      el.innerHTML = '<p style="color:var(--dim);font-size:12px">No configs saved yet — paste a status bar string above to get started.</p>';
       return;
     }
     var html = '<table><tr><th>Name</th><th>RR</th><th>SL Buf</th><th>Impulse</th><th>Overlap</th><th>KL Bonus</th><th>Saved</th><th>Actions</th></tr>';
