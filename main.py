@@ -3334,6 +3334,7 @@ BT_TIMEFRAMES = {"3":"M3","5":"M5","15":"M15","30":"M30","60":"H1","240":"H4"}
 _bt_running   = False
 _bt_last_run  = None
 _bt_status    = "Never run"
+_bt_progress  = {"done": 0, "total": 0, "current": "", "saved": 0}
 
 
 def _bt_fetch_klines(symbol, interval, days):
@@ -3743,6 +3744,7 @@ def run_backtest_for_config(cfg_id: int):
     _bt_running = True
     cfg_name    = cfg["name"]
     _bt_status  = f"Running config: {cfg_name}..."
+    _bt_progress.update({"done": 0, "total": len(BT_SYMBOLS) * len(BT_TIMEFRAMES), "current": "", "saved": 0})
     log.info(f"Backtest started for config '{cfg_name}'")
 
     rr           = cfg["rr_ratio"]
@@ -3770,6 +3772,9 @@ def run_backtest_for_config(cfg_id: int):
             time.sleep(1.0)
             for tf_str, tf_label in BT_TIMEFRAMES.items():
                 done += 1
+                _bt_progress["done"]    = done
+                _bt_progress["current"] = f"{symbol} {tf_label}"
+                _bt_progress["saved"]   = saved
                 tf_mins  = {"3":3,"5":5,"15":15,"30":30,"60":60,"240":240}[tf_str]
                 lookback = min(BT_LOOKBACK_DAYS, 30) if tf_mins <= 5 else \
                            min(BT_LOOKBACK_DAYS, 60) if tf_mins <= 15 else BT_LOOKBACK_DAYS
@@ -4238,6 +4243,7 @@ def backtest_status():
         "running":  _bt_running,
         "last_run": _bt_last_run.strftime("%Y-%m-%d %H:%M UTC") if _bt_last_run else None,
         "status":   _bt_status,
+        "progress": _bt_progress,
     })
 
 
@@ -4303,7 +4309,16 @@ td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
 <p style="color:var(--dim);font-size:12px;margin-bottom:20px">Paste your TradingView indicator status bar string to import settings. Each config runs a backtest independently so you can compare variants.</p>
 
 <div id="running-status" style="display:none;margin-bottom:12px">
-  <span class="running-badge" id="running-text">⏳ Running...</span>
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <span class="running-badge" id="running-text">⏳ Running...</span>
+      <span id="progress-count" style="font-size:11px;color:var(--dim)"></span>
+    </div>
+    <div style="background:var(--border);border-radius:4px;height:6px;width:100%;margin-bottom:8px">
+      <div id="progress-bar" style="background:var(--blue);height:6px;border-radius:4px;width:0%;transition:width .3s ease"></div>
+    </div>
+    <div id="progress-current" style="font-size:11px;color:var(--dim)"></div>
+  </div>
 </div>
 
 <div class="section">
@@ -4522,11 +4537,17 @@ function loadConfigs() {
 function pollStatus() {
   fetch('/backtest/status').then(r => r.json()).then(d => {
     var el = document.getElementById('running-status');
-    var txt = document.getElementById('running-text');
     if (d.running) {
       el.style.display = 'block';
-      txt.textContent = '⏳ ' + (d.status || 'Running...');
-      setTimeout(pollStatus, 3000);
+      var p = d.progress || {};
+      var done  = p.done  || 0;
+      var total = p.total || 1;
+      var pct   = Math.round(done / total * 100);
+      document.getElementById('running-text').textContent   = '⏳ ' + (d.status || 'Running...');
+      document.getElementById('progress-bar').style.width   = pct + '%';
+      document.getElementById('progress-count').textContent = done + ' / ' + total + ' (' + pct + '%)  ·  ' + (p.saved || 0) + ' results saved';
+      document.getElementById('progress-current').textContent = p.current ? '→ ' + p.current : '';
+      setTimeout(pollStatus, 2000);
     } else {
       el.style.display = 'none';
       if (d.status && d.status !== 'Never run') {
