@@ -4483,40 +4483,135 @@ function showResults(id, name) {
         document.getElementById('results-body').innerHTML = '<p style="color:var(--dim);font-size:12px">No results yet — run the backtest first.</p>';
         return;
       }
-      // Group by variant
-      var byVariant = {};
-      rows.forEach(r => {
-        if (!byVariant[r.source]) byVariant[r.source] = [];
-        byVariant[r.source].push(r);
+
+      // Split into _raw and _kl variants
+      var raw = rows.filter(r => r.source.endsWith('_raw'));
+      var kl  = rows.filter(r => r.source.endsWith('_kl'));
+
+      function summaryStats(vrows) {
+        var w = vrows.reduce((s,r) => s+r.wins, 0);
+        var l = vrows.reduce((s,r) => s+r.losses, 0);
+        var t = w + l;
+        var pnl = vrows.reduce((s,r) => s+(r.total_pnl||0), 0);
+        return { w, l, t, pnl: pnl.toFixed(2), wr: t > 0 ? Math.round(w/t*100) : 0 };
+      }
+
+      function wrCol(wr) {
+        return wr >= 50 ? 'var(--green)' : wr >= 35 ? 'var(--amber)' : 'var(--red)';
+      }
+
+      function delta(a, b, suffix) {
+        var d = a - b;
+        var col = d > 0 ? 'var(--green)' : d < 0 ? 'var(--red)' : 'var(--dim)';
+        return '<span style="color:'+col+';font-size:11px">'+(d>0?'+':'')+d.toFixed(suffix||0)+'</span>';
+      }
+
+      var rs = summaryStats(raw);
+      var ks = summaryStats(kl);
+
+      // Summary header
+      var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">';
+
+      // Raw summary
+      html += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px">';
+      html += '<div style="font-size:11px;font-weight:500;color:var(--dim);text-transform:uppercase;margin-bottom:10px">Without KL filter</div>';
+      html += '<div style="display:flex;gap:20px">';
+      html += '<div><div style="font-size:11px;color:var(--dim)">WR</div><div style="font-size:24px;font-weight:500;color:'+wrCol(rs.wr)+'">'+rs.wr+'%</div></div>';
+      html += '<div><div style="font-size:11px;color:var(--dim)">Trades</div><div style="font-size:20px;font-weight:500">'+rs.t+'</div></div>';
+      html += '<div><div style="font-size:11px;color:var(--dim)">PnL (R)</div><div style="font-size:20px;font-weight:500;color:'+(rs.pnl>=0?'var(--green)':'var(--red)')+'">'+rs.pnl+'</div></div>';
+      html += '</div></div>';
+
+      // KL summary
+      html += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px">';
+      html += '<div style="font-size:11px;font-weight:500;color:var(--dim);text-transform:uppercase;margin-bottom:10px">With KL filter</div>';
+      html += '<div style="display:flex;gap:20px">';
+      html += '<div><div style="font-size:11px;color:var(--dim)">WR</div><div style="font-size:24px;font-weight:500;color:'+wrCol(ks.wr)+'">'+ks.wr+'% '+delta(ks.wr,rs.wr,0)+'</div></div>';
+      html += '<div><div style="font-size:11px;color:var(--dim)">Trades</div><div style="font-size:20px;font-weight:500">'+ks.t+' '+delta(ks.t,rs.t,0)+'</div></div>';
+      html += '<div><div style="font-size:11px;color:var(--dim)">PnL (R)</div><div style="font-size:20px;font-weight:500;color:'+(ks.pnl>=0?'var(--green)':'var(--red)')+'">'+ks.pnl+' '+delta(parseFloat(ks.pnl),parseFloat(rs.pnl),1)+'</div></div>';
+      html += '</div></div>';
+      html += '</div>';
+
+      // Verdict
+      var wrDelta = ks.wr - rs.wr;
+      var tradeDelta = ks.t - rs.t;
+      var pnlDelta = parseFloat(ks.pnl) - parseFloat(rs.pnl);
+      var verdict = '';
+      if (ks.t === 0) {
+        verdict = '⚠️ KL filter removed all signals — proximity too tight or min score too high';
+      } else if (wrDelta >= 5 && pnlDelta >= 0) {
+        verdict = '✅ KL filter improves WR by '+wrDelta+'% and reduces trades by '+Math.abs(tradeDelta)+' — keep it ON';
+      } else if (wrDelta >= 3) {
+        verdict = '✅ KL filter improves WR by '+wrDelta+'% but reduces signal count significantly ('+tradeDelta+' trades)';
+      } else if (wrDelta < -3) {
+        verdict = '❌ KL filter hurts WR by '+Math.abs(wrDelta)+'% — consider turning it OFF';
+      } else if (Math.abs(tradeDelta) > rs.t * 0.5) {
+        verdict = '⚠️ KL filter removes '+Math.abs(tradeDelta)+' trades ('+Math.round(Math.abs(tradeDelta)/rs.t*100)+'%) with minimal WR gain — filter may be too aggressive';
+      } else {
+        verdict = '📊 KL filter has minimal impact ('+wrDelta+'% WR change) — neutral';
+      }
+      html += '<div style="background:rgba(96,165,250,0.07);border:1px solid rgba(96,165,250,0.2);border-radius:6px;padding:10px 14px;margin-bottom:16px;font-size:12px">'+verdict+'</div>';
+
+      // Side-by-side table
+      // Build lookup maps
+      var rawMap = {}, klMap = {};
+      raw.forEach(r => rawMap[r.symbol+'|'+r.timeframe] = r);
+      kl.forEach(r  => klMap[r.symbol+'|'+r.timeframe]  = r);
+      var allKeys = [...new Set([...Object.keys(rawMap), ...Object.keys(klMap)])];
+      // Sort by raw WR desc
+      allKeys.sort((a,b) => {
+        var ra = rawMap[a] ? rawMap[a].win_rate : 0;
+        var rb = rawMap[b] ? rawMap[b].win_rate : 0;
+        return rb - ra;
       });
-      var html = '';
-      Object.keys(byVariant).forEach(v => {
-        var vrows = byVariant[v];
-        var totalW = vrows.reduce((s,r) => s+r.wins, 0);
-        var totalL = vrows.reduce((s,r) => s+r.losses, 0);
-        var totalT = totalW + totalL;
-        var wr = totalT > 0 ? Math.round(totalW/totalT*100) : 0;
-        var pnl = vrows.reduce((s,r) => s+(r.total_pnl||0), 0).toFixed(2);
-        var wrCol = wr >= 50 ? 'var(--green)' : wr >= 35 ? 'var(--amber)' : 'var(--red)';
-        html += '<div style="margin-bottom:16px"><div style="font-size:12px;font-weight:500;margin-bottom:8px;color:var(--dim)">' + v.toUpperCase() + '</div>';
-        html += '<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap">';
-        html += '<div><span style="color:var(--dim);font-size:11px">Overall WR</span><br><span style="font-size:22px;font-weight:500;color:'+wrCol+'">'+wr+'%</span></div>';
-        html += '<div><span style="color:var(--dim);font-size:11px">Trades</span><br><span style="font-size:18px;font-weight:500">'+totalT+'</span></div>';
-        html += '<div><span style="color:var(--dim);font-size:11px">Total PnL (R)</span><br><span style="font-size:18px;font-weight:500;color:'+(pnl>=0?'var(--green)':'var(--red)')+'">'+pnl+'</span></div>';
-        html += '</div>';
-        // Table of top results
-        var sorted = vrows.sort((a,b) => b.win_rate - a.win_rate).slice(0, 15);
-        html += '<table><tr><th>Symbol</th><th>TF</th><th>WR%</th><th>W</th><th>L</th><th>PnL-R</th></tr>';
-        sorted.forEach(r => {
-          var w = r.win_rate;
-          var wc = w >= 50 ? '#4caf50' : w >= 35 ? '#ffa726' : '#ef5350';
-          html += '<tr><td>'+r.symbol+'</td><td><span class="tag tag-blue">'+r.timeframe+'</span></td>';
-          html += '<td><span style="color:'+wc+';font-weight:500">'+w+'%</span><span class="bar-wrap"><span class="bar" style="width:'+w+'%;background:'+wc+'"></span></span></td>';
-          html += '<td style="color:var(--green)">'+r.wins+'</td><td style="color:var(--red)">'+r.losses+'</td>';
-          html += '<td style="color:'+(r.total_pnl>=0?'var(--green)':'var(--red)')+'">'+( r.total_pnl>=0?'+':'')+r.total_pnl.toFixed(2)+'</td></tr>';
-        });
-        html += '</table></div>';
+
+      html += '<table>';
+      html += '<tr><th>Symbol</th><th>TF</th>';
+      html += '<th colspan="3" style="text-align:center;border-left:1px solid var(--border)">Without KL</th>';
+      html += '<th colspan="3" style="text-align:center;border-left:1px solid var(--border)">With KL</th>';
+      html += '<th style="border-left:1px solid var(--border)">WR Δ</th></tr>';
+      html += '<tr style="font-size:10px;color:var(--dim)">';
+      html += '<th></th><th></th>';
+      html += '<th style="border-left:1px solid var(--border)">WR%</th><th>Trades</th><th>PnL-R</th>';
+      html += '<th style="border-left:1px solid var(--border)">WR%</th><th>Trades</th><th>PnL-R</th>';
+      html += '<th style="border-left:1px solid var(--border)"></th></tr>';
+
+      allKeys.forEach(key => {
+        var parts = key.split('|');
+        var sym = parts[0], tf = parts[1];
+        var r = rawMap[key], k = klMap[key];
+        var rwr = r ? r.win_rate : null;
+        var kwr = k ? k.win_rate : null;
+        var wd  = (rwr !== null && kwr !== null) ? kwr - rwr : null;
+        var wdCol = wd === null ? 'var(--dim)' : wd > 3 ? 'var(--green)' : wd < -3 ? 'var(--red)' : 'var(--dim)';
+
+        html += '<tr>';
+        html += '<td>'+sym+'</td>';
+        html += '<td><span class="tag tag-blue">'+tf+'</span></td>';
+        // Raw
+        if (r) {
+          var wc = r.win_rate >= 50 ? '#4caf50' : r.win_rate >= 35 ? '#ffa726' : '#ef5350';
+          html += '<td style="border-left:1px solid var(--border)"><span style="color:'+wc+';font-weight:500">'+r.win_rate+'%</span></td>';
+          html += '<td style="color:var(--dim)">'+r.total+'</td>';
+          html += '<td style="color:'+(r.total_pnl>=0?'var(--green)':'var(--red)')+'">'+( r.total_pnl>=0?'+':'')+r.total_pnl.toFixed(1)+'</td>';
+        } else {
+          html += '<td style="border-left:1px solid var(--border);color:var(--dim)" colspan="3">—</td>';
+        }
+        // KL
+        if (k) {
+          var kc = k.win_rate >= 50 ? '#4caf50' : k.win_rate >= 35 ? '#ffa726' : '#ef5350';
+          html += '<td style="border-left:1px solid var(--border)"><span style="color:'+kc+';font-weight:500">'+k.win_rate+'%</span></td>';
+          html += '<td style="color:var(--dim)">'+k.total+'</td>';
+          html += '<td style="color:'+(k.total_pnl>=0?'var(--green)':'var(--red)')+'">'+( k.total_pnl>=0?'+':'')+k.total_pnl.toFixed(1)+'</td>';
+        } else {
+          html += '<td style="border-left:1px solid var(--border);color:var(--dim)" colspan="3">—</td>';
+        }
+        // Delta
+        html += '<td style="border-left:1px solid var(--border);font-weight:500;color:'+wdCol+'">';
+        html += wd !== null ? (wd>0?'+':'')+wd.toFixed(1)+'%' : '—';
+        html += '</td></tr>';
       });
+      html += '</table>';
+
       document.getElementById('results-body').innerHTML = html;
       sec.scrollIntoView({behavior:'smooth'});
     });
