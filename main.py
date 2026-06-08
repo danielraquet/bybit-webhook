@@ -4510,7 +4510,10 @@ function showResults(id, name) {
 }
 
 function loadConfigs() {
-  fetch('/backtest/configs/list').then(r => r.json()).then(d => {
+  fetch('/backtest/configs/list').then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(d => {
     var configs = d.configs || [];
     var el = document.getElementById('configs-list');
     if (!configs.length) {
@@ -4535,6 +4538,13 @@ function loadConfigs() {
     });
     html += '</table>';
     el.innerHTML = html;
+  }).catch(e => {
+    // Try to init the table then retry once
+    fetch('/backtest/configs/init', {method:'POST'}).then(() => {
+      document.getElementById('configs-list').innerHTML = '<p style="color:var(--dim);font-size:12px">DB table initialised — no configs yet. Paste a status bar string above.</p>';
+    }).catch(() => {
+      document.getElementById('configs-list').innerHTML = '<p style="color:var(--red);font-size:12px">Error loading configs: ' + e.message + ' — check Railway logs.</p>';
+    });
   });
 }
 
@@ -4567,6 +4577,16 @@ pollStatus();
 </body>
 </html>
 """
+
+
+@app.route("/backtest/configs/init", methods=["GET", "POST"])
+def backtest_configs_init():
+    """Manually create backtest_configs table — call once if page shows errors."""
+    try:
+        _bt_init_configs_table()
+        return jsonify({"status": "ok", "message": "backtest_configs table ready"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/backtest/configs")
