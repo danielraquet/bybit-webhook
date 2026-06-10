@@ -171,7 +171,7 @@ var STATUS_FILTER = 'all';
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Variant','Opened','Closed','Notes','Links'
+  'PnL','PnL%','Outcome','Source','Variant','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -280,6 +280,7 @@ function renderTrades(trades){
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
+      + '<td class="editable" data-id="'+t.id+'" data-type="user_notes" data-val="'+esc(t.user_notes||'')+'" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+(t.user_notes ? esc(t.user_notes) : 'Click to add note')+'">'+(t.user_notes ? esc(t.user_notes.slice(0,40))+(t.user_notes.length>40?'…':'') : '<span style="color:var(--dim);font-size:11px">+ add note</span>')+'</td>'
       + '<td>'+mediaHtml+'</td>'
       + '</tr>';
   }
@@ -329,6 +330,12 @@ document.addEventListener('click', function(e){
     var cur = prompt('Enter URL (separate multiple with |):','');
     if(cur===null) return;
     fetch('/journal/set-media',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),media:cur.trim()})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='user_notes'){
+    var cur = prompt('Add your note:', val);
+    if(cur===null) return;
+    fetch('/journal/set-user-notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),user_notes:cur.trim()})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
 });
@@ -1721,6 +1728,28 @@ def get_media():
         return jsonify({"status": "ok", "media": row[0] if row and row[0] else ""}), 200
     except Exception as e:
         return jsonify({"status": "ok", "media": ""}), 200
+
+
+@app.route("/journal/set-user-notes", methods=["POST"])
+def set_user_notes():
+    """Set manual user notes for a trade."""
+    try:
+        body     = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+        notes    = body.get("user_notes", "").strip()
+        conn = get_db()
+        with conn.cursor() as cur:
+            # Add column if it doesn't exist yet
+            cur.execute("""
+                ALTER TABLE trades ADD COLUMN IF NOT EXISTS user_notes TEXT
+            """)
+            cur.execute("UPDATE trades SET user_notes=%s WHERE id=%s", (notes or None, trade_id))
+        conn.commit()
+        conn.close()
+        log.info(f"User notes set for trade {trade_id}")
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal/set-media", methods=["POST"])
