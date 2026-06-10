@@ -113,6 +113,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .badge-sl{background:rgba(248,113,113,0.15);color:var(--red)}
 .badge-open{background:rgba(96,165,250,0.15);color:var(--blue)}
 .badge-skipped{background:rgba(107,114,128,0.15);color:var(--dim)}
+.img-preview{position:fixed;z-index:9999;pointer-events:none;display:none;border:1px solid var(--border);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6);max-width:360px;max-height:240px;background:var(--card)}
+.img-preview img{width:100%;height:auto;display:block;max-height:240px;object-fit:contain}
 .pnl-pos{color:var(--green)}.pnl-neg{color:var(--red)}
 .editable{cursor:pointer;border-bottom:1px dashed rgba(107,114,128,0.5)}
 .editable:hover{border-bottom-color:var(--blue);color:var(--blue)}
@@ -121,6 +123,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 </head>
 <body>
 <h1>Trade Journal</h1>
+<div id="img-preview" class="img-preview"><img id="img-preview-img" src="" alt="preview"></div>
 <div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
   <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
@@ -251,7 +254,7 @@ function renderTrades(trades){
     var notesFull  = (t.notes||'').split('|sheet_row:')[0];
     var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
     var mediaHtml = '';
-    if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
+    if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" data-preview="'+esc(l.trim())+'" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
     mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
 
     rows += '<tr>'
@@ -384,6 +387,42 @@ document.getElementById('btn-reset').onclick = function(){
   if(!confirm('Are you sure?')) return;
   fetch('/journal/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(d){alert(d.message);loadTrades();});
 };
+
+// Image preview on hover for media links
+(function(){
+  var preview = document.getElementById('img-preview');
+  var img     = document.getElementById('img-preview-img');
+  var timer   = null;
+  document.addEventListener('mouseover', function(e) {
+    var el = e.target.closest('[data-preview]');
+    if (!el) return;
+    clearTimeout(timer);
+    timer = setTimeout(function() {
+      img.src = el.dataset.preview;
+      preview.style.display = 'block';
+      var x = e.clientX + 16, y = e.clientY + 16;
+      if (x + 370 > window.innerWidth)  x = e.clientX - 376;
+      if (y + 250 > window.innerHeight) y = e.clientY - 256;
+      preview.style.left = x + 'px';
+      preview.style.top  = y + 'px';
+    }, 200);
+  });
+  document.addEventListener('mousemove', function(e) {
+    if (preview.style.display === 'none') return;
+    var x = e.clientX + 16, y = e.clientY + 16;
+    if (x + 370 > window.innerWidth)  x = e.clientX - 376;
+    if (y + 250 > window.innerHeight) y = e.clientY - 256;
+    preview.style.left = x + 'px';
+    preview.style.top  = y + 'px';
+  });
+  document.addEventListener('mouseout', function(e) {
+    if (!e.target.closest('[data-preview]')) return;
+    clearTimeout(timer);
+    preview.style.display = 'none';
+    img.src = '';
+  });
+  img.addEventListener('error', function() { preview.style.display = 'none'; });
+})();
 
 loadTrades();
 </script>
