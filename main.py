@@ -243,7 +243,11 @@ function renderTrades(trades){
     var t = trades[i];
     var num = trades.length - i;
     if(t.status === 'note'){
-      rows += '<tr class="note-row"><td colspan="18"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — ' + esc(t.notes||'') + '</td></tr>';
+      rows += '<tr class="note-row">'
+        + '<td colspan="17"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
+        + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
+        + '</td></tr>';
       continue;
     }
     var pnl = parseFloat(t.pnl)||0;
@@ -283,7 +287,12 @@ function renderTrades(trades){
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
-      + '<td class="editable" data-id="'+t.id+'" data-type="user_notes" data-val="'+esc(t.user_notes||'')+'" style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+(t.user_notes ? esc(t.user_notes) : 'Click to add note')+'">'+(t.user_notes ? esc(t.user_notes.slice(0,40))+(t.user_notes.length>40?'…':'') : '<span style="color:var(--dim);font-size:11px">+ add note</span>')+'</td>'
+      + '<td data-id="'+t.id+'" data-type="user_notes" data-val="'+esc(t.user_notes||'')+'" style="max-width:180px;vertical-align:middle" class="user-notes-cell">'
+      + (t.user_notes
+          ? '<span class="user-note-text" style="font-size:12px;cursor:pointer;border-bottom:1px dashed rgba(107,114,128,0.5)" title="'+esc(t.user_notes)+'">'+esc(t.user_notes.slice(0,40))+(t.user_notes.length>40?'…':'')+'</span>'
+          + '<span class="user-note-del" data-id="'+t.id+'" style="margin-left:6px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
+          : '<span class="user-note-text" style="font-size:11px;color:var(--dim);cursor:pointer">+ add note</span>')
+      + '</td>'
       + '<td>'+mediaHtml+'</td>'
       + '</tr>';
   }
@@ -335,12 +344,6 @@ document.addEventListener('click', function(e){
     fetch('/journal/set-media',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),media:cur.trim()})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
-  if(type==='user_notes'){
-    var cur = prompt('Add your note:', val);
-    if(cur===null) return;
-    fetch('/journal/set-user-notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),user_notes:cur.trim()})})
-      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
-  }
 });
 
 // Status filter buttons
@@ -388,7 +391,48 @@ document.getElementById('btn-reset').onclick = function(){
   fetch('/journal/reset',{method:'POST'}).then(function(r){return r.json();}).then(function(d){alert(d.message);loadTrades();});
 };
 
-// Image preview on hover for media links
+// Note row — edit on text click, delete on ✕
+document.addEventListener('click', function(e) {
+  var noteText = e.target.closest('.note-row-text');
+  if (noteText) {
+    var id  = noteText.dataset.id;
+    var cur = prompt('Edit note:', noteText.textContent);
+    if (cur === null) return;
+    fetch('/journal/edit-note', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: parseInt(id), note: cur.trim()})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok') loadTrades();});
+    return;
+  }
+  var noteDel = e.target.closest('.note-row-del');
+  if (noteDel) {
+    if (!confirm('Delete this note?')) return;
+    fetch('/journal/delete-note/' + noteDel.dataset.id, {method:'POST'})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok') loadTrades();});
+  }
+});
+document.addEventListener('click', function(e) {
+  var delBtn = e.target.closest('.user-note-del');
+  if (delBtn) {
+    var id = delBtn.dataset.id;
+    if (!confirm('Delete this note?')) return;
+    fetch('/journal/set-user-notes', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: parseInt(id), user_notes: ''})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok') loadTrades();});
+    return;
+  }
+  var noteText = e.target.closest('.user-note-text');
+  if (noteText) {
+    var cell = noteText.closest('.user-notes-cell');
+    var id   = cell ? cell.dataset.id : null;
+    var val  = cell ? cell.dataset.val : '';
+    if (!id) return;
+    var cur = prompt('Edit note:', val);
+    if (cur === null) return;
+    fetch('/journal/set-user-notes', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: parseInt(id), user_notes: cur.trim()})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok') loadTrades();});
+  }
+});
 (function(){
   var preview = document.getElementById('img-preview');
   var img     = document.getElementById('img-preview-img');
@@ -1728,6 +1772,39 @@ def sync_sheets():
             except Exception as te:
                 log.warning(f"Sheets sync failed for trade {t.get('id')}: {te}")
         return jsonify({"status": "ok", "message": f"Synced {synced} trades to Sheets"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/edit-note", methods=["POST"])
+def edit_note():
+    """Edit the text of a note row."""
+    try:
+        body = request.get_json(force=True)
+        note_id = int(body.get("id", 0))
+        note    = body.get("note", "").strip()
+        if not note:
+            return jsonify({"status": "error", "message": "Note cannot be empty"}), 400
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET notes=%s WHERE id=%s AND status='note'", (note, note_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/delete-note/<int:note_id>", methods=["POST"])
+def delete_note(note_id):
+    """Delete a note row."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM trades WHERE id=%s AND status='note'", (note_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
