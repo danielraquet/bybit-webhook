@@ -2616,9 +2616,12 @@ var STATUS_MAP = ["alertName","maxBlocks","extendBars","htfExtendBars","atrLengt
 function parseStatusBar() {
   var raw = document.getElementById('f-statusbar').value.trim();
   if (!raw) return;
-  var m = raw.match(/\\((.+)\\):/);
-  if (!m) { alert('Could not parse status bar string'); return; }
-  var parts = m[1].split(', '), s = {};
+  // Extract values between first ( and last ):
+  var start = raw.indexOf('(');
+  var end   = raw.lastIndexOf('):');
+  if (start === -1 || end === -1) { alert('Could not parse — paste the full status bar string'); return; }
+  var inner = raw.substring(start + 1, end);
+  var parts = inner.split(', '), s = {};
   STATUS_MAP.forEach(function(n,i){ if(i<parts.length) s[n]=parts[i]; });
   if(s.atrLength)           document.getElementById('f-atrlen').value    = s.atrLength;
   if(s.impulseRatio)        document.getElementById('f-impulse').value   = s.impulseRatio;
