@@ -130,6 +130,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
   <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
   <a href="/backtest/configs" style="color:var(--dim);text-decoration:none">Backtest</a>
+  <a href="/signal-explainer" style="color:var(--dim);text-decoration:none">Explainer</a>
 </div>
 <div class="toolbar">
   <button class="btn" id="btn-poll">Poll Now</button>
@@ -2242,6 +2243,371 @@ def auto_cancel_opposite(symbol: str, new_side: str):
                     conn.commit()
     except Exception as e:
         log.error(f"Error auto-cancelling opposite orders for {symbol}: {e}")
+
+
+def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
+    """
+    Run OB detection with verbose explanations for each bar.
+    Returns list of bar analyses showing exactly which conditions passed/failed.
+    """
+    mi        = cfg.get("impulseRatio",   1.3)
+    cob_mult  = cfg.get("cobMinAtrMult",  0.8)
+    doji_pct  = cfg.get("dojiPct",        15.0)
+    sl_buf    = cfg.get("slAtrMult",      0.1)
+    eo        = cfg.get("entryOffset",    0.0)
+    rr        = cfg.get("rrRatio",        3.0)
+
+    results = []
+    start = len(bars) - 1
+    end   = max(1, len(bars) - 50)
+    if target_bar_index is not None:
+        idx   = len(bars) - 1 - target_bar_index
+        start = min(idx + 5, len(bars) - 1)
+        end   = max(1, idx - 5)
+
+    for i in range(start, end, -1):
+        if i < 2 or i >= len(bars):
+            continue
+        atr = atrs[i]
+        if not atr or atr == 0:
+            continue
+
+        b0 = bars[i]
+        b1 = bars[i - 1]
+
+        body0 = abs(b0["close"] - b0["open"])
+        body1 = abs(b1["close"] - b1["open"])
+        rng1  = b1["high"] - b1["low"]
+        ts    = datetime.utcfromtimestamp(b0["ts"] / 1000).strftime("%Y-%m-%d %H:%M")
+
+        def make_checks(is_bull):
+            checks = []
+            if is_bull:
+                checks.append({"name": "OB candle is bearish",
+                    "pass": b1["close"] < b1["open"],
+                    "detail": f"close={b1['close']:.5f} open={b1['open']:.5f}"})
+                checks.append({"name": "Impulse candle is bullish",
+                    "pass": b0["close"] > b0["open"],
+                    "detail": f"close={b0['close']:.5f} open={b0['open']:.5f}"})
+                checks.append({"name": "Impulse close > OB high",
+                    "pass": b0["close"] > b1["high"],
+                    "detail": f"close={b0['close']:.5f} ob_high={b1['high']:.5f}"})
+            else:
+                checks.append({"name": "OB candle is bullish",
+                    "pass": b1["close"] > b1["open"],
+                    "detail": f"close={b1['close']:.5f} open={b1['open']:.5f}"})
+                checks.append({"name": "Impulse candle is bearish",
+                    "pass": b0["close"] < b0["open"],
+                    "detail": f"close={b0['close']:.5f} open={b0['open']:.5f}"})
+                checks.append({"name": "Impulse close < OB low",
+                    "pass": b0["close"] < b1["low"],
+                    "detail": f"close={b0['close']:.5f} ob_low={b1['low']:.5f}"})
+            doji = rng1 > 0 and (body1 / rng1 * 100) < doji_pct
+            checks.append({"name": f"OB not a doji (body >{doji_pct}% of range)",
+                "pass": not doji,
+                "detail": f"body={body1/rng1*100:.1f}% of range" if rng1 > 0 else "zero range"})
+            checks.append({"name": f"OB body >= {cob_mult}× ATR",
+                "pass": body1 >= atr * cob_mult,
+                "detail": f"body={body1:.5f}  threshold={atr*cob_mult:.5f}  ATR={atr:.5f}"})
+            checks.append({"name": f"Impulse >= {mi}× OB body",
+                "pass": body1 > 0 and (body0 / body1) >= mi,
+                "detail": f"ratio={body0/body1:.2f}×  (impulse={body0:.5f} / ob={body1:.5f})" if body1 > 0 else "OB body is zero"})
+            return checks
+
+        bull_checks = make_checks(True)
+        bear_checks = make_checks(False)
+        bull_pass   = all(c["pass"] for c in bull_checks)
+        bear_pass   = all(c["pass"] for c in bear_checks)
+        ob_type     = "Bull OB" if bull_pass else ("Bear OB" if bear_pass else None)
+
+        trade = None
+        if bull_pass or bear_pass:
+            ob_top = max(b1["open"], b1["close"])
+            ob_bot = min(b1["open"], b1["close"])
+            ob_mid = (ob_top + ob_bot) / 2
+            if bull_pass:
+                entry = ob_top - eo * 2.0 * (ob_top - ob_mid)
+                sl    = min(b1["low"], b0["low"]) - atr * sl_buf
+                tp    = entry + abs(entry - sl) * rr
+            else:
+                entry = ob_bot + eo * 2.0 * (ob_mid - ob_bot)
+                sl    = max(b1["high"], b0["high"]) + atr * sl_buf
+                tp    = entry - abs(entry - sl) * rr
+            trade = {"entry": round(entry, 6), "sl": round(sl, 6),
+                     "tp": round(tp, 6), "risk_r": round(abs(entry - sl), 6)}
+
+        results.append({
+            "bar": i, "timestamp": ts,
+            "detected": bull_pass or bear_pass,
+            "ob_type":  ob_type,
+            "bull_checks": bull_checks,
+            "bear_checks": bear_checks,
+            "atr":  round(atr, 6),
+            "trade": trade,
+            "candles": {
+                "b0": {"o": b0["open"], "h": b0["high"], "l": b0["low"], "c": b0["close"]},
+                "b1": {"o": b1["open"], "h": b1["high"], "l": b1["low"], "c": b1["close"]},
+            }
+        })
+        if len(results) >= 20:
+            break
+
+    return results
+
+
+SIGNAL_EXPLAINER_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Signal Explainer</title>
+<style>
+:root{--bg:#0f0f0f;--surface:#1a1a1a;--border:#2a2a2a;--text:#e8e8e8;--dim:#888;--green:#4caf50;--red:#ef5350;--blue:#42a5f5;--amber:#ffa726}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,sans-serif;font-size:13px;padding:24px}
+h1{font-size:18px;font-weight:500;margin-bottom:4px}
+.nav{display:flex;gap:12px;margin-bottom:20px}
+.nav a{color:var(--dim);text-decoration:none;font-size:12px}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.section-title{font-size:12px;font-weight:500;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:12px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;color:var(--dim)}
+.field input,.field select{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;width:100%}
+.field input:focus,.field select:focus{outline:none;border-color:var(--blue)}
+textarea{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:4px;font-size:11px;font-family:monospace;resize:vertical}
+textarea:focus{outline:none;border-color:var(--blue)}
+.btn{padding:7px 16px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:500;background:var(--blue);color:#000}
+.btn:disabled{opacity:.4;cursor:wait}
+.btn-sec{background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.3)}
+.bar-result{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px}
+.bar-result.detected{border-color:rgba(76,175,80,.4)}
+.bar-header{display:flex;align-items:center;gap:10px;margin-bottom:0;cursor:pointer;flex-wrap:wrap}
+.bar-ts{font-size:13px;font-weight:500}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-bull{background:rgba(76,175,80,.15);color:var(--green)}
+.badge-bear{background:rgba(239,83,80,.15);color:var(--red)}
+.badge-none{background:rgba(107,114,128,.15);color:var(--dim)}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+.check{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:4px;font-size:11px;background:rgba(255,255,255,.02)}
+.check.pass{border-left:2px solid var(--green)}
+.check.fail{border-left:2px solid var(--red)}
+.check-name{font-weight:500;margin-bottom:2px}
+.check-detail{color:var(--dim);font-size:10px}
+.trade-box{background:rgba(96,165,250,.07);border:1px solid rgba(96,165,250,.2);border-radius:6px;padding:10px;margin-top:10px;display:flex;gap:20px;flex-wrap:wrap;font-size:12px}
+.trade-box .lbl{color:var(--dim);font-size:11px}
+.trade-box .val{font-weight:500}
+.expand-btn{margin-left:auto;font-size:11px;color:var(--dim)}
+.candle-info{font-size:11px;color:var(--dim);margin:8px 0}
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/journal">← Journal</a>
+  <a href="/backtest/configs">Backtest</a>
+</div>
+<h1>// Signal Explainer</h1>
+<p style="color:var(--dim);font-size:12px;margin-bottom:20px">Enter symbol, timeframe and optional time to see exactly why the indicator did or did not detect an OB.</p>
+
+<div class="section">
+  <div class="section-title">Lookup</div>
+  <div class="grid">
+    <div class="field"><label>Symbol</label><input id="f-symbol" type="text" value="ETHUSDT"></div>
+    <div class="field"><label>Timeframe</label>
+      <select id="f-tf">
+        <option value="3">M3</option><option value="5">M5</option>
+        <option value="15">M15</option><option value="30">M30</option>
+        <option value="60">H1</option><option value="240">H4</option>
+      </select>
+    </div>
+    <div class="field"><label>Date/Time UTC (optional)</label><input id="f-time" type="datetime-local"></div>
+  </div>
+  <div class="section-title" style="margin-top:4px">Indicator Settings</div>
+  <textarea id="f-statusbar" rows="2" placeholder='Paste status bar string here then click Parse — or fill manually below' style="margin-bottom:8px"></textarea>
+  <button class="btn btn-sec" onclick="parseStatusBar()" style="margin-bottom:12px">Parse status bar</button>
+  <div class="grid">
+    <div class="field"><label>ATR Length</label><input id="f-atrlen" type="number" value="17"></div>
+    <div class="field"><label>Impulse Ratio</label><input id="f-impulse" type="number" step="0.1" value="1.3"></div>
+    <div class="field"><label>Min OB Size (x ATR)</label><input id="f-cobmult" type="number" step="0.1" value="0.8"></div>
+    <div class="field"><label>Doji % threshold</label><input id="f-doji" type="number" step="1" value="15"></div>
+    <div class="field"><label>SL ATR Buffer</label><input id="f-slbuf" type="number" step="0.05" value="0.1"></div>
+    <div class="field"><label>Entry Offset</label><input id="f-offset" type="number" step="0.05" value="0.0"></div>
+    <div class="field"><label>RR Ratio</label><input id="f-rr" type="number" step="0.1" value="3.0"></div>
+  </div>
+  <button class="btn" id="btn-explain" onclick="runExplainer()">🔍 Explain Signals</button>
+</div>
+
+<div id="results"></div>
+
+<script>
+var STATUS_MAP = ["alertName","maxBlocks","extendBars","htfExtendBars","atrLength",
+  "impulseRatio","overlapBars","dojiPct","dirtyObRatio","cobMinAtrMult",
+  "rrRatio","winRateMinSamples","winRateLookback","slAtrMult","slMinPct",
+  "coolOffBars","maxAlertsPerOB","cancelAfterBars","prepareAtrMult","entryOffset",
+  "alertBestWRMinSmp","alertMinWR","klProximity","klLookback2","klMinScore",
+  "klTol2","klPvLen","klMaxLevels","klStrongOpacity","klWeakOpacity",
+  "klBorderOpacity","klSignificanceBonus","webhookSecret","indicatorVariant",
+  "testBalancePct","testLeverage","trendEmaLen","trendEmaTF","emaLookback",
+  "timezone","schedStartHour","schedStartMin","schedEndHour","schedEndMin",
+  "htf","trendTF","trendLookback","structureHistory"];
+
+function parseStatusBar() {
+  var raw = document.getElementById('f-statusbar').value.trim();
+  if (!raw) return;
+  var m = raw.match(/\\((.+)\\):/);
+  if (!m) { alert('Could not parse status bar string'); return; }
+  var parts = m[1].split(', '), settings = {};
+  STATUS_MAP.forEach(function(name,i){ if(i<parts.length) settings[name]=parts[i]; });
+  if(settings.atrLength)     document.getElementById('f-atrlen').value   = settings.atrLength;
+  if(settings.impulseRatio)  document.getElementById('f-impulse').value  = settings.impulseRatio;
+  if(settings.cobMinAtrMult) document.getElementById('f-cobmult').value  = settings.cobMinAtrMult;
+  if(settings.dojiPct)       document.getElementById('f-doji').value     = settings.dojiPct;
+  if(settings.slAtrMult)     document.getElementById('f-slbuf').value    = settings.slAtrMult;
+  if(settings.entryOffset)   document.getElementById('f-offset').value   = settings.entryOffset;
+  if(settings.rrRatio)       document.getElementById('f-rr').value       = settings.rrRatio;
+  alert('✅ Parsed ' + Object.keys(settings).length + ' settings');
+}
+
+function runExplainer() {
+  var btn = document.getElementById('btn-explain');
+  btn.disabled = true; btn.textContent = '⏳ Fetching...';
+  fetch('/signal-explainer/run', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      symbol:      document.getElementById('f-symbol').value.trim().toUpperCase(),
+      tf:          document.getElementById('f-tf').value,
+      time:        document.getElementById('f-time').value,
+      atrLength:   parseInt(document.getElementById('f-atrlen').value),
+      impulseRatio:parseFloat(document.getElementById('f-impulse').value),
+      cobMinAtrMult:parseFloat(document.getElementById('f-cobmult').value),
+      dojiPct:     parseFloat(document.getElementById('f-doji').value),
+      slAtrMult:   parseFloat(document.getElementById('f-slbuf').value),
+      entryOffset: parseFloat(document.getElementById('f-offset').value),
+      rrRatio:     parseFloat(document.getElementById('f-rr').value),
+    })
+  }).then(function(r){return r.json();}).then(function(d){
+    btn.disabled=false; btn.textContent='🔍 Explain Signals';
+    if(d.status==='error'){alert('Error: '+d.message);return;}
+    renderResults(d.results, d.symbol, d.tf_label);
+  }).catch(function(e){btn.disabled=false;btn.textContent='🔍 Explain Signals';alert(''+e);});
+}
+
+function countPass(checks){return checks.filter(function(c){return c.pass;}).length;}
+function bestChecks(r){return countPass(r.bull_checks)>=countPass(r.bear_checks)?r.bull_checks:r.bear_checks;}
+function bestDir(r){return countPass(r.bull_checks)>=countPass(r.bear_checks)?'Bull OB attempt':'Bear OB attempt';}
+
+function toggleChecks(uid){
+  var el=document.getElementById(uid);
+  if(el) el.style.display=el.style.display==='none'?'block':'none';
+}
+
+function renderResults(results, symbol, tfLabel) {
+  var el = document.getElementById('results');
+  if(!results||!results.length){
+    el.innerHTML='<div class="section"><p style="color:var(--dim)">No bars found.</p></div>';return;
+  }
+  var detected = results.filter(function(r){return r.detected;});
+  var html = '<div class="section"><div class="section-title">'
+    +symbol+' '+tfLabel+' — '+results.length+' bars analysed, <span style="color:'
+    +(detected.length?'var(--green)':'var(--red)')+'">'+detected.length+' OB(s) detected</span></div>';
+
+  results.forEach(function(r){
+    var badgeCls = r.detected?(r.ob_type==='Bull OB'?'badge-bull':'badge-bear'):'badge-none';
+    var badgeTxt = r.detected?r.ob_type:'No OB';
+    var uid = 'bar-'+r.bar;
+    html+='<div class="bar-result '+(r.detected?'detected':'')+'">';
+    html+='<div class="bar-header" onclick="toggleChecks(\''+uid+'\')">';
+    html+='<span class="bar-ts">'+r.timestamp+'</span>';
+    html+='<span class="badge '+badgeCls+'">'+badgeTxt+'</span>';
+    html+='<span style="font-size:10px;color:var(--dim)">ATR='+r.atr+'</span>';
+    if(r.detected) html+='<span style="color:var(--green);font-size:11px">✅ Detected</span>';
+    html+='<span class="expand-btn">▼</span></div>';
+
+    html+='<div id="'+uid+'" style="display:none">';
+    html+='<div class="candle-info">';
+    html+='Impulse [0]: O='+r.candles.b0.o+' H='+r.candles.b0.h+' L='+r.candles.b0.l+' C='+r.candles.b0.c;
+    html+=' &nbsp;|&nbsp; OB [1]: O='+r.candles.b1.o+' H='+r.candles.b1.h+' L='+r.candles.b1.l+' C='+r.candles.b1.c;
+    html+='</div>';
+
+    var showChecks = r.detected?(r.ob_type==='Bull OB'?r.bull_checks:r.bear_checks):bestChecks(r);
+    var dirLabel   = r.detected?r.ob_type:bestDir(r);
+    html+='<div style="font-size:11px;font-weight:500;color:var(--dim);margin-top:4px">'+dirLabel+'</div>';
+    html+='<div class="checks">';
+    showChecks.forEach(function(c){
+      html+='<div class="check '+(c.pass?'pass':'fail')+'">';
+      html+='<div><div class="check-name">'+(c.pass?'✅ ':'❌ ')+c.name+'</div>';
+      html+='<div class="check-detail">'+c.detail+'</div></div></div>';
+    });
+    html+='</div>';
+
+    if(r.trade){
+      html+='<div class="trade-box">';
+      html+='<div><div class="lbl">Entry</div><div class="val">'+r.trade.entry+'</div></div>';
+      html+='<div><div class="lbl">Stop Loss</div><div class="val" style="color:var(--red)">'+r.trade.sl+'</div></div>';
+      html+='<div><div class="lbl">Take Profit</div><div class="val" style="color:var(--green)">'+r.trade.tp+'</div></div>';
+      html+='<div><div class="lbl">Risk</div><div class="val">'+r.trade.risk_r+'</div></div>';
+      html+='</div>';
+    }
+    html+='</div></div>';
+  });
+  html+='</div>';
+  el.innerHTML=html;
+  results.forEach(function(r){if(r.detected) toggleChecks('bar-'+r.bar);});
+  if(!detected.length&&results.length) toggleChecks('bar-'+results[0].bar);
+}
+</script>
+</body>
+</html>"""
+
+
+@app.route("/signal-explainer")
+def signal_explainer_page():
+    return render_template_string(SIGNAL_EXPLAINER_HTML)
+
+
+@app.route("/signal-explainer/run", methods=["POST"])
+def signal_explainer_run():
+    try:
+        body     = request.get_json(force=True)
+        symbol   = body.get("symbol", "BTCUSDT").upper().strip()
+        tf_str   = str(body.get("tf", "3"))
+        time_str = body.get("time", "")
+        cfg      = {
+            "atrLength":    int(body.get("atrLength",    17)),
+            "impulseRatio": float(body.get("impulseRatio", 1.3)),
+            "cobMinAtrMult":float(body.get("cobMinAtrMult", 0.8)),
+            "dojiPct":      float(body.get("dojiPct",    15.0)),
+            "slAtrMult":    float(body.get("slAtrMult",  0.1)),
+            "entryOffset":  float(body.get("entryOffset", 0.0)),
+            "rrRatio":      float(body.get("rrRatio",    3.0)),
+        }
+        tf_map   = {"3":"M3","5":"M5","15":"M15","30":"M30","60":"H1","240":"H4"}
+        tf_label = tf_map.get(tf_str, tf_str)
+
+        bars = _bt_fetch_klines(symbol, tf_str, 3)
+        if not bars:
+            return jsonify({"status": "error", "message": f"No data for {symbol}"}), 400
+
+        atrs = _bt_calc_atr(bars, cfg["atrLength"])
+
+        target_bar = None
+        if time_str:
+            try:
+                target_dt  = datetime.strptime(time_str, "%Y-%m-%dT%H:%M")
+                target_ts  = int(target_dt.timestamp() * 1000)
+                closest    = min(range(len(bars)), key=lambda i: abs(bars[i]["ts"] - target_ts))
+                target_bar = len(bars) - 1 - closest
+                log.info(f"Signal explainer: target bar {closest} at {datetime.utcfromtimestamp(bars[closest]['ts']/1000)}")
+            except Exception as te:
+                log.warning(f"Signal explainer time parse: {te}")
+
+        results = _explain_ob_detection(bars, atrs, cfg, target_bar)
+        return jsonify({"status": "ok", "results": results, "symbol": symbol, "tf_label": tf_label})
+
+    except Exception as e:
+        import traceback
+        log.error(f"Signal explainer error: {traceback.format_exc()}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/journal")
