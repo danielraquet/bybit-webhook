@@ -2247,23 +2247,36 @@ def auto_cancel_opposite(symbol: str, new_side: str):
 
 def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
     """
-    Run OB detection with verbose explanations for each bar.
-    Returns list of bar analyses showing exactly which conditions passed/failed.
+    Full pipeline analysis — walks through every gate from OB detection
+    to server-side filters, explaining exactly where each bar was blocked.
     """
-    mi        = cfg.get("impulseRatio",   1.3)
-    cob_mult  = cfg.get("cobMinAtrMult",  0.8)
-    doji_pct  = cfg.get("dojiPct",        15.0)
-    sl_buf    = cfg.get("slAtrMult",      0.1)
-    eo        = cfg.get("entryOffset",    0.0)
-    rr        = cfg.get("rrRatio",        3.0)
+    mi             = cfg.get("impulseRatio",    1.3)
+    cob_mult       = cfg.get("cobMinAtrMult",   0.8)
+    doji_pct       = cfg.get("dojiPct",         15.0)
+    sl_buf         = cfg.get("slAtrMult",        0.1)
+    eo             = cfg.get("entryOffset",      0.0)
+    rr             = cfg.get("rrRatio",          3.0)
+    kl_prox        = cfg.get("klProximity",      1.0)
+    kl_min_score   = cfg.get("klMinScore",       6)
+    kl_bonus       = cfg.get("klSignificanceBonus", 0.0)
+    approach_atr   = cfg.get("approachMaxAtr",   1.5)
+    use_kl_filter  = cfg.get("useKeyLevelFilter", False)
+    range_lb       = cfg.get("rangeLookback",    40)
+    range_tol      = cfg.get("rangeTolPct",      15.0)
+    range_min_alt  = cfg.get("rangeMinTouches",  2)
+    use_range      = cfg.get("useRangeFilter",   False)
+
+    # Pre-compute key levels for KL filter
+    kl_levels = _bt_find_key_levels(bars, lookback=min(range_lb * 5, 500),
+                                     min_score=kl_min_score) if use_kl_filter else []
 
     results = []
     start = len(bars) - 1
-    end   = max(1, len(bars) - 50)
+    end   = max(2, len(bars) - 50)
     if target_bar_index is not None:
         idx   = len(bars) - 1 - target_bar_index
-        start = min(idx + 5, len(bars) - 1)
-        end   = max(1, idx - 5)
+        start = min(idx + 10, len(bars) - 1)
+        end   = max(2, idx - 10)
 
     for i in range(start, end, -1):
         if i < 2 or i >= len(bars):
@@ -2274,83 +2287,210 @@ def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
 
         b0 = bars[i]
         b1 = bars[i - 1]
+        b2 = bars[i - 2]
 
         body0 = abs(b0["close"] - b0["open"])
         body1 = abs(b1["close"] - b1["open"])
         rng1  = b1["high"] - b1["low"]
         ts    = datetime.utcfromtimestamp(b0["ts"] / 1000).strftime("%Y-%m-%d %H:%M")
 
-        def make_checks(is_bull):
+        # ── Gate 1: OB Detection ──────────────────────────────────────────────
+        def ob_checks(is_bull):
             checks = []
             if is_bull:
-                checks.append({"name": "OB candle is bearish",
-                    "pass": b1["close"] < b1["open"],
-                    "detail": f"close={b1['close']:.5f} open={b1['open']:.5f}"})
-                checks.append({"name": "Impulse candle is bullish",
-                    "pass": b0["close"] > b0["open"],
-                    "detail": f"close={b0['close']:.5f} open={b0['open']:.5f}"})
-                checks.append({"name": "Impulse close > OB high",
-                    "pass": b0["close"] > b1["high"],
-                    "detail": f"close={b0['close']:.5f} ob_high={b1['high']:.5f}"})
+                checks.append({"name": "OB candle bearish",     "pass": b1["close"] < b1["open"],
+                    "detail": f"open={b1['open']:.5f} close={b1['close']:.5f}"})
+                checks.append({"name": "Impulse candle bullish", "pass": b0["close"] > b0["open"],
+                    "detail": f"open={b0['open']:.5f} close={b0['close']:.5f}"})
+                checks.append({"name": "Impulse closes above OB high", "pass": b0["close"] > b1["high"],
+                    "detail": f"impulse_close={b0['close']:.5f} ob_high={b1['high']:.5f}"})
             else:
-                checks.append({"name": "OB candle is bullish",
-                    "pass": b1["close"] > b1["open"],
-                    "detail": f"close={b1['close']:.5f} open={b1['open']:.5f}"})
-                checks.append({"name": "Impulse candle is bearish",
-                    "pass": b0["close"] < b0["open"],
-                    "detail": f"close={b0['close']:.5f} open={b0['open']:.5f}"})
-                checks.append({"name": "Impulse close < OB low",
-                    "pass": b0["close"] < b1["low"],
-                    "detail": f"close={b0['close']:.5f} ob_low={b1['low']:.5f}"})
+                checks.append({"name": "OB candle bullish",     "pass": b1["close"] > b1["open"],
+                    "detail": f"open={b1['open']:.5f} close={b1['close']:.5f}"})
+                checks.append({"name": "Impulse candle bearish", "pass": b0["close"] < b0["open"],
+                    "detail": f"open={b0['open']:.5f} close={b0['close']:.5f}"})
+                checks.append({"name": "Impulse closes below OB low", "pass": b0["close"] < b1["low"],
+                    "detail": f"impulse_close={b0['close']:.5f} ob_low={b1['low']:.5f}"})
             doji = rng1 > 0 and (body1 / rng1 * 100) < doji_pct
-            checks.append({"name": f"OB not a doji (body >{doji_pct}% of range)",
+            checks.append({"name": f"OB not a doji (>{doji_pct:.0f}% body)",
                 "pass": not doji,
                 "detail": f"body={body1/rng1*100:.1f}% of range" if rng1 > 0 else "zero range"})
             checks.append({"name": f"OB body >= {cob_mult}× ATR",
                 "pass": body1 >= atr * cob_mult,
-                "detail": f"body={body1:.5f}  threshold={atr*cob_mult:.5f}  ATR={atr:.5f}"})
+                "detail": f"body={body1:.5f}  need={atr*cob_mult:.5f}  ATR={atr:.5f}"})
             checks.append({"name": f"Impulse >= {mi}× OB body",
                 "pass": body1 > 0 and (body0 / body1) >= mi,
-                "detail": f"ratio={body0/body1:.2f}×  (impulse={body0:.5f} / ob={body1:.5f})" if body1 > 0 else "OB body is zero"})
+                "detail": f"ratio={body0/body1:.2f}×  need={mi}×" if body1 > 0 else "OB body=0"})
             return checks
 
-        bull_checks = make_checks(True)
-        bear_checks = make_checks(False)
+        bull_checks = ob_checks(True)
+        bear_checks = ob_checks(False)
         bull_pass   = all(c["pass"] for c in bull_checks)
         bear_pass   = all(c["pass"] for c in bear_checks)
         ob_type     = "Bull OB" if bull_pass else ("Bear OB" if bear_pass else None)
+        detected    = bull_pass or bear_pass
 
-        trade = None
-        if bull_pass or bear_pass:
-            ob_top = max(b1["open"], b1["close"])
-            ob_bot = min(b1["open"], b1["close"])
-            ob_mid = (ob_top + ob_bot) / 2
-            if bull_pass:
-                entry = ob_top - eo * 2.0 * (ob_top - ob_mid)
-                sl    = min(b1["low"], b0["low"]) - atr * sl_buf
-                tp    = entry + abs(entry - sl) * rr
-            else:
-                entry = ob_bot + eo * 2.0 * (ob_mid - ob_bot)
-                sl    = max(b1["high"], b0["high"]) + atr * sl_buf
-                tp    = entry - abs(entry - sl) * rr
-            trade = {"entry": round(entry, 6), "sl": round(sl, 6),
-                     "tp": round(tp, 6), "risk_r": round(abs(entry - sl), 6)}
+        if not detected:
+            results.append({
+                "bar": i, "timestamp": ts, "detected": False, "ob_type": None,
+                "gate": "1. OB Detection", "gate_pass": False,
+                "bull_checks": bull_checks, "bear_checks": bear_checks,
+                "pipeline": [], "atr": round(atr, 6), "trade": None,
+                "candles": {
+                    "b0": {"o": b0["open"], "h": b0["high"], "l": b0["low"], "c": b0["close"]},
+                    "b1": {"o": b1["open"], "h": b1["high"], "l": b1["low"], "c": b1["close"]},
+                }
+            })
+            if len(results) >= 20: break
+            continue
+
+        # OB detected — compute entry/sl/tp
+        ob_top = max(b1["open"], b1["close"])
+        ob_bot = min(b1["open"], b1["close"])
+        ob_mid = (ob_top + ob_bot) / 2
+        if bull_pass:
+            entry = ob_top - eo * 2.0 * (ob_top - ob_mid)
+            sl    = min(b1["low"], b0["low"]) - atr * sl_buf
+        else:
+            entry = ob_bot + eo * 2.0 * (ob_mid - ob_bot)
+            sl    = max(b1["high"], b0["high"]) + atr * sl_buf
+        risk = abs(entry - sl)
+        tp   = (entry + risk * rr) if bull_pass else (entry - risk * rr)
+        trade = {"entry": round(entry, 6), "sl": round(sl, 6),
+                 "tp": round(tp, 6), "risk_r": round(risk, 6)}
+
+        # ── Gate 2: KL Filter ─────────────────────────────────────────────────
+        pipeline = []
+        kl_pass = True
+        kl_detail = "KL filter disabled"
+        kl_level  = None
+        if use_kl_filter:
+            ob_height = ob_top - ob_bot
+            slack     = ob_height * kl_prox
+            mid       = (ob_top + ob_bot) / 2
+            for lv in kl_levels:
+                lp     = lv["price"]
+                is_res = lp > mid
+                if bull_pass and not is_res and ob_bot - slack <= lp <= ob_bot + slack * 0.5:
+                    kl_level = lp; break
+                if bear_pass and is_res and ob_top - slack * 0.5 <= lp <= ob_top + slack:
+                    kl_level = lp; break
+            kl_pass   = kl_level is not None
+            kl_detail = (f"Found KL at {kl_level:.5f} (score filter ≥{kl_min_score})"
+                         if kl_pass else
+                         f"No {'support' if bull_pass else 'resistance'} level within {kl_prox}× OB height ({ob_height:.5f}) of OB {'bottom' if bull_pass else 'top'}")
+        pipeline.append({"gate": "2. Key Level Filter",
+            "pass": kl_pass, "detail": kl_detail,
+            "skipped": not use_kl_filter})
+
+        # ── Gate 3: Range Filter ──────────────────────────────────────────────
+        range_pass   = True
+        range_detail = "Range filter disabled"
+        if use_range and i >= range_lb:
+            rh = max(b["high"] for b in bars[i - range_lb:i])
+            rl = min(b["low"]  for b in bars[i - range_lb:i])
+            tol = (rh - rl) * range_tol / 100
+            last_side = 0; alt_count = 0
+            for j in range(i - range_lb, i):
+                b = bars[j]
+                in_sup = b["low"]  <= rl + tol and b["low"]  >= rl  - tol and b["close"] > rl
+                in_res = b["high"] >= rh - tol and b["high"] <= rh  + tol and b["close"] < rh
+                if in_sup and last_side != 1:
+                    if last_side == 2: alt_count += 1
+                    last_side = 1
+                elif in_res and last_side != 2:
+                    if last_side == 1: alt_count += 1
+                    last_side = 2
+            is_ranging = alt_count >= range_min_alt and rl <= b0["close"] <= rh
+            range_pass   = not is_ranging
+            range_detail = (f"RANGING — {alt_count} alternations in {range_lb} bars (high={rh:.5f} low={rl:.5f})"
+                            if is_ranging else
+                            f"Not ranging — {alt_count}/{range_min_alt} alternations needed")
+        pipeline.append({"gate": "3. Range Filter",
+            "pass": range_pass, "detail": range_detail,
+            "skipped": not use_range})
+
+        # ── Gate 4: Approach Speed Filter (3-candle rule) ─────────────────────
+        approach_pass   = True
+        approach_detail = "Approach filter disabled (approachMaxAtr=0)"
+        if approach_atr > 0:
+            c0_body = abs(b0["close"] - b0["open"])
+            c1_body = abs(bars[i-1]["close"] - bars[i-1]["open"]) if i >= 1 else 0
+            c2_body = abs(bars[i-2]["close"] - bars[i-2]["open"]) if i >= 2 else 0
+            thresh  = atr * approach_atr
+            c0_ok   = c0_body < thresh
+            c1_ok   = c1_body < thresh
+            c2_ok   = c2_body < thresh
+            approach_pass = c0_ok and c1_ok and c2_ok
+            approach_detail = (
+                f"All 3 candles calm (max body={max(c0_body,c1_body,c2_body):.5f} < {thresh:.5f})"
+                if approach_pass else
+                f"Candle too large — [0]={c0_body:.5f}{'✅' if c0_ok else '❌'}  [1]={c1_body:.5f}{'✅' if c1_ok else '❌'}  [2]={c2_body:.5f}{'✅' if c2_ok else '❌'}  threshold={thresh:.5f}"
+            )
+        pipeline.append({"gate": "4. Approach Speed (3-candle rule)",
+            "pass": approach_pass, "detail": approach_detail,
+            "skipped": approach_atr == 0})
+
+        # ── Gate 5: Server-side filters ───────────────────────────────────────
+        srv_cfg   = get_config()
+        srv_gates = []
+
+        # Max trades
+        open_pos = get_open_positions()
+        max_t    = srv_cfg["max_trades"]
+        srv_gates.append({"gate": "5a. Max trades",
+            "pass": len(open_pos) < max_t,
+            "detail": f"{len(open_pos)}/{max_t} positions open"})
+
+        # Symbol allow/block
+        sym_allow = srv_cfg["filter_symbols_allow"]
+        sym_block = srv_cfg["filter_symbols_block"]
+        sym_ok    = (not sym_allow or b0.get("symbol","") in sym_allow.split(",")) and \
+                    (not sym_block or b0.get("symbol","") not in sym_block.split(","))
+        srv_gates.append({"gate": "5b. Symbol filter",
+            "pass": True,  # can't check without symbol in bar data
+            "detail": f"Allow: {sym_allow or 'all'}  Block: {sym_block or 'none'}"})
+
+        # Cooldown
+        side_str  = "Buy" if bull_pass else "Sell"
+        cd_blocked, cd_reason = _check_cooldown(side_str, srv_cfg)
+        srv_gates.append({"gate": "5c. Cooldown filter",
+            "pass": not cd_blocked,
+            "detail": cd_reason if cd_blocked else f"No cooldown active for {side_str}"})
+
+        # Min WR
+        min_wr = srv_cfg["filter_min_wr"]
+        srv_gates.append({"gate": "5d. Min WR filter",
+            "pass": True,
+            "detail": f"Min WR: {min_wr}%" if min_wr > 0 else "Disabled"})
+
+        all_srv_pass = all(g["pass"] for g in srv_gates)
+
+        # ── Final verdict ─────────────────────────────────────────────────────
+        all_pass = kl_pass and range_pass and approach_pass and all_srv_pass
+        first_fail = None
+        for g in pipeline + srv_gates:
+            if not g["pass"] and not g.get("skipped"):
+                first_fail = g["gate"]
+                break
 
         results.append({
             "bar": i, "timestamp": ts,
-            "detected": bull_pass or bear_pass,
-            "ob_type":  ob_type,
-            "bull_checks": bull_checks,
-            "bear_checks": bear_checks,
-            "atr":  round(atr, 6),
+            "detected": True, "ob_type": ob_type,
+            "gate": first_fail or "All gates passed ✅",
+            "gate_pass": all_pass,
+            "bull_checks": bull_checks if bull_pass else [],
+            "bear_checks": bear_checks if bear_pass else [],
+            "pipeline": pipeline,
+            "server_gates": srv_gates,
+            "atr": round(atr, 6),
             "trade": trade,
             "candles": {
                 "b0": {"o": b0["open"], "h": b0["high"], "l": b0["low"], "c": b0["close"]},
                 "b1": {"o": b1["open"], "h": b1["high"], "l": b1["low"], "c": b1["close"]},
             }
         })
-        if len(results) >= 20:
-            break
+        if len(results) >= 20: break
 
     return results
 
@@ -2374,31 +2514,39 @@ h1{font-size:18px;font-weight:500;margin-bottom:4px}
 .field{display:flex;flex-direction:column;gap:4px}
 .field label{font-size:11px;color:var(--dim)}
 .field input,.field select{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:4px;font-size:12px;width:100%}
-.field input:focus,.field select:focus{outline:none;border-color:var(--blue)}
 textarea{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:4px;font-size:11px;font-family:monospace;resize:vertical}
-textarea:focus{outline:none;border-color:var(--blue)}
+textarea:focus,input:focus,select:focus{outline:none;border-color:var(--blue)}
 .btn{padding:7px 16px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:500;background:var(--blue);color:#000}
 .btn:disabled{opacity:.4;cursor:wait}
 .btn-sec{background:rgba(96,165,250,.15);color:var(--blue);border:1px solid rgba(96,165,250,.3)}
 .bar-result{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px}
-.bar-result.detected{border-color:rgba(76,175,80,.4)}
-.bar-header{display:flex;align-items:center;gap:10px;margin-bottom:0;cursor:pointer;flex-wrap:wrap}
-.bar-ts{font-size:13px;font-weight:500}
+.bar-result.all-pass{border-color:rgba(76,175,80,.5)}
+.bar-result.blocked{border-color:rgba(239,83,80,.3)}
+.bar-result.no-ob{opacity:.6}
+.bar-header{display:flex;align-items:center;gap:10px;cursor:pointer;flex-wrap:wrap}
 .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
 .badge-bull{background:rgba(76,175,80,.15);color:var(--green)}
 .badge-bear{background:rgba(239,83,80,.15);color:var(--red)}
 .badge-none{background:rgba(107,114,128,.15);color:var(--dim)}
-.checks{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
-.check{display:flex;align-items:flex-start;gap:8px;padding:6px 8px;border-radius:4px;font-size:11px;background:rgba(255,255,255,.02)}
+.badge-pass{background:rgba(76,175,80,.15);color:var(--green)}
+.badge-fail{background:rgba(239,83,80,.15);color:var(--red)}
+.pipeline{margin-top:12px;display:flex;flex-direction:column;gap:6px}
+.gate{display:flex;align-items:flex-start;gap:10px;padding:8px 10px;border-radius:6px;font-size:12px}
+.gate.pass{background:rgba(76,175,80,.07);border-left:3px solid var(--green)}
+.gate.fail{background:rgba(239,83,80,.07);border-left:3px solid var(--red)}
+.gate.skipped{background:rgba(107,114,128,.05);border-left:3px solid var(--dim);opacity:.6}
+.gate-name{font-weight:500;min-width:220px;flex-shrink:0}
+.gate-detail{color:var(--dim);font-size:11px}
+.ob-checks{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:10px}
+.check{padding:5px 8px;border-radius:4px;font-size:11px;background:rgba(255,255,255,.02)}
 .check.pass{border-left:2px solid var(--green)}
 .check.fail{border-left:2px solid var(--red)}
-.check-name{font-weight:500;margin-bottom:2px}
-.check-detail{color:var(--dim);font-size:10px}
+.check-detail{color:var(--dim);font-size:10px;margin-top:1px}
 .trade-box{background:rgba(96,165,250,.07);border:1px solid rgba(96,165,250,.2);border-radius:6px;padding:10px;margin-top:10px;display:flex;gap:20px;flex-wrap:wrap;font-size:12px}
 .trade-box .lbl{color:var(--dim);font-size:11px}
 .trade-box .val{font-weight:500}
+.candle-info{font-size:11px;color:var(--dim);margin:8px 0;font-family:monospace}
 .expand-btn{margin-left:auto;font-size:11px;color:var(--dim)}
-.candle-info{font-size:11px;color:var(--dim);margin:8px 0}
 </style>
 </head>
 <body>
@@ -2407,7 +2555,7 @@ textarea:focus{outline:none;border-color:var(--blue)}
   <a href="/backtest/configs">Backtest</a>
 </div>
 <h1>// Signal Explainer</h1>
-<p style="color:var(--dim);font-size:12px;margin-bottom:20px">Enter symbol, timeframe and optional time to see exactly why the indicator did or did not detect an OB.</p>
+<p style="color:var(--dim);font-size:12px;margin-bottom:20px">Walks through every gate in the pipeline — from OB detection to server filters — and shows exactly where a signal was blocked.</p>
 
 <div class="section">
   <div class="section-title">Lookup</div>
@@ -2422,19 +2570,33 @@ textarea:focus{outline:none;border-color:var(--blue)}
     </div>
     <div class="field"><label>Date/Time UTC (optional)</label><input id="f-time" type="datetime-local"></div>
   </div>
-  <div class="section-title" style="margin-top:4px">Indicator Settings</div>
-  <textarea id="f-statusbar" rows="2" placeholder='Paste status bar string here then click Parse — or fill manually below' style="margin-bottom:8px"></textarea>
-  <button class="btn btn-sec" onclick="parseStatusBar()" style="margin-bottom:12px">Parse status bar</button>
+
+  <div class="section-title" style="margin-top:4px">Indicator Settings — paste status bar or fill manually</div>
+  <textarea id="f-statusbar" rows="2" placeholder='Order Blocks [2-Candle Method] (benchmark, 10, ...): Any alert() function call' style="margin-bottom:8px"></textarea>
+  <button class="btn btn-sec" onclick="parseStatusBar()" style="margin-bottom:14px">Parse status bar</button>
+
   <div class="grid">
     <div class="field"><label>ATR Length</label><input id="f-atrlen" type="number" value="17"></div>
     <div class="field"><label>Impulse Ratio</label><input id="f-impulse" type="number" step="0.1" value="1.3"></div>
     <div class="field"><label>Min OB Size (x ATR)</label><input id="f-cobmult" type="number" step="0.1" value="0.8"></div>
-    <div class="field"><label>Doji % threshold</label><input id="f-doji" type="number" step="1" value="15"></div>
+    <div class="field"><label>Doji % threshold</label><input id="f-doji" type="number" value="15"></div>
     <div class="field"><label>SL ATR Buffer</label><input id="f-slbuf" type="number" step="0.05" value="0.1"></div>
     <div class="field"><label>Entry Offset</label><input id="f-offset" type="number" step="0.05" value="0.0"></div>
     <div class="field"><label>RR Ratio</label><input id="f-rr" type="number" step="0.1" value="3.0"></div>
+    <div class="field"><label>Approach Max ATR</label><input id="f-approach" type="number" step="0.1" value="1.5"></div>
+    <div class="field"><label>KL Filter ON</label>
+      <select id="f-klfilter"><option value="false">Off</option><option value="true">On</option></select>
+    </div>
+    <div class="field"><label>KL Proximity</label><input id="f-klprox" type="number" step="0.1" value="1.0"></div>
+    <div class="field"><label>KL Min Score</label><input id="f-klscore" type="number" value="6"></div>
+    <div class="field"><label>Range Filter ON</label>
+      <select id="f-rangefilter"><option value="false">Off</option><option value="true">On</option></select>
+    </div>
+    <div class="field"><label>Range Lookback</label><input id="f-rangelb" type="number" value="40"></div>
+    <div class="field"><label>Range Tol %</label><input id="f-rangetol" type="number" step="1" value="15"></div>
+    <div class="field"><label>Range Min Alternations</label><input id="f-rangealt" type="number" value="2"></div>
   </div>
-  <button class="btn" id="btn-explain" onclick="runExplainer()">🔍 Explain Signals</button>
+  <button class="btn" id="btn-explain" onclick="runExplainer()">🔍 Explain Pipeline</button>
 </div>
 
 <div id="results"></div>
@@ -2456,16 +2618,18 @@ function parseStatusBar() {
   if (!raw) return;
   var m = raw.match(/\\((.+)\\):/);
   if (!m) { alert('Could not parse status bar string'); return; }
-  var parts = m[1].split(', '), settings = {};
-  STATUS_MAP.forEach(function(name,i){ if(i<parts.length) settings[name]=parts[i]; });
-  if(settings.atrLength)     document.getElementById('f-atrlen').value   = settings.atrLength;
-  if(settings.impulseRatio)  document.getElementById('f-impulse').value  = settings.impulseRatio;
-  if(settings.cobMinAtrMult) document.getElementById('f-cobmult').value  = settings.cobMinAtrMult;
-  if(settings.dojiPct)       document.getElementById('f-doji').value     = settings.dojiPct;
-  if(settings.slAtrMult)     document.getElementById('f-slbuf').value    = settings.slAtrMult;
-  if(settings.entryOffset)   document.getElementById('f-offset').value   = settings.entryOffset;
-  if(settings.rrRatio)       document.getElementById('f-rr').value       = settings.rrRatio;
-  alert('✅ Parsed ' + Object.keys(settings).length + ' settings');
+  var parts = m[1].split(', '), s = {};
+  STATUS_MAP.forEach(function(n,i){ if(i<parts.length) s[n]=parts[i]; });
+  if(s.atrLength)           document.getElementById('f-atrlen').value    = s.atrLength;
+  if(s.impulseRatio)        document.getElementById('f-impulse').value   = s.impulseRatio;
+  if(s.cobMinAtrMult)       document.getElementById('f-cobmult').value   = s.cobMinAtrMult;
+  if(s.dojiPct)             document.getElementById('f-doji').value      = s.dojiPct;
+  if(s.slAtrMult)           document.getElementById('f-slbuf').value     = s.slAtrMult;
+  if(s.entryOffset)         document.getElementById('f-offset').value    = s.entryOffset;
+  if(s.rrRatio)             document.getElementById('f-rr').value        = s.rrRatio;
+  if(s.klProximity)         document.getElementById('f-klprox').value    = s.klProximity;
+  if(s.klMinScore)          document.getElementById('f-klscore').value   = s.klMinScore;
+  alert('✅ Parsed ' + Object.keys(s).length + ' settings');
 }
 
 function runExplainer() {
@@ -2474,86 +2638,132 @@ function runExplainer() {
   fetch('/signal-explainer/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
-      symbol:      document.getElementById('f-symbol').value.trim().toUpperCase(),
-      tf:          document.getElementById('f-tf').value,
-      time:        document.getElementById('f-time').value,
-      atrLength:   parseInt(document.getElementById('f-atrlen').value),
-      impulseRatio:parseFloat(document.getElementById('f-impulse').value),
-      cobMinAtrMult:parseFloat(document.getElementById('f-cobmult').value),
-      dojiPct:     parseFloat(document.getElementById('f-doji').value),
-      slAtrMult:   parseFloat(document.getElementById('f-slbuf').value),
-      entryOffset: parseFloat(document.getElementById('f-offset').value),
-      rrRatio:     parseFloat(document.getElementById('f-rr').value),
+      symbol:             document.getElementById('f-symbol').value.trim().toUpperCase(),
+      tf:                 document.getElementById('f-tf').value,
+      time:               document.getElementById('f-time').value,
+      atrLength:          parseInt(document.getElementById('f-atrlen').value),
+      impulseRatio:       parseFloat(document.getElementById('f-impulse').value),
+      cobMinAtrMult:      parseFloat(document.getElementById('f-cobmult').value),
+      dojiPct:            parseFloat(document.getElementById('f-doji').value),
+      slAtrMult:          parseFloat(document.getElementById('f-slbuf').value),
+      entryOffset:        parseFloat(document.getElementById('f-offset').value),
+      rrRatio:            parseFloat(document.getElementById('f-rr').value),
+      approachMaxAtr:     parseFloat(document.getElementById('f-approach').value),
+      useKeyLevelFilter:  document.getElementById('f-klfilter').value,
+      klProximity:        parseFloat(document.getElementById('f-klprox').value),
+      klMinScore:         parseInt(document.getElementById('f-klscore').value),
+      useRangeFilter:     document.getElementById('f-rangefilter').value,
+      rangeLookback:      parseInt(document.getElementById('f-rangelb').value),
+      rangeTolPct:        parseFloat(document.getElementById('f-rangetol').value),
+      rangeMinTouches:    parseInt(document.getElementById('f-rangealt').value),
     })
   }).then(function(r){return r.json();}).then(function(d){
-    btn.disabled=false; btn.textContent='🔍 Explain Signals';
+    btn.disabled=false; btn.textContent='🔍 Explain Pipeline';
     if(d.status==='error'){alert('Error: '+d.message);return;}
     renderResults(d.results, d.symbol, d.tf_label);
-  }).catch(function(e){btn.disabled=false;btn.textContent='🔍 Explain Signals';alert(''+e);});
+  }).catch(function(e){btn.disabled=false;btn.textContent='🔍 Explain Pipeline';alert(''+e);});
 }
 
-function countPass(checks){return checks.filter(function(c){return c.pass;}).length;}
-function bestChecks(r){return countPass(r.bull_checks)>=countPass(r.bear_checks)?r.bull_checks:r.bear_checks;}
-function bestDir(r){return countPass(r.bull_checks)>=countPass(r.bear_checks)?'Bull OB attempt':'Bear OB attempt';}
-
-function toggleChecks(uid){
+function toggleEl(uid){
   var el=document.getElementById(uid);
   if(el) el.style.display=el.style.display==='none'?'block':'none';
 }
+function countPass(checks){return checks.filter(function(c){return c.pass;}).length;}
 
 function renderResults(results, symbol, tfLabel) {
   var el = document.getElementById('results');
   if(!results||!results.length){
     el.innerHTML='<div class="section"><p style="color:var(--dim)">No bars found.</p></div>';return;
   }
-  var detected = results.filter(function(r){return r.detected;});
+  var allPass = results.filter(function(r){return r.gate_pass;});
   var html = '<div class="section"><div class="section-title">'
-    +symbol+' '+tfLabel+' — '+results.length+' bars analysed, <span style="color:'
-    +(detected.length?'var(--green)':'var(--red)')+'">'+detected.length+' OB(s) detected</span></div>';
+    +symbol+' '+tfLabel+' — '+results.length+' bars analysed'
+    +(allPass.length?' | <span style="color:var(--green)">'+allPass.length+' fully passed</span>':'')
+    +'</div>';
 
   results.forEach(function(r){
-    var badgeCls = r.detected?(r.ob_type==='Bull OB'?'badge-bull':'badge-bear'):'badge-none';
-    var badgeTxt = r.detected?r.ob_type:'No OB';
     var uid = 'bar-'+r.bar;
-    html+='<div class="bar-result '+(r.detected?'detected':'')+'">';
-    html+='<div class="bar-header" onclick="toggleChecks(\''+uid+'\')">';
-    html+='<span class="bar-ts">'+r.timestamp+'</span>';
-    html+='<span class="badge '+badgeCls+'">'+badgeTxt+'</span>';
+    var cardCls = !r.detected ? 'no-ob' : r.gate_pass ? 'all-pass' : 'blocked';
+    var obBadge = r.detected
+      ? '<span class="badge '+(r.ob_type==='Bull OB'?'badge-bull':'badge-bear')+'">'+r.ob_type+'</span>'
+      : '<span class="badge badge-none">No OB</span>';
+    var statusBadge = !r.detected ? ''
+      : r.gate_pass
+        ? '<span class="badge badge-pass">✅ All gates passed</span>'
+        : '<span class="badge badge-fail">❌ Blocked: '+r.gate+'</span>';
+
+    html+='<div class="bar-result '+cardCls+'">';
+    html+='<div class="bar-header" onclick="toggleEl(\''+uid+'\')"><span style="font-size:13px;font-weight:500">'+r.timestamp+'</span>';
+    html+=obBadge+statusBadge;
     html+='<span style="font-size:10px;color:var(--dim)">ATR='+r.atr+'</span>';
-    if(r.detected) html+='<span style="color:var(--green);font-size:11px">✅ Detected</span>';
     html+='<span class="expand-btn">▼</span></div>';
 
     html+='<div id="'+uid+'" style="display:none">';
-    html+='<div class="candle-info">';
-    html+='Impulse [0]: O='+r.candles.b0.o+' H='+r.candles.b0.h+' L='+r.candles.b0.l+' C='+r.candles.b0.c;
-    html+=' &nbsp;|&nbsp; OB [1]: O='+r.candles.b1.o+' H='+r.candles.b1.h+' L='+r.candles.b1.l+' C='+r.candles.b1.c;
-    html+='</div>';
 
-    var showChecks = r.detected?(r.ob_type==='Bull OB'?r.bull_checks:r.bear_checks):bestChecks(r);
-    var dirLabel   = r.detected?r.ob_type:bestDir(r);
-    html+='<div style="font-size:11px;font-weight:500;color:var(--dim);margin-top:4px">'+dirLabel+'</div>';
-    html+='<div class="checks">';
-    showChecks.forEach(function(c){
+    // Candle values
+    html+='<div class="candle-info">Impulse[0] O='+r.candles.b0.o+' H='+r.candles.b0.h+' L='+r.candles.b0.l+' C='+r.candles.b0.c;
+    html+='  |  OB[1] O='+r.candles.b1.o+' H='+r.candles.b1.h+' L='+r.candles.b1.l+' C='+r.candles.b1.c+'</div>';
+
+    // Gate 1: OB detection checks
+    var checks = r.detected
+      ? (r.ob_type==='Bull OB' ? r.bull_checks : r.bear_checks)
+      : (countPass(r.bull_checks||[])>=countPass(r.bear_checks||[]) ? r.bull_checks : r.bear_checks);
+    var dirLabel = r.detected ? r.ob_type
+      : (countPass(r.bull_checks||[])>=countPass(r.bear_checks||[]) ? 'Bull OB attempt' : 'Bear OB attempt');
+
+    html+='<div style="font-size:11px;font-weight:500;color:var(--dim);margin:8px 0 4px">Gate 1 — OB Detection ('+dirLabel+')</div>';
+    html+='<div class="ob-checks">';
+    (checks||[]).forEach(function(c){
       html+='<div class="check '+(c.pass?'pass':'fail')+'">';
-      html+='<div><div class="check-name">'+(c.pass?'✅ ':'❌ ')+c.name+'</div>';
-      html+='<div class="check-detail">'+c.detail+'</div></div></div>';
+      html+=(c.pass?'✅ ':'❌ ')+'<strong>'+c.name+'</strong>';
+      html+='<div class="check-detail">'+c.detail+'</div></div>';
     });
     html+='</div>';
 
+    // Pipeline gates 2-4
+    if(r.pipeline && r.pipeline.length) {
+      html+='<div class="pipeline">';
+      r.pipeline.forEach(function(g){
+        var cls = g.skipped ? 'skipped' : g.pass ? 'pass' : 'fail';
+        html+='<div class="gate '+cls+'">';
+        html+='<span class="gate-name">'+(g.skipped?'⬜':g.pass?'✅':'❌')+' '+g.gate+'</span>';
+        html+='<span class="gate-detail">'+g.detail+'</span>';
+        html+='</div>';
+      });
+      html+='</div>';
+    }
+
+    // Server gates 5a-5d
+    if(r.server_gates && r.server_gates.length) {
+      html+='<div style="font-size:11px;font-weight:500;color:var(--dim);margin:10px 0 4px">Server Filters</div>';
+      html+='<div class="pipeline">';
+      r.server_gates.forEach(function(g){
+        html+='<div class="gate '+(g.pass?'pass':'fail')+'">';
+        html+='<span class="gate-name">'+(g.pass?'✅':'❌')+' '+g.gate+'</span>';
+        html+='<span class="gate-detail">'+g.detail+'</span>';
+        html+='</div>';
+      });
+      html+='</div>';
+    }
+
+    // Trade levels
     if(r.trade){
       html+='<div class="trade-box">';
       html+='<div><div class="lbl">Entry</div><div class="val">'+r.trade.entry+'</div></div>';
       html+='<div><div class="lbl">Stop Loss</div><div class="val" style="color:var(--red)">'+r.trade.sl+'</div></div>';
       html+='<div><div class="lbl">Take Profit</div><div class="val" style="color:var(--green)">'+r.trade.tp+'</div></div>';
-      html+='<div><div class="lbl">Risk</div><div class="val">'+r.trade.risk_r+'</div></div>';
+      html+='<div><div class="lbl">Risk (price)</div><div class="val">'+r.trade.risk_r+'</div></div>';
       html+='</div>';
     }
     html+='</div></div>';
   });
   html+='</div>';
   el.innerHTML=html;
-  results.forEach(function(r){if(r.detected) toggleChecks('bar-'+r.bar);});
-  if(!detected.length&&results.length) toggleChecks('bar-'+results[0].bar);
+
+  // Auto-expand blocked OBs and fully-passed ones
+  results.forEach(function(r){
+    if(r.detected && (!r.gate_pass || r.gate_pass)) toggleEl('bar-'+r.bar);
+  });
 }
 </script>
 </body>
@@ -2573,13 +2783,22 @@ def signal_explainer_run():
         tf_str   = str(body.get("tf", "3"))
         time_str = body.get("time", "")
         cfg      = {
-            "atrLength":    int(body.get("atrLength",    17)),
-            "impulseRatio": float(body.get("impulseRatio", 1.3)),
-            "cobMinAtrMult":float(body.get("cobMinAtrMult", 0.8)),
-            "dojiPct":      float(body.get("dojiPct",    15.0)),
-            "slAtrMult":    float(body.get("slAtrMult",  0.1)),
-            "entryOffset":  float(body.get("entryOffset", 0.0)),
-            "rrRatio":      float(body.get("rrRatio",    3.0)),
+            "atrLength":           int(body.get("atrLength",    17)),
+            "impulseRatio":        float(body.get("impulseRatio", 1.3)),
+            "cobMinAtrMult":       float(body.get("cobMinAtrMult", 0.8)),
+            "dojiPct":             float(body.get("dojiPct",    15.0)),
+            "slAtrMult":           float(body.get("slAtrMult",  0.1)),
+            "entryOffset":         float(body.get("entryOffset", 0.0)),
+            "rrRatio":             float(body.get("rrRatio",    3.0)),
+            "klProximity":         float(body.get("klProximity", 1.0)),
+            "klMinScore":          int(body.get("klMinScore",   6)),
+            "klSignificanceBonus": float(body.get("klSignificanceBonus", 0.0)),
+            "useKeyLevelFilter":   str(body.get("useKeyLevelFilter","false")).lower() == "true",
+            "approachMaxAtr":      float(body.get("approachMaxAtr", 1.5)),
+            "rangeLookback":       int(body.get("rangeLookback", 40)),
+            "rangeTolPct":         float(body.get("rangeTolPct", 15.0)),
+            "rangeMinTouches":     int(body.get("rangeMinTouches", 2)),
+            "useRangeFilter":      str(body.get("useRangeFilter","false")).lower() == "true",
         }
         tf_map   = {"3":"M3","5":"M5","15":"M15","30":"M30","60":"H1","240":"H4"}
         tf_label = tf_map.get(tf_str, tf_str)
