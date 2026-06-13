@@ -2930,6 +2930,171 @@ ANALYSIS_HTML = """
 </div>
 {% endif %}
 
+<div class="section">
+  <div class="section-title">Win rate over time</div>
+  <div style="display:flex;gap:20px;margin-bottom:10px;font-size:11px;color:var(--dim)">
+    <span><span style="display:inline-block;width:20px;height:2px;background:#42a5f5;vertical-align:middle;margin-right:4px"></span>Rolling 20</span>
+    <span><span style="display:inline-block;width:20px;height:2px;background:rgba(255,255,255,0.25);vertical-align:middle;margin-right:4px"></span>Cumulative</span>
+    <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4caf50;vertical-align:middle;margin-right:4px"></span>Win</span>
+    <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef5350;vertical-align:middle;margin-right:4px"></span>Loss</span>
+  </div>
+  <canvas id="wr-timeline" height="200"></canvas>
+  <div style="margin-top:20px">
+    <div style="font-size:11px;font-weight:500;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">Cumulative PnL (USDT)</div>
+    <canvas id="pnl-timeline" height="120"></canvas>
+  </div>
+</div>
+
+<script>
+(function() {
+  var tl = {{ timeline|tojson }};
+  if (!tl || !tl.length) return;
+
+  var labels   = tl.map(function(d){ return '#' + d.i; });
+  var rollWR   = tl.map(function(d){ return d.roll_wr; });
+  var cumWR    = tl.map(function(d){ return d.cum_wr; });
+  var cumPnl   = tl.map(function(d){ return d.cum_pnl; });
+  var outcomes = tl.map(function(d){ return d.outcome; });
+  var symbols  = tl.map(function(d){ return d.symbol; });
+
+  // ── WR Timeline ──────────────────────────────────────────────────────────
+  var wrCanvas = document.getElementById('wr-timeline');
+  wrCanvas.style.width = '100%';
+  wrCanvas.width = wrCanvas.offsetWidth || 800;
+  var wCtx = wrCanvas.getContext('2d');
+  var W = wrCanvas.width, H = wrCanvas.height;
+  var pad = {top:10, right:10, bottom:30, left:36};
+  var cw = W - pad.left - pad.right;
+  var ch = H - pad.top - pad.bottom;
+
+  function wrX(i) { return pad.left + (i / (tl.length - 1 || 1)) * cw; }
+  function wrY(v) { return pad.top + (1 - v / 100) * ch; }
+
+  // Grid lines
+  wCtx.strokeStyle = 'rgba(255,255,255,0.05)';
+  wCtx.lineWidth = 1;
+  [0, 25, 50, 75, 100].forEach(function(v) {
+    var y = wrY(v);
+    wCtx.beginPath(); wCtx.moveTo(pad.left, y); wCtx.lineTo(W - pad.right, y); wCtx.stroke();
+    wCtx.fillStyle = '#888'; wCtx.font = '10px sans-serif'; wCtx.textAlign = 'right';
+    wCtx.fillText(v + '%', pad.left - 4, y + 3);
+  });
+
+  // Break-even line at 28%
+  wCtx.strokeStyle = 'rgba(255,167,38,0.3)';
+  wCtx.setLineDash([4, 4]);
+  var beY = wrY(28);
+  wCtx.beginPath(); wCtx.moveTo(pad.left, beY); wCtx.lineTo(W - pad.right, beY); wCtx.stroke();
+  wCtx.setLineDash([]);
+  wCtx.fillStyle = 'rgba(255,167,38,0.6)'; wCtx.font = '9px sans-serif'; wCtx.textAlign = 'left';
+  wCtx.fillText('break-even ~28%', pad.left + 4, beY - 3);
+
+  // Cumulative WR line
+  wCtx.strokeStyle = 'rgba(255,255,255,0.2)';
+  wCtx.lineWidth = 1;
+  wCtx.beginPath();
+  tl.forEach(function(d, i) { i === 0 ? wCtx.moveTo(wrX(i), wrY(d.cum_wr)) : wCtx.lineTo(wrX(i), wrY(d.cum_wr)); });
+  wCtx.stroke();
+
+  // Rolling WR line
+  wCtx.strokeStyle = '#42a5f5';
+  wCtx.lineWidth = 2;
+  wCtx.beginPath();
+  tl.forEach(function(d, i) { i === 0 ? wCtx.moveTo(wrX(i), wrY(d.roll_wr)) : wCtx.lineTo(wrX(i), wrY(d.roll_wr)); });
+  wCtx.stroke();
+
+  // Outcome dots
+  tl.forEach(function(d, i) {
+    wCtx.beginPath();
+    wCtx.arc(wrX(i), wrY(d.roll_wr), 3, 0, Math.PI * 2);
+    wCtx.fillStyle = d.outcome === 'tp' ? '#4caf50' : '#ef5350';
+    wCtx.fill();
+  });
+
+  // X-axis labels (every ~20 trades)
+  wCtx.fillStyle = '#888'; wCtx.font = '10px sans-serif'; wCtx.textAlign = 'center';
+  tl.forEach(function(d, i) {
+    if (i === 0 || (i + 1) % 20 === 0 || i === tl.length - 1) {
+      wCtx.fillText(d.date || ('#' + d.i), wrX(i), H - 4);
+    }
+  });
+
+  // Tooltip
+  var tooltip = document.createElement('div');
+  tooltip.style.cssText = 'position:fixed;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;font-size:11px;pointer-events:none;display:none;z-index:999;color:#e8e8e8;line-height:1.6';
+  document.body.appendChild(tooltip);
+
+  function showTooltip(canvas, e, data, xFn, yFn) {
+    var rect = canvas.getBoundingClientRect();
+    var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    var idx = Math.round((mx - pad.left) / cw * (tl.length - 1));
+    idx = Math.max(0, Math.min(tl.length - 1, idx));
+    var d = data[idx];
+    if (!d) return;
+    tooltip.innerHTML = '<strong>#' + d.i + ' — ' + d.date + '</strong><br>'
+      + d.symbol + ' ' + d.side + ' <span style="color:' + (d.outcome==='tp'?'#4caf50':'#ef5350') + '">' + (d.outcome==='tp'?'WIN':'LOSS') + '</span><br>'
+      + 'Roll WR: <strong>' + d.roll_wr + '%</strong> &nbsp; Cum WR: ' + d.cum_wr + '%<br>'
+      + 'PnL: <span style="color:' + (d.pnl_r>=0?'#4caf50':'#ef5350') + '">' + (d.pnl_r>=0?'+':'') + d.pnl_r + '</span>'
+      + ' &nbsp; Cum: <span style="color:' + (d.cum_pnl>=0?'#4caf50':'#ef5350') + '">' + (d.cum_pnl>=0?'+':'') + d.cum_pnl + '</span>';
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 12) + 'px';
+    tooltip.style.top  = (e.clientY - 10) + 'px';
+  }
+
+  wrCanvas.addEventListener('mousemove', function(e) { showTooltip(wrCanvas, e, tl, wrX, wrY); });
+  wrCanvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
+
+  // ── PnL Timeline ─────────────────────────────────────────────────────────
+  var pnlCanvas = document.getElementById('pnl-timeline');
+  pnlCanvas.style.width = '100%';
+  pnlCanvas.width = pnlCanvas.offsetWidth || 800;
+  var pCtx = pnlCanvas.getContext('2d');
+  var PH = pnlCanvas.height;
+  var pch = PH - pad.top - pad.bottom;
+
+  var minPnl = Math.min(0, Math.min.apply(null, cumPnl));
+  var maxPnl = Math.max(0, Math.max.apply(null, cumPnl));
+  var pRange = maxPnl - minPnl || 1;
+
+  function pX(i) { return pad.left + (i / (tl.length - 1 || 1)) * cw; }
+  function pY(v) { return pad.top + (1 - (v - minPnl) / pRange) * pch; }
+
+  // Zero line
+  pCtx.strokeStyle = 'rgba(255,255,255,0.15)';
+  pCtx.lineWidth = 1;
+  var zeroY = pY(0);
+  pCtx.beginPath(); pCtx.moveTo(pad.left, zeroY); pCtx.lineTo(W - pad.right, zeroY); pCtx.stroke();
+  pCtx.fillStyle = '#888'; pCtx.font = '10px sans-serif'; pCtx.textAlign = 'right';
+  pCtx.fillText('0', pad.left - 4, zeroY + 3);
+  [minPnl, maxPnl].forEach(function(v) {
+    var y = pY(v);
+    pCtx.fillText((v >= 0 ? '+' : '') + v.toFixed(1), pad.left - 4, y + 3);
+  });
+
+  // Fill area
+  pCtx.beginPath();
+  pCtx.moveTo(pX(0), pY(0));
+  tl.forEach(function(d, i) { pCtx.lineTo(pX(i), pY(d.cum_pnl)); });
+  pCtx.lineTo(pX(tl.length - 1), pY(0));
+  pCtx.closePath();
+  var grad = pCtx.createLinearGradient(0, pad.top, 0, PH - pad.bottom);
+  grad.addColorStop(0, cumPnl[cumPnl.length-1] >= 0 ? 'rgba(76,175,80,0.2)' : 'rgba(239,83,80,0.2)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  pCtx.fillStyle = grad;
+  pCtx.fill();
+
+  // PnL line
+  pCtx.strokeStyle = cumPnl[cumPnl.length-1] >= 0 ? '#4caf50' : '#ef5350';
+  pCtx.lineWidth = 2;
+  pCtx.beginPath();
+  tl.forEach(function(d, i) { i === 0 ? pCtx.moveTo(pX(i), pY(d.cum_pnl)) : pCtx.lineTo(pX(i), pY(d.cum_pnl)); });
+  pCtx.stroke();
+
+  pnlCanvas.addEventListener('mousemove', function(e) { showTooltip(pnlCanvas, e, tl, pX, pY); });
+  pnlCanvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
+})();
+</script>
+
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
 
 <div class="section">
@@ -3548,7 +3713,29 @@ def _analyse_trades(trades):
     best_tf_sym,  worst_tf_sym  = best_worst(by_tf_symbol)
     best_src_sym, worst_src_sym = best_worst(by_src_symbol)
 
+    # ── Win rate timeline — rolling 20-trade window + cumulative ─────────────
+    timeline = []
+    sorted_closed = sorted(closed, key=lambda t: t.get("opened_at") or "")
+    cum_wins = 0
+    for idx, t in enumerate(sorted_closed):
+        cum_wins += 1 if t["outcome"] == "tp" else 0
+        cum_wr    = round(cum_wins / (idx + 1) * 100, 1)
+        window    = sorted_closed[max(0, idx - 19): idx + 1]
+        roll_wins = sum(1 for x in window if x["outcome"] == "tp")
+        roll_wr   = round(roll_wins / len(window) * 100, 1)
+        date_str  = (t.get("opened_at") or "")[:10]
+        cum_pnl   = round(sum(float(x.get("pnl") or 0) for x in sorted_closed[:idx+1]), 2)
+        timeline.append({
+            "i": idx + 1, "date": date_str,
+            "outcome": t["outcome"], "symbol": t["symbol"],
+            "side": t.get("side", ""),
+            "cum_wr": cum_wr, "roll_wr": roll_wr,
+            "pnl_r": round(float(t.get("pnl") or 0), 2),
+            "cum_pnl": cum_pnl,
+        })
+
     return {
+        "timeline":       timeline,
         "total_closed":   total_closed,
         "total_known":    len(closed_known),
         "total_imported": total_closed - len(closed_known),
