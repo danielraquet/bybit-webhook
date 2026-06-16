@@ -113,8 +113,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 .badge-sl{background:rgba(248,113,113,0.15);color:var(--red)}
 .badge-open{background:rgba(96,165,250,0.15);color:var(--blue)}
 .badge-skipped{background:rgba(107,114,128,0.15);color:var(--dim)}
-.img-preview{position:fixed;z-index:9999;pointer-events:none;display:none;border:1px solid var(--border);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6);max-width:360px;max-height:240px;background:var(--card)}
-.img-preview img{width:100%;height:auto;display:block;max-height:240px;object-fit:contain}
+.img-preview{position:fixed;z-index:9999;pointer-events:none;display:none;border:1px solid var(--border);border-radius:6px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,0.6);max-width:720px;max-height:480px;background:var(--card)}
+.img-preview img{width:100%;height:auto;display:block;max-height:480px;object-fit:contain}
 .pnl-pos{color:var(--green)}.pnl-neg{color:var(--red)}
 .editable{cursor:pointer;border-bottom:1px dashed rgba(107,114,128,0.5)}
 .editable:hover{border-bottom-color:var(--blue);color:var(--blue)}
@@ -445,21 +445,25 @@ document.addEventListener('click', function(e) {
     timer = setTimeout(function() {
       img.src = el.dataset.preview;
       preview.style.display = 'block';
-      var x = e.clientX + 16, y = e.clientY + 16;
-      if (x + 370 > window.innerWidth)  x = e.clientX - 376;
-      if (y + 250 > window.innerHeight) y = e.clientY - 256;
-      preview.style.left = x + 'px';
-      preview.style.top  = y + 'px';
+      positionPreview(e.clientX, e.clientY);
     }, 200);
   });
   document.addEventListener('mousemove', function(e) {
     if (preview.style.display === 'none') return;
-    var x = e.clientX + 16, y = e.clientY + 16;
-    if (x + 370 > window.innerWidth)  x = e.clientX - 376;
-    if (y + 250 > window.innerHeight) y = e.clientY - 256;
+    positionPreview(e.clientX, e.clientY);
+  });
+  function positionPreview(cx, cy) {
+    var margin = 8;
+    var w = preview.offsetWidth  || 720;
+    var h = preview.offsetHeight || 480;
+    var x = cx + 16, y = cy + 16;
+    if (x + w + margin > window.innerWidth)  x = cx - w - 16;
+    if (y + h + margin > window.innerHeight) y = cy - h - 16;
+    x = Math.max(margin, Math.min(x, window.innerWidth  - w - margin));
+    y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
     preview.style.left = x + 'px';
     preview.style.top  = y + 'px';
-  });
+  }
   document.addEventListener('mouseout', function(e) {
     if (!e.target.closest('[data-preview]')) return;
     clearTimeout(timer);
