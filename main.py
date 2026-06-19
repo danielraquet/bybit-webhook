@@ -739,7 +739,31 @@ def calculate_qty(symbol: str, entry: float, sl: float, balance_pct: float, leve
 
     actual_risk = qty * sl_distance
     margin      = qty * entry / leverage
-    log.info(f"{symbol}: balance={balance:.2f} risk={risk_amount:.2f} USDT sl_dist={sl_distance:.6f} qty={qty} margin={margin:.2f} USDT actual_risk={actual_risk:.2f} USDT")
+
+    # ── Liquidation safety check ──────────────────────────────────────────────
+    # Approximate liquidation distance (simplified, ignores maintenance margin)
+    liq_distance  = entry / leverage
+    safety_ratio  = liq_distance / sl_distance if sl_distance > 0 else 999
+    liq_price_long  = round(entry * (1 - 1 / leverage), 6)
+    liq_price_short = round(entry * (1 + 1 / leverage), 6)
+
+    liq_warning = ""
+    if safety_ratio < 2:
+        liq_warning = f" ⚠️ DANGER: liquidation only {safety_ratio:.1f}× SL distance away! SL may not trigger before liquidation."
+    elif safety_ratio < 5:
+        liq_warning = f" ⚠️ WARNING: liquidation {safety_ratio:.1f}× SL distance away — consider reducing leverage."
+
+    log.info(
+        f"{symbol}: balance={balance:.2f} risk={risk_amount:.2f} USDT "
+        f"sl_dist={sl_distance:.6f} qty={qty} margin={margin:.2f} USDT "
+        f"actual_risk={actual_risk:.2f} USDT | "
+        f"liq≈{liq_price_long} (long) / {liq_price_short} (short) "
+        f"safety={safety_ratio:.1f}× SL dist{liq_warning}"
+    )
+
+    if safety_ratio < 2:
+        log.error(f"{symbol}: ORDER BLOCKED — liquidation too close to SL (ratio={safety_ratio:.1f}×). Increase SL buffer or reduce leverage.")
+        return 0.0
     return qty
 
 
