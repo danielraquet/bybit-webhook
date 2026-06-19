@@ -631,16 +631,28 @@ def get_available_balance() -> float:
         for item in resp.get("result", {}).get("list", []):
             for coin in item.get("coin", []):
                 if coin.get("coin") == "USDT":
-                    # availableToWithdraw = free margin (excludes margin locked in open positions)
-                    # walletBalance = total balance including locked margin — do NOT use this
-                    avail = coin.get("availableToWithdraw") or coin.get("availableToBorrow") or 0
-                    bal   = float(avail)
-                    wallet = float(coin.get("walletBalance") or 0)
-                    log.info(f"Balance: {bal:.2f} USDT free / {wallet:.2f} USDT total (live)")
-                    if bal >= 0:
-                        _last_known_balance = bal
-                        _last_balance_time  = time.time()
-                        return bal
+                    log.info(f"Bybit wallet fields: availableToWithdraw={coin.get('availableToWithdraw')} walletBalance={coin.get('walletBalance')} equity={coin.get('equity')} totalPositionIM={coin.get('totalPositionIM')} usedMargin={coin.get('usedMargin')} availableToBorrow={coin.get('availableToBorrow')}")
+            for coin in item.get("coin", []):
+                if coin.get("coin") == "USDT":
+                    wallet  = float(coin.get("walletBalance")       or 0)
+                    avail   = float(coin.get("availableToWithdraw") or 0)
+                    equity  = float(coin.get("equity")              or wallet)
+                    locked  = float(coin.get("totalPositionIM")     or
+                                    coin.get("usedMargin")          or 0)
+
+                    # availableToWithdraw can be 0 in cross-margin mode even when funds exist.
+                    # Fall back to equity - locked margin in that case.
+                    if avail > 0:
+                        bal = avail
+                    elif equity > 0 and locked >= 0:
+                        bal = max(0.0, equity - locked)
+                    else:
+                        bal = wallet
+
+                    log.info(f"Balance: {bal:.2f} USDT free / {wallet:.2f} USDT total (live) [equity={equity:.2f} locked={locked:.2f}]")
+                    _last_known_balance = bal
+                    _last_balance_time  = time.time()
+                    return bal
     except Exception as e:
         log.warning(f"Error fetching balance: {e}")
         if _last_known_balance > 0:
@@ -1594,7 +1606,8 @@ def webhook():
         trade_balance = get_available_balance()  # store for Google Sheets
         qty = calculate_qty(symbol, entry, sl, actual_bal_pct, actual_leverage)
         if qty <= 0:
-            return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
+            log.warning(f"{symbol}: qty=0, skipping order (balance too low or SL too tight)")
+            return jsonify({"status": "skipped", "message": "Insufficient balance or invalid qty — order not placed"}), 200
 
         set_leverage(symbol, actual_leverage)
 
