@@ -175,7 +175,7 @@ var STATUS_FILTER = 'all';
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','Outcome','Source','Variant','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -245,7 +245,7 @@ function renderTrades(trades){
     var num = trades.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
-        + '<td colspan="22"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<td colspan="17"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
         + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
         + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
         + '</td></tr>';
@@ -258,14 +258,6 @@ function renderTrades(trades){
     var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
     var notesFull  = (t.notes||'').split('|sheet_row:')[0];
     var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
-    var obSizeAtr = null, impulseActual = null;
-    try {
-      var notesObj = JSON.parse(notesFull.split('|')[0].trim());
-      if (notesObj.obSizeAtr != null)          obSizeAtr     = parseFloat(notesObj.obSizeAtr);
-      if (notesObj.impulseRatioActual != null) impulseActual = parseFloat(notesObj.impulseRatioActual);
-    } catch(e) {}
-    var obSizeStr  = (obSizeAtr     != null && !isNaN(obSizeAtr))     ? obSizeAtr.toFixed(2)     + 'x' : '—';
-    var impulseStr = (impulseActual != null && !isNaN(impulseActual)) ? impulseActual.toFixed(2) + 'x' : '—';
     var mediaHtml = '';
     if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" data-preview="'+esc(l.trim())+'" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
     mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
@@ -293,8 +285,6 @@ function renderTrades(trades){
       + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
-      + '<td class="dim">'+obSizeStr+'</td>'
-      + '<td class="dim">'+impulseStr+'</td>'
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
@@ -1235,6 +1225,11 @@ def webhook_last():
 # Store last 5 webhook payloads for debugging
 _last_webhooks = []
 
+# Deduplication cache: key = (symbol, side, entry) -> timestamp of last attempt
+# Blocks identical signals within DEDUP_WINDOW seconds to prevent TradingView multi-fire
+_dedup_cache = {}
+DEDUP_WINDOW = 90  # seconds
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -1339,6 +1334,19 @@ def webhook():
     test_leverage = int(data.get("testLeverage", 2))
     log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds} testMode={test_mode}")
 
+    # ── Deduplication guard — block identical signal within DEDUP_WINDOW seconds ─
+    _dedup_key = (symbol, side, round(entry, 6))
+    _now = time.time()
+    _last_seen = _dedup_cache.get(_dedup_key)
+    if _last_seen and (_now - _last_seen) < DEDUP_WINDOW:
+        _elapsed = int(_now - _last_seen)
+        log.warning(f"Duplicate signal ignored: {symbol} {side} @ {entry} — same signal {_elapsed}s ago (window={DEDUP_WINDOW}s)")
+        return jsonify({"status": "skipped", "message": f"Duplicate signal — same entry seen {_elapsed}s ago"}), 200
+    _dedup_cache[_dedup_key] = _now
+    # Prune stale entries to avoid unbounded growth
+    for k in [k for k, v in _dedup_cache.items() if _now - v > DEDUP_WINDOW * 2]:
+        del _dedup_cache[k]
+
     if not all([symbol, side, entry, sl, tp]):
         msg = f"Missing required fields — got: {data}"
         log.error(msg)
@@ -1433,8 +1441,6 @@ def webhook():
             "slBuf":       data.get("slBuf"),
             "minImpulse":  data.get("minImpulse"),
             "entryOffset": data.get("entryOffset"),
-            "obSizeAtr":   data.get("obSizeAtr"),
-            "impulseRatioActual": data.get("impulseRatioActual"),
         }) if data.get("rr") else None
         # Use a placeholder order_id — will be matched by WebSocket on fill
         placeholder_id = f"bybit_native_{symbol}_{side}_{int(datetime.utcnow().timestamp())}"
@@ -1604,8 +1610,6 @@ def webhook():
                                      "slBuf":       data.get("slBuf"),
                                      "minImpulse":  data.get("minImpulse"),
                                      "entryOffset": data.get("entryOffset"),
-                                     "obSizeAtr":   data.get("obSizeAtr"),
-                                     "impulseRatioActual": data.get("impulseRatioActual"),
                                  }) if data.get("rr") else None)
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
                 # This avoids cluttering the sheet with trades that never fill
@@ -1633,10 +1637,12 @@ def webhook():
             else:
                 msg = resp.get("retMsg", "Unknown error")
                 log.error(f"❌ Bybit error {ret_code}: {msg}")
+                log_order_skipped(symbol, side, entry, sl, tp, f"Bybit {ret_code}: {msg}")
                 return jsonify({"status": "error", "message": msg, "code": ret_code}), 400
 
         except Exception as e:
             log.error(f"Exception placing order: {e}")
+            log_order_skipped(symbol, side, entry, sl, tp, f"Exception: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -3113,139 +3119,6 @@ ANALYSIS_HTML = """
 })();
 </script>
 
-<div class="section">
-  <div class="section-title">Performance by hour of day (UTC)</div>
-  <p style="color:var(--dim);font-size:11px;margin-bottom:12px">Click hours to select a preferred trading window, then save it below.</p>
-  <canvas id="hour-chart" height="180"></canvas>
-  <div style="display:flex;gap:16px;margin-top:10px;font-size:11px;color:var(--dim)">
-    <span><span style="display:inline-block;width:10px;height:10px;background:#4caf50;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR ≥ 40%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#ffa726;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR 25–40%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#ef5350;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR &lt; 25%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#2a2a2a;vertical-align:middle;margin-right:4px;border-radius:2px"></span>No data</span>
-  </div>
-
-  <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
-    <div class="section-title" style="margin-bottom:8px">Preferred trading hours (UTC)</div>
-    <p style="color:var(--dim);font-size:11px;margin-bottom:10px">Select hours below — clicking toggles them on/off. This only affects this dashboard; to actually restrict live alerts, copy the selected hours into the indicator's Alert Schedule settings.</p>
-    <div id="hour-selector" style="display:grid;grid-template-columns:repeat(12,1fr);gap:4px;margin-bottom:12px;max-width:600px"></div>
-    <div style="display:flex;gap:10px;align-items:center">
-      <button id="hour-save-btn" style="padding:7px 16px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:500;background:#42a5f5;color:#000">Save selection</button>
-      <button id="hour-clear-btn" style="padding:7px 16px;border-radius:6px;border:1px solid var(--border);cursor:pointer;font-size:12px;background:transparent;color:var(--dim)">Clear</button>
-      <span id="hour-save-status" style="font-size:11px;color:var(--dim)"></span>
-    </div>
-  </div>
-</div>
-
-<script>
-(function() {
-  var byHour = {{ by_hour|tojson }};
-  if (!byHour || !byHour.length) return;
-
-  var canvas = document.getElementById('hour-chart');
-  canvas.style.width = '100%';
-  canvas.width = canvas.offsetWidth || 800;
-  var ctx = canvas.getContext('2d');
-  var W = canvas.width, H = canvas.height;
-  var pad = {top:10, right:10, bottom:24, left:36};
-  var cw = W - pad.left - pad.right;
-  var ch = H - pad.top - pad.bottom;
-  var barW = cw / 24;
-
-  var maxAbsPnl = Math.max(1, Math.max.apply(null, byHour.map(function(h){ return Math.abs(h.pnl); })));
-
-  function wrColor(h) {
-    if (h.total === 0) return '#2a2a2a';
-    if (h.wr >= 40) return '#4caf50';
-    if (h.wr >= 25) return '#ffa726';
-    return '#ef5350';
-  }
-
-  // Zero line in middle
-  var zeroY = pad.top + ch / 2;
-  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-  ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(W - pad.right, zeroY); ctx.stroke();
-  ctx.fillStyle = '#888'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillText('0', pad.left - 4, zeroY + 3);
-
-  byHour.forEach(function(h, i) {
-    var x = pad.left + i * barW;
-    var barH = (Math.abs(h.pnl) / maxAbsPnl) * (ch / 2 - 4);
-    var y = h.pnl >= 0 ? zeroY - barH : zeroY;
-    ctx.fillStyle = wrColor(h);
-    ctx.fillRect(x + 1, y, barW - 2, Math.max(1, barH));
-
-    // Hour label every 2 hours
-    if (i % 2 === 0) {
-      ctx.fillStyle = '#888'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(h.hour, x + barW / 2, H - 8);
-    }
-  });
-
-  // Tooltip
-  var tooltip = document.createElement('div');
-  tooltip.style.cssText = 'position:fixed;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;font-size:11px;pointer-events:none;display:none;z-index:999;color:#e8e8e8;line-height:1.6';
-  document.body.appendChild(tooltip);
-
-  canvas.addEventListener('mousemove', function(e) {
-    var rect = canvas.getBoundingClientRect();
-    var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    var idx = Math.floor((mx - pad.left) / barW);
-    if (idx < 0 || idx > 23) { tooltip.style.display = 'none'; return; }
-    var h = byHour[idx];
-    tooltip.innerHTML = '<strong>' + h.label + ' UTC</strong><br>'
-      + 'WR: <strong style="color:' + wrColor(h) + '">' + h.wr + '%</strong> (' + h.wins + 'W / ' + h.losses + 'L)<br>'
-      + 'PnL: <span style="color:' + (h.pnl>=0?'#4caf50':'#ef5350') + '">' + (h.pnl>=0?'+':'') + h.pnl + '</span>';
-    tooltip.style.display = 'block';
-    tooltip.style.left = (e.clientX + 12) + 'px';
-    tooltip.style.top  = (e.clientY - 10) + 'px';
-  });
-  canvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
-
-  // ── Hour selector grid ──────────────────────────────────────────────────
-  var selector = document.getElementById('hour-selector');
-  var selected = {};
-
-  fetch('/analysis/preferred-hours').then(function(r){return r.json();}).then(function(d){
-    (d.hours || []).forEach(function(h){ selected[h] = true; });
-    renderSelector();
-  }).catch(function(){ renderSelector(); });
-
-  function renderSelector() {
-    selector.innerHTML = '';
-    byHour.forEach(function(h) {
-      var btn = document.createElement('div');
-      var isSel = !!selected[h.hour];
-      btn.textContent = h.label;
-      btn.style.cssText = 'padding:6px 4px;text-align:center;font-size:11px;border-radius:4px;cursor:pointer;border:1px solid ' +
-        (isSel ? '#42a5f5' : 'var(--border)') + ';background:' + (isSel ? 'rgba(66,165,245,0.15)' : 'transparent') +
-        ';color:' + (isSel ? '#42a5f5' : 'var(--dim)');
-      btn.onclick = function() {
-        selected[h.hour] = !selected[h.hour];
-        renderSelector();
-      };
-      selector.appendChild(btn);
-    });
-  }
-
-  document.getElementById('hour-clear-btn').onclick = function() {
-    selected = {};
-    renderSelector();
-  };
-
-  document.getElementById('hour-save-btn').onclick = function() {
-    var hours = Object.keys(selected).filter(function(k){ return selected[k]; }).map(Number);
-    var statusEl = document.getElementById('hour-save-status');
-    statusEl.textContent = 'Saving...';
-    fetch('/analysis/preferred-hours', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({hours: hours})
-    }).then(function(r){return r.json();}).then(function(d){
-      statusEl.textContent = d.status === 'ok' ? '✓ Saved ' + hours.length + ' hour(s)' : 'Error: ' + d.message;
-    }).catch(function(e){ statusEl.textContent = 'Error: ' + e; });
-  };
-})();
-</script>
-
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
 
 <div class="section">
@@ -3766,7 +3639,6 @@ def _analyse_trades(trades):
 
     by_day_raw     = {}
     by_session_raw = {}
-    by_hour_raw    = {}
     wk_stats       = {"Weekend": {"wins":0,"losses":0,"pnl":0.0}, "Weekday": {"wins":0,"losses":0,"pnl":0.0}}
 
     for t in closed_known:
@@ -3788,16 +3660,6 @@ def _analyse_trades(trades):
         wk_stats[key]["wins" if outcome=="tp" else "losses"] += 1
         wk_stats[key]["pnl"] += pnl
 
-        # Hourly bucket (UTC hour 0-23)
-        try:
-            hr = _dt.strptime((t.get("opened_at") or "")[:19], "%Y-%m-%d %H:%M:%S").hour
-            if hr not in by_hour_raw:
-                by_hour_raw[hr] = {"wins":0,"losses":0,"pnl":0.0}
-            by_hour_raw[hr]["wins" if outcome=="tp" else "losses"] += 1
-            by_hour_raw[hr]["pnl"] += pnl
-        except:
-            pass
-
     def make_time_rows(raw, sort_key=None):
         rows = []
         for k, v in raw.items():
@@ -3812,34 +3674,12 @@ def _analyse_trades(trades):
     by_session = make_time_rows(by_session_raw)
     by_weekend = make_time_rows(wk_stats,        lambda x: x["key"])
 
-    # Hourly breakdown — all 24 hours present (0 trades shown as 0, not omitted)
-    by_hour = []
-    for h in range(24):
-        v = by_hour_raw.get(h, {"wins": 0, "losses": 0, "pnl": 0.0})
-        total = v["wins"] + v["losses"]
-        by_hour.append({
-            "hour":  h,
-            "label": f"{h:02d}:00",
-            "wins":  v["wins"], "losses": v["losses"], "total": total,
-            "wr":    round(v["wins"] / total * 100, 1) if total > 0 else 0,
-            "pnl":   round(v["pnl"], 2),
-        })
-
     # Add weekend insight
     for r in by_weekend:
         if r["total"] >= 3 and r["key"] == "Weekend" and r["wr"] < 30:
             insights.append(f"<strong>Weekend performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}). Consider pausing alerts on weekends (Sat/Sun UTC).")
         if r["total"] >= 3 and r["key"] == "Weekday" and r["wr"] < 30:
             insights.append(f"<strong>Weekday performance is poor</strong> — {r['wr']}% win rate ({r['wins']}/{r['total']}).")
-
-    # Hourly insight — flag best/worst hours with enough samples
-    hours_with_data = [h for h in by_hour if h["total"] >= 3]
-    if len(hours_with_data) >= 4:
-        best_hours  = sorted(hours_with_data, key=lambda x: -x["wr"])[:3]
-        worst_hours = sorted(hours_with_data, key=lambda x: x["wr"])[:3]
-        best_str  = ", ".join(f"{h['label']} ({h['wr']}%)" for h in best_hours)
-        worst_str = ", ".join(f"{h['label']} ({h['wr']}%)" for h in worst_hours)
-        insights.append(f"<strong>Best hours (UTC):</strong> {best_str} &nbsp;|&nbsp; <strong>Worst hours:</strong> {worst_str}")
 
     # ── KL Level analysis — trades with vs without key level ─────────────────
     with_kl    = [t for t in closed_known if _extract_kl_level(t.get("notes"))]
@@ -3921,7 +3761,6 @@ def _analyse_trades(trades):
     return {
         "timeline":       timeline,
         "total_closed":   total_closed,
-        "by_hour":        by_hour,
         "total_known":    len(closed_known),
         "total_imported": total_closed - len(closed_known),
         "total_open":     len(open_t),
@@ -5297,23 +5136,6 @@ def _extract_kl_level(notes):
         return float(kl) if kl and kl != "null" else None
     except:
         return None
-
-
-def _extract_ob_size_info(notes):
-    """Extract obSizeAtr and impulseRatioActual from trade notes JSON. Returns (size_atr, impulse_ratio) or (None, None)."""
-    if not notes:
-        return None, None
-    try:
-        import json as _j
-        notes_str = str(notes).split("|")[0].strip()
-        d = _j.loads(notes_str)
-        size_atr = d.get("obSizeAtr")
-        impulse  = d.get("impulseRatioActual")
-        size_atr = float(size_atr) if size_atr not in (None, "null") else None
-        impulse  = float(impulse)  if impulse  not in (None, "null") else None
-        return size_atr, impulse
-    except:
-        return None, None
     """Fetch backtest results from DB sorted by win_rate desc."""
     try:
         conn = get_db()
@@ -6207,58 +6029,6 @@ def recommendations_data():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
-
-
-def _init_app_settings_table():
-    """Simple key-value settings table for dashboard preferences (not env-var based)."""
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        log.error(f"app_settings init error: {e}")
-
-
-@app.route("/analysis/preferred-hours", methods=["GET"])
-def get_preferred_hours():
-    try:
-        _init_app_settings_table()
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_settings WHERE key='preferred_hours'")
-            row = cur.fetchone()
-        conn.close()
-        hours = json.loads(row[0]) if row and row[0] else []
-        return jsonify({"status": "ok", "hours": hours})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e), "hours": []}), 500
-
-
-@app.route("/analysis/preferred-hours", methods=["POST"])
-def set_preferred_hours():
-    try:
-        _init_app_settings_table()
-        body  = request.get_json(force=True)
-        hours = sorted(set(int(h) for h in body.get("hours", []) if 0 <= int(h) <= 23))
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO app_settings (key, value) VALUES ('preferred_hours', %s)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """, (json.dumps(hours),))
-        conn.commit()
-        conn.close()
-        log.info(f"Preferred trading hours saved: {hours}")
-        return jsonify({"status": "ok", "hours": hours})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/analysis")
