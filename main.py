@@ -624,18 +624,22 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
 
 
 def get_available_balance() -> float:
-    """Return available USDT balance. Falls back to last known balance if API fails."""
+    """Return available USDT balance (free margin only). Falls back to last known balance if API fails."""
     global _last_known_balance, _last_balance_time
     try:
         resp = _api_call(session.get_wallet_balance, accountType="UNIFIED", coin="USDT")
         for item in resp.get("result", {}).get("list", []):
             for coin in item.get("coin", []):
                 if coin.get("coin") == "USDT":
-                    bal = float(coin.get("availableToWithdraw") or coin.get("walletBalance") or 0)
-                    if bal > 0:
+                    # availableToWithdraw = free margin (excludes margin locked in open positions)
+                    # walletBalance = total balance including locked margin — do NOT use this
+                    avail = coin.get("availableToWithdraw") or coin.get("availableToBorrow") or 0
+                    bal   = float(avail)
+                    wallet = float(coin.get("walletBalance") or 0)
+                    log.info(f"Balance: {bal:.2f} USDT free / {wallet:.2f} USDT total (live)")
+                    if bal >= 0:
                         _last_known_balance = bal
                         _last_balance_time  = time.time()
-                        log.info(f"Balance: {bal:.2f} USDT (live)")
                         return bal
     except Exception as e:
         log.warning(f"Error fetching balance: {e}")
