@@ -175,7 +175,7 @@ var STATUS_FILTER = 'all';
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -245,7 +245,7 @@ function renderTrades(trades){
     var num = trades.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
-        + '<td colspan="22"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<td colspan="25"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
         + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
         + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
         + '</td></tr>';
@@ -258,14 +258,21 @@ function renderTrades(trades){
     var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
     var notesFull  = (t.notes||'').split('|sheet_row:')[0];
     var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
-    var obSizeAtr = null, impulseActual = null;
+    var obSizeAtr = null, impulseActual = null, structureOk = null, klNear = null, emaOk = null;
     try {
       var notesObj = JSON.parse(notesFull.split('|')[0].trim());
       if (notesObj.obSizeAtr != null)          obSizeAtr     = parseFloat(notesObj.obSizeAtr);
       if (notesObj.impulseRatioActual != null) impulseActual = parseFloat(notesObj.impulseRatioActual);
+      if (notesObj.structureOk != null)        structureOk   = notesObj.structureOk === true || notesObj.structureOk === 'true';
+      if (notesObj.klNear != null)             klNear        = notesObj.klNear === true || notesObj.klNear === 'true';
+      if (notesObj.emaOk != null)              emaOk         = notesObj.emaOk === true || notesObj.emaOk === 'true';
     } catch(e) {}
     var obSizeStr  = (obSizeAtr     != null && !isNaN(obSizeAtr))     ? obSizeAtr.toFixed(2)     + 'x' : '—';
     var impulseStr = (impulseActual != null && !isNaN(impulseActual)) ? impulseActual.toFixed(2) + 'x' : '—';
+    function condCell(val) {
+      if (val === null) return '<td class="dim">—</td>';
+      return val ? '<td style="color:var(--green);font-size:12px">✓</td>' : '<td style="color:var(--red);font-size:12px">✗</td>';
+    }
     var mediaHtml = '';
     if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" data-preview="'+esc(l.trim())+'" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
     mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
@@ -295,6 +302,9 @@ function renderTrades(trades){
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
       + '<td class="dim">'+obSizeStr+'</td>'
       + '<td class="dim">'+impulseStr+'</td>'
+      + condCell(structureOk)
+      + condCell(klNear)
+      + condCell(emaOk)
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
@@ -1493,6 +1503,9 @@ def webhook():
             "entryOffset":       data.get("entryOffset"),
             "obSizeAtr":         data.get("obSizeAtr"),
             "impulseRatioActual":data.get("impulseRatioActual"),
+            "structureOk":       data.get("structureOk"),
+            "klNear":            data.get("klNear"),
+            "emaOk":             data.get("emaOk"),
         }) if data.get("rr") else None
         # Use a placeholder order_id — will be matched by WebSocket on fill
         placeholder_id = f"bybit_native_{symbol}_{side}_{int(datetime.utcnow().timestamp())}"
@@ -1665,6 +1678,9 @@ def webhook():
                                      "entryOffset":       data.get("entryOffset"),
                                      "obSizeAtr":         data.get("obSizeAtr"),
                                      "impulseRatioActual":data.get("impulseRatioActual"),
+                                     "structureOk":       data.get("structureOk"),
+                                     "klNear":            data.get("klNear"),
+                                     "emaOk":             data.get("emaOk"),
                                  }) if data.get("rr") else None)
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
                 # This avoids cluttering the sheet with trades that never fill
