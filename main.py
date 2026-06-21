@@ -175,7 +175,7 @@ var STATUS_FILTER = 'all';
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','EMA','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -245,7 +245,7 @@ function renderTrades(trades){
     var num = trades.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
-        + '<td colspan="25"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<td colspan="26"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
         + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
         + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
         + '</td></tr>';
@@ -266,6 +266,7 @@ function renderTrades(trades){
       if (notesObj.structureOk != null)        structureOk   = notesObj.structureOk === true || notesObj.structureOk === 'true';
       if (notesObj.klNear != null)             klNear        = notesObj.klNear === true || notesObj.klNear === 'true';
       if (notesObj.emaOk != null)              emaOk         = notesObj.emaOk === true || notesObj.emaOk === 'true';
+      var klDistAtr = (notesObj.klDistAtr != null && parseFloat(notesObj.klDistAtr) >= 0) ? parseFloat(notesObj.klDistAtr) : null;
     } catch(e) {}
     var obSizeStr  = (obSizeAtr     != null && !isNaN(obSizeAtr))     ? obSizeAtr.toFixed(2)     + 'x' : '—';
     var impulseStr = (impulseActual != null && !isNaN(impulseActual)) ? impulseActual.toFixed(2) + 'x' : '—';
@@ -304,6 +305,7 @@ function renderTrades(trades){
       + '<td class="dim">'+impulseStr+'</td>'
       + condCell(structureOk)
       + condCell(klNear)
+      + '<td class="dim">' + (klDistAtr !== null ? klDistAtr.toFixed(2) + 'x' : '—') + '</td>'
       + condCell(emaOk)
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
@@ -1505,6 +1507,7 @@ def webhook():
             "impulseRatioActual":data.get("impulseRatioActual"),
             "structureOk":       data.get("structureOk"),
             "klNear":            data.get("klNear"),
+            "klDistAtr":         data.get("klDistAtr"),
             "emaOk":             data.get("emaOk"),
         }) if data.get("rr") else None
         # Use a placeholder order_id — will be matched by WebSocket on fill
@@ -1680,6 +1683,7 @@ def webhook():
                                      "impulseRatioActual":data.get("impulseRatioActual"),
                                      "structureOk":       data.get("structureOk"),
                                      "klNear":            data.get("klNear"),
+                                     "klDistAtr":         data.get("klDistAtr"),
                                      "emaOk":             data.get("emaOk"),
                                  }) if data.get("rr") else None)
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
