@@ -176,6 +176,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <body>
 <h1>Trade Journal</h1>
 <div id="img-preview" class="img-preview"><img id="img-preview-img" src="" alt="preview"></div>
+<div id="restricted-banner" style="display:none;margin-bottom:10px;padding:8px 12px;border-radius:6px;font-size:12px;border:1px solid"></div>
 <div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
   <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
@@ -545,6 +546,45 @@ document.addEventListener('click', function(e) {
     img.src = '';
   });
   img.addEventListener('error', function() { preview.style.display = 'none'; });
+})();
+
+// Restricted times info banner
+(function() {
+  fetch('/journal/restricted-times').then(function(r){return r.json();}).then(function(d){
+    var banner = document.getElementById('restricted-banner');
+    if (!banner) return;
+    if (d.errors && d.errors.length > 0) {
+      banner.style.display = 'block';
+      banner.style.background = 'rgba(239,83,80,0.1)';
+      banner.style.borderColor = 'rgba(239,83,80,0.4)';
+      banner.style.color = '#ef5350';
+      banner.innerHTML = '⚠️ <strong>RESTRICTED_TIMES config error</strong> — '
+        + d.errors.map(function(e){return '<code style="font-size:11px">'+e+'</code>';}).join(', ')
+        + '<br><span style="color:var(--dim);font-size:11px">Format: <code>Fri 22:00-Mon 02:00</code> &nbsp; Days: Mon Tue Wed Thu Fri Sat Sun &nbsp; Time: HH:MM (UTC)</span>';
+      return;
+    }
+    if (!d.configured) {
+      banner.style.display = 'block';
+      banner.style.background = 'rgba(107,114,128,0.07)';
+      banner.style.borderColor = 'rgba(107,114,128,0.2)';
+      banner.style.color = 'var(--dim)';
+      banner.innerHTML = '🕐 No restricted times set. Add <code style="font-size:11px">RESTRICTED_TIMES=Fri 22:00-Mon 02:00</code> in Railway to block weekend trading.';
+      return;
+    }
+    var statusCol = d.is_restricted ? '#ef5350' : '#4caf50';
+    var statusTxt = d.is_restricted ? '🚫 CURRENTLY RESTRICTED' : '✅ Currently trading';
+    var windowsHtml = d.windows.map(function(w) {
+      if (!w.valid) return '<span style="color:#ef5350">⚠️ '+w.raw+' (invalid: '+w.error+')</span>';
+      return '<strong>'+w.start+'</strong> → <strong>'+w.end+'</strong> ('+w.duration+')';
+    }).join(' &nbsp;|&nbsp; ');
+    banner.style.display = 'block';
+    banner.style.background = d.is_restricted ? 'rgba(239,83,80,0.08)' : 'rgba(26,26,26,0.6)';
+    banner.style.borderColor = d.is_restricted ? 'rgba(239,83,80,0.3)' : 'rgba(42,42,42,0.8)';
+    banner.style.color = 'var(--text)';
+    banner.innerHTML = '<span style="color:'+statusCol+';font-weight:500">'+statusTxt+'</span>'
+      + ' &nbsp;|&nbsp; '+windowsHtml
+      + ' &nbsp;|&nbsp; <span style="color:var(--dim)">Now: '+d.now_utc+'</span>';
+  }).catch(function(){});
 })();
 
 loadTrades();
@@ -2115,6 +2155,73 @@ def delete_older_than(days):
         return jsonify({"status": "ok", "message": f"Deleted {deleted} trades older than {days} days"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/restricted-times")
+def journal_restricted_times():
+    """Return parsed restricted times info for the journal UI."""
+    DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+    DAY_NAMES = {v: k for k, v in DAY_MAP.items()}
+    raw = get_config().get("restricted_times", "")
+    is_restr, reason = is_restricted_time(raw)
+    now_utc = datetime.utcnow()
+
+    windows = []
+    errors  = []
+
+    if raw:
+        for window in raw.split(","):
+            window = window.strip()
+            if not window:
+                continue
+            try:
+                parts = window.split("-", 1)
+                if len(parts) != 2:
+                    errors.append(f"'{window}' — missing '-' separator")
+                    continue
+                start_str, end_str = parts[0].strip(), parts[1].strip()
+
+                def parse_dt(s):
+                    day_s, time_s = s.strip().split(" ", 1)
+                    day_idx = DAY_MAP.get(day_s[:3].capitalize(), -1)
+                    if day_idx == -1:
+                        raise ValueError(f"Unknown day '{day_s}'. Use: Mon Tue Wed Thu Fri Sat Sun")
+                    h, m = map(int, time_s.split(":"))
+                    if not (0 <= h <= 23 and 0 <= m <= 59):
+                        raise ValueError(f"Invalid time '{time_s}'")
+                    return day_idx, h, m
+
+                s_day, s_h, s_m = parse_dt(start_str)
+                e_day, e_h, e_m = parse_dt(end_str)
+
+                # Calculate duration
+                s_mins = s_day * 24 * 60 + s_h * 60 + s_m
+                e_mins = e_day * 24 * 60 + e_h * 60 + e_m
+                dur_mins = (e_mins - s_mins) % (7 * 24 * 60)
+                dur_h = dur_mins // 60
+                dur_m = dur_mins % 60
+
+                windows.append({
+                    "raw":      window,
+                    "start":    f"{DAY_NAMES[s_day]} {s_h:02d}:{s_m:02d} UTC",
+                    "end":      f"{DAY_NAMES[e_day]} {e_h:02d}:{e_m:02d} UTC",
+                    "duration": f"{dur_h}h {dur_m:02d}m" if dur_m else f"{dur_h}h",
+                    "wraps":    e_mins < s_mins,
+                    "valid":    True,
+                })
+            except Exception as e:
+                errors.append(f"'{window}' — {e}")
+                windows.append({"raw": window, "valid": False, "error": str(e)})
+
+    return jsonify({
+        "raw":          raw,
+        "configured":   bool(raw),
+        "is_restricted": is_restr,
+        "reason":       reason,
+        "now_utc":      now_utc.strftime("%a %H:%M UTC"),
+        "windows":      windows,
+        "errors":       errors,
+    })
 
 
 @app.route("/journal/reset", methods=["GET", "POST"])
@@ -6216,7 +6323,59 @@ def analysis_data():
         except Exception as e:
             log.error(f"Backtest scheduler error: {e}")
 
-    _start_poller()
-    threading.Thread(target=_delayed_startup, daemon=True).start()
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+def _restricted_time_watcher():
+    """
+    Background thread — runs every 60s.
+    When the server crosses INTO a restricted time window, cancels all open
+    limit orders on Bybit and marks them as skipped in the journal.
+    """
+    was_restricted = False
+    while True:
+        try:
+            time.sleep(60)
+            cfg = get_config()
+            is_restr, reason = is_restricted_time(cfg.get("restricted_times", ""))
+
+            if is_restr and not was_restricted:
+                log.info(f"🚫 Entering restricted window: {reason} — cancelling all open limit orders")
+                try:
+                    resp   = session.get_open_orders(category="linear", settleCoin="USDT")
+                    orders = resp.get("result", {}).get("list", [])
+                    cancelled = 0
+                    for order in orders:
+                        sym      = order.get("symbol", "")
+                        order_id = order.get("orderId", "")
+                        o_type   = order.get("orderType", "")
+                        if o_type == "Limit" and order_id:
+                            try:
+                                session.cancel_order(category="linear", symbol=sym, orderId=order_id)
+                                log.info(f"  Cancelled {sym} limit order {order_id} — restricted window")
+                                conn = get_db()
+                                with conn.cursor() as cur:
+                                    cur.execute(
+                                        "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s AND status='open'",
+                                        (f"Auto-cancelled — {reason}", order_id)
+                                    )
+                                conn.commit()
+                                conn.close()
+                                cancelled += 1
+                            except Exception as ce:
+                                log.error(f"  Failed to cancel {sym} {order_id}: {ce}")
+                    if cancelled == 0:
+                        log.info("  No open limit orders to cancel")
+                    else:
+                        log.info(f"  Cancelled {cancelled} limit order(s)")
+                except Exception as e:
+                    log.error(f"Restricted time watcher — error cancelling orders: {e}")
+
+            was_restricted = is_restr
+
+        except Exception as e:
+            log.error(f"Restricted time watcher error: {e}")
+
+
+_start_poller()
+threading.Thread(target=_delayed_startup, daemon=True).start()
+threading.Thread(target=_restricted_time_watcher, daemon=True).start()
+port = int(os.getenv("PORT", "5000"))
+app.run(host="0.0.0.0", port=port, debug=False)
