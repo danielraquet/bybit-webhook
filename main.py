@@ -302,11 +302,14 @@ function loadTrades(){
 function renderTrades(trades){
   var tbody = document.getElementById('tbody');
   var rows = '';
-  for(var i=0; i<trades.length; i++){
-    var t = trades[i];
-    var num = trades.length - i;
-    // Skip skipped trades unless toggle is on
-    if(t.status === 'skipped' && !SHOW_SKIPPED) continue;
+  // Pre-filter to get only visible trades for correct numbering
+  var visible = trades.filter(function(t){
+    if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
+    return true;
+  });
+  for(var i=0; i<visible.length; i++){
+    var t = visible[i];
+    var num = visible.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
         + '<td colspan="26"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
