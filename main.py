@@ -6303,26 +6303,6 @@ def analysis_data():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
-
-    cfg = get_config()
-    log.info(f"Starting webhook server — testnet={TESTNET}")
-    log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
-    # Delay startup tasks slightly to let gunicorn finish booting
-    def _delayed_startup():
-        time.sleep(3)
-        try:
-            _bt_init_table()
-        except Exception as e:
-            log.error(f"BT init error: {e}")
-        try:
-            _bt_init_configs_table()
-        except Exception as e:
-            log.error(f"BT configs init error: {e}")
-        try:
-            _start_backtest_scheduler()
-        except Exception as e:
-            log.error(f"Backtest scheduler error: {e}")
-
 def _restricted_time_watcher():
     """
     Background thread — runs every 60s.
@@ -6374,8 +6354,27 @@ def _restricted_time_watcher():
             log.error(f"Restricted time watcher error: {e}")
 
 
-_start_poller()
-threading.Thread(target=_delayed_startup, daemon=True).start()
-threading.Thread(target=_restricted_time_watcher, daemon=True).start()
-port = int(os.getenv("PORT", "5000"))
-app.run(host="0.0.0.0", port=port, debug=False)
+    cfg = get_config()
+    log.info(f"Starting webhook server — testnet={TESTNET}")
+    log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
+    # Delay startup tasks slightly to let gunicorn finish booting
+    def _delayed_startup():
+        time.sleep(3)
+        try:
+            _bt_init_table()
+        except Exception as e:
+            log.error(f"BT init error: {e}")
+        try:
+            _bt_init_configs_table()
+        except Exception as e:
+            log.error(f"BT configs init error: {e}")
+        try:
+            _start_backtest_scheduler()
+        except Exception as e:
+            log.error(f"Backtest scheduler error: {e}")
+
+    _start_poller()
+    threading.Thread(target=_delayed_startup, daemon=True).start()
+    threading.Thread(target=_restricted_time_watcher, daemon=True).start()
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=False)
