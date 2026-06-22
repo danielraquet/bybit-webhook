@@ -1424,12 +1424,6 @@ def webhook():
         log.info("Server is DISABLED — alert received but no order placed")
         return jsonify({"status": "disabled", "message": "Server is disabled — no order placed"}), 200
 
-    # ── Restricted time window check ─────────────────────────────────────────
-    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""))
-    if is_restricted:
-        log.info(f"Order skipped — {restrict_reason}")
-        return jsonify({"status": "skipped", "message": restrict_reason}), 200
-
     # ── Optional secret check ─────────────────────────────────────────────────
     if WEBHOOK_SECRET and data.get("secret") != WEBHOOK_SECRET:
         log.warning("Invalid webhook secret")
@@ -1453,6 +1447,13 @@ def webhook():
     test_bal_pct  = float(data.get("testBalancePct",  0.1))
     test_leverage = int(data.get("testLeverage", 2))
     log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds} testMode={test_mode}")
+
+    # ── Restricted time window check ─────────────────────────────────────────
+    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""))
+    if is_restricted:
+        log.info(f"{symbol} {side} skipped — {restrict_reason}")
+        log_order_skipped(symbol, side, entry, sl, tp, restrict_reason)
+        return jsonify({"status": "skipped", "message": restrict_reason}), 200
 
     # ── Deduplication guard — block identical signal within DEDUP_WINDOW seconds ─
     _dedup_key = (symbol, side, round(entry, 6))
