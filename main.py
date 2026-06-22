@@ -74,23 +74,27 @@ def get_config():
         "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),
         "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0),
         "restricted_times":     _str("RESTRICTED_TIMES"),  # e.g. "Fri 22:00-Mon 02:00,Sat 00:00-Sat 23:59"
+        "tz_offset_hours":      _float("TIMEZONE_OFFSET", 0),  # hours offset from UTC, e.g. 2 for UTC+2
     }
 
 
-def is_restricted_time(restricted_times_str: str) -> tuple[bool, str]:
+def is_restricted_time(restricted_times_str: str, tz_offset_hours: float = 0) -> tuple[bool, str]:
     """
-    Check if current UTC time falls within any restricted window.
+    Check if current time falls within any restricted window.
     Format: "Day HH:MM-Day HH:MM" windows separated by commas.
     Day names: Mon,Tue,Wed,Thu,Fri,Sat,Sun
-    Example: "Fri 22:00-Mon 02:00,Wed 12:00-Wed 14:00"
+    Times are interpreted in local timezone (tz_offset_hours from UTC).
+    Example: "Fri 22:00-Mon 02:00" with tz_offset_hours=2 means Fri 22:00 local (= Fri 20:00 UTC)
     Returns (is_restricted, reason_string)
     """
     if not restricted_times_str:
         return False, ""
 
     DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
-    now_utc  = datetime.utcnow()
-    now_mins = now_utc.weekday() * 24 * 60 + now_utc.hour * 60 + now_utc.minute  # minutes since Mon 00:00
+    now_utc   = datetime.utcnow()
+    # Convert current UTC time to local time by adding offset
+    now_local = now_utc + timedelta(hours=tz_offset_hours)
+    now_mins  = now_local.weekday() * 24 * 60 + now_local.hour * 60 + now_local.minute
     week_mins = 7 * 24 * 60
 
     for window in restricted_times_str.split(","):
@@ -114,14 +118,14 @@ def is_restricted_time(restricted_times_str: str) -> tuple[bool, str]:
             start_m = parse_dt(start_str)
             end_m   = parse_dt(end_str)
 
-            # Handle windows that wrap around the week (e.g. Fri 22:00 → Mon 02:00)
             if end_m >= start_m:
                 in_window = start_m <= now_mins < end_m
             else:
                 in_window = now_mins >= start_m or now_mins < end_m
 
             if in_window:
-                return True, f"Restricted window: {window} (UTC)"
+                tz_str = f"UTC+{int(tz_offset_hours)}" if tz_offset_hours >= 0 else f"UTC{int(tz_offset_hours)}"
+                return True, f"Restricted window: {window} ({tz_str})"
         except Exception as e:
             log.warning(f"RESTRICTED_TIMES parse error for '{window}': {e}")
 
@@ -1489,7 +1493,7 @@ def webhook():
     log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds} testMode={test_mode}")
 
     # ── Restricted time window check ─────────────────────────────────────────
-    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""))
+    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""), cfg.get("tz_offset_hours", 0))
     if is_restricted:
         log.info(f"{symbol} {side} skipped — {restrict_reason}")
         log_order_skipped(symbol, side, entry, sl, tp, restrict_reason)
@@ -2162,9 +2166,13 @@ def journal_restricted_times():
     """Return parsed restricted times info for the journal UI."""
     DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
     DAY_NAMES = {v: k for k, v in DAY_MAP.items()}
-    raw = get_config().get("restricted_times", "")
-    is_restr, reason = is_restricted_time(raw)
-    now_utc = datetime.utcnow()
+    cfg_now   = get_config()
+    raw       = cfg_now.get("restricted_times", "")
+    tz        = cfg_now.get("tz_offset_hours", 0)
+    is_restr, reason = is_restricted_time(raw, tz)
+    now_utc   = datetime.utcnow()
+    now_local = now_utc + timedelta(hours=tz)
+    tz_str    = f"UTC+{int(tz)}" if tz >= 0 else f"UTC{int(tz)}"
 
     windows = []
     errors  = []
@@ -2218,7 +2226,7 @@ def journal_restricted_times():
         "configured":   bool(raw),
         "is_restricted": is_restr,
         "reason":       reason,
-        "now_utc":      now_utc.strftime("%a %H:%M UTC"),
+        "now_utc":      now_local.strftime(f"%a %H:%M {tz_str}"),
         "windows":      windows,
         "errors":       errors,
     })
@@ -2701,7 +2709,7 @@ def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
         srv_gates = []
 
         # Restricted time window
-        is_restr, restr_reason = is_restricted_time(srv_cfg.get("restricted_times", ""))
+        is_restr, restr_reason = is_restricted_time(srv_cfg.get("restricted_times", ""), srv_cfg.get("tz_offset_hours", 0))
         srv_gates.append({"gate": "5a. Restricted time",
             "pass": not is_restr,
             "detail": restr_reason if is_restr else f"Not restricted (config: {srv_cfg.get('restricted_times') or 'none'})"})
@@ -6314,7 +6322,7 @@ def _restricted_time_watcher():
         try:
             time.sleep(60)
             cfg = get_config()
-            is_restr, reason = is_restricted_time(cfg.get("restricted_times", ""))
+            is_restr, reason = is_restricted_time(cfg.get("restricted_times", ""), cfg.get("tz_offset_hours", 0))
 
             if is_restr and not was_restricted:
                 log.info(f"🚫 Entering restricted window: {reason} — cancelling all open limit orders")
