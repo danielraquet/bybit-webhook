@@ -199,6 +199,10 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <button class="btn filter-status active" data-status="all">All</button>
   <button class="btn filter-status" data-status="closed">Closed</button>
   <button class="btn filter-status" data-status="open">Open</button>
+  <label style="display:flex;align-items:center;gap:5px;margin-left:8px;cursor:pointer;font-size:12px;color:var(--dim)">
+    <input type="checkbox" id="show-skipped" style="cursor:pointer;accent-color:var(--blue)">
+    <span>Skipped</span>
+  </label>
   <div class="days-filter">
     <span id="day-links"></span>
   </div>
@@ -216,8 +220,9 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <tbody id="tbody"></tbody>
 </table>
 <script>
-var DAYS_PARAM   = parseInt(new URLSearchParams(location.search).get('days')) || 0;
+var DAYS_PARAM    = parseInt(new URLSearchParams(location.search).get('days')) || 0;
 var STATUS_FILTER = 'all';
+var SHOW_SKIPPED  = false;
 
 // Render day filter links
 (function(){
@@ -300,6 +305,8 @@ function renderTrades(trades){
   for(var i=0; i<trades.length; i++){
     var t = trades[i];
     var num = trades.length - i;
+    // Skip skipped trades unless toggle is on
+    if(t.status === 'skipped' && !SHOW_SKIPPED) continue;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
         + '<td colspan="26"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
@@ -436,6 +443,12 @@ document.querySelectorAll('.filter-status').forEach(function(btn){
     STATUS_FILTER = this.dataset.status;
     loadTrades();
   });
+});
+
+// Skipped toggle
+document.getElementById('show-skipped').addEventListener('change', function(){
+  SHOW_SKIPPED = this.checked;
+  loadTrades();
 });
 
 // Toolbar buttons
