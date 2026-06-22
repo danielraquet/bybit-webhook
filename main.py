@@ -71,9 +71,61 @@ def get_config():
         "filter_timeframes":    _str("FILTER_TIMEFRAMES").upper(),
         "filter_symbols_allow": _str("FILTER_SYMBOLS_ALLOW").upper(),
         "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
-        "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),   # consecutive losses to trigger cooldown (0=off)
-        "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0), # hours to block that side after trigger
+        "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),
+        "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0),
+        "restricted_times":     _str("RESTRICTED_TIMES"),  # e.g. "Fri 22:00-Mon 02:00,Sat 00:00-Sat 23:59"
     }
+
+
+def is_restricted_time(restricted_times_str: str) -> tuple[bool, str]:
+    """
+    Check if current UTC time falls within any restricted window.
+    Format: "Day HH:MM-Day HH:MM" windows separated by commas.
+    Day names: Mon,Tue,Wed,Thu,Fri,Sat,Sun
+    Example: "Fri 22:00-Mon 02:00,Wed 12:00-Wed 14:00"
+    Returns (is_restricted, reason_string)
+    """
+    if not restricted_times_str:
+        return False, ""
+
+    DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+    now_utc  = datetime.utcnow()
+    now_mins = now_utc.weekday() * 24 * 60 + now_utc.hour * 60 + now_utc.minute  # minutes since Mon 00:00
+    week_mins = 7 * 24 * 60
+
+    for window in restricted_times_str.split(","):
+        window = window.strip()
+        if not window:
+            continue
+        try:
+            parts = window.split("-", 1)
+            if len(parts) != 2:
+                continue
+            start_str, end_str = parts[0].strip(), parts[1].strip()
+
+            def parse_dt(s):
+                day_s, time_s = s.strip().split(" ", 1)
+                day_idx = DAY_MAP.get(day_s[:3].capitalize(), -1)
+                if day_idx == -1:
+                    raise ValueError(f"Unknown day: {day_s}")
+                h, m = map(int, time_s.split(":"))
+                return day_idx * 24 * 60 + h * 60 + m
+
+            start_m = parse_dt(start_str)
+            end_m   = parse_dt(end_str)
+
+            # Handle windows that wrap around the week (e.g. Fri 22:00 → Mon 02:00)
+            if end_m >= start_m:
+                in_window = start_m <= now_mins < end_m
+            else:
+                in_window = now_mins >= start_m or now_mins < end_m
+
+            if in_window:
+                return True, f"Restricted window: {window} (UTC)"
+        except Exception as e:
+            log.warning(f"RESTRICTED_TIMES parse error for '{window}': {e}")
+
+    return False, ""
 
 app = Flask(__name__)
 
@@ -1372,6 +1424,12 @@ def webhook():
         log.info("Server is DISABLED — alert received but no order placed")
         return jsonify({"status": "disabled", "message": "Server is disabled — no order placed"}), 200
 
+    # ── Restricted time window check ─────────────────────────────────────────
+    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""))
+    if is_restricted:
+        log.info(f"Order skipped — {restrict_reason}")
+        return jsonify({"status": "skipped", "message": restrict_reason}), 200
+
     # ── Optional secret check ─────────────────────────────────────────────────
     if WEBHOOK_SECRET and data.get("secret") != WEBHOOK_SECRET:
         log.warning("Invalid webhook secret")
@@ -2533,6 +2591,12 @@ def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
         # ── Gate 5: Server-side filters ───────────────────────────────────────
         srv_cfg   = get_config()
         srv_gates = []
+
+        # Restricted time window
+        is_restr, restr_reason = is_restricted_time(srv_cfg.get("restricted_times", ""))
+        srv_gates.append({"gate": "5a. Restricted time",
+            "pass": not is_restr,
+            "detail": restr_reason if is_restr else f"Not restricted (config: {srv_cfg.get('restricted_times') or 'none'})"})
 
         # Max trades
         open_pos = get_open_positions()
