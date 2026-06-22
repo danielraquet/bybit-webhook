@@ -291,10 +291,18 @@ function showNotes(el) {
 function loadTrades(){
   var params = [];
   if(DAYS_PARAM) params.push('days='+DAYS_PARAM);
-  if(STATUS_FILTER !== 'all') params.push('status='+STATUS_FILTER);
+  // When showing skipped, always fetch all so server doesn't filter them out
+  if(STATUS_FILTER !== 'all' && !SHOW_SKIPPED) params.push('status='+STATUS_FILTER);
   var url = '/journal/data' + (params.length ? '?'+params.join('&') : '');
   fetch(url).then(function(r){return r.json();}).then(function(d){
-    renderTrades(d.trades || []);
+    var trades = d.trades || [];
+    // If a specific status filter is active AND skipped is shown, filter client-side
+    if(STATUS_FILTER !== 'all') {
+      trades = trades.filter(function(t){
+        return t.status === STATUS_FILTER || t.status === 'note' || (SHOW_SKIPPED && t.status === 'skipped');
+      });
+    }
+    renderTrades(trades);
     updateStats(d.trades || []);
   }).catch(function(e){ console.error('Load failed',e); });
 }
