@@ -357,7 +357,7 @@ function renderTrades(trades){
         })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
       + '<td class="dim">'+esc(t.timeframe||'—')+'</td>'
-      + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
+      + '<td class="editable" data-id="'+t.id+'" data-type="status" data-val="'+(t.status||'')+'">'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
       + '<td>'+esc(t.exit_price||'—')+'</td>'
@@ -426,6 +426,13 @@ document.addEventListener('click', function(e){
     var next=opts[(opts.indexOf(val)+1)%opts.length];
     if(!confirm('Change outcome to: '+(labels[next]||'Clear')+'?')) return;
     fetch('/journal/set-outcome',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),outcome:next})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='status'){
+    var opts=['open','closed','skipped'];
+    var next=opts[(opts.indexOf(val)+1)%opts.length];
+    if(!confirm('Change status to: '+next+'?')) return;
+    fetch('/journal/set-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),status:next})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
   if(type==='media'){
@@ -2113,6 +2120,26 @@ def set_media():
                 except Exception as gs_err:
                     log.warning(f"Sheets media sync failed: {gs_err}")
 
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/set-status", methods=["POST"])
+def set_status():
+    """Manually override trade status."""
+    try:
+        body   = request.get_json(force=True)
+        tid    = int(body.get("id", 0))
+        status = body.get("status", "").strip()
+        if status not in ("open", "closed", "skipped"):
+            return jsonify({"status": "error", "message": "Invalid status"}), 400
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET status=%s WHERE id=%s", (status, tid))
+        conn.commit()
+        conn.close()
+        log.info(f"Trade {tid} status manually set to {status}")
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
