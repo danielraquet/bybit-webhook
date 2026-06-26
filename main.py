@@ -3228,12 +3228,16 @@ def journal_data():
                 skipped = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
             # Merge skipped into trades (avoiding duplicates by id)
+            # Convert datetime/Decimal objects to strings first
+            import json as _j
+            skipped = _j.loads(_j.dumps(skipped, default=str))
             existing_ids = {t.get("id") for t in trades}
             for t in skipped:
                 if t.get("id") not in existing_ids:
                     trades.append(t)
             # Re-sort by opened_at descending
             trades.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+            log.info(f"Journal data: {len(trades)} total trades incl. {len(skipped)} skipped")
         except Exception as e:
             log.warning(f"Could not fetch skipped trades separately: {e}")
 
