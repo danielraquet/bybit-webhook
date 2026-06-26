@@ -3219,7 +3219,7 @@ def journal_data():
             with conn.cursor() as cur:
                 if days:
                     cur.execute(
-                        "SELECT * FROM trades WHERE status='skipped' AND opened_at >= NOW() - INTERVAL %s ORDER BY opened_at DESC LIMIT 500",
+                        "SELECT * FROM trades WHERE status='skipped' AND opened_at::timestamp >= NOW() - INTERVAL %s ORDER BY opened_at DESC LIMIT 500",
                         (f"{days} days",)
                     )
                 else:
