@@ -2135,16 +2135,23 @@ def set_media():
 
 @app.route("/journal/debug-skipped")
 def debug_skipped():
-    """Debug: count skipped trades in DB."""
+    """Debug: count skipped trades in DB and test fetch."""
     try:
         conn = get_db()
         with conn.cursor() as cur:
             cur.execute("SELECT status, COUNT(*) as cnt FROM trades GROUP BY status ORDER BY cnt DESC")
-            rows = cur.fetchall()
+            counts = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
+            cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 3")
+            cols   = [d[0] for d in cur.description]
+            sample = [dict(zip(cols, row)) for row in cur.fetchall()]
         conn.close()
-        return jsonify({"status_counts": [{"status": r[0], "count": r[1]} for r in rows]})
+        # Convert any non-serialisable types
+        import json as _j
+        sample_safe = _j.loads(_j.dumps(sample, default=str))
+        return jsonify({"status_counts": counts, "sample_skipped": sample_safe})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        import traceback
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
 @app.route("/journal/set-status", methods=["POST"])
@@ -3212,8 +3219,8 @@ def journal_data():
             with conn.cursor() as cur:
                 if days:
                     cur.execute(
-                        "SELECT * FROM trades WHERE status='skipped' AND opened_at >= NOW() - INTERVAL '%s days' ORDER BY opened_at DESC LIMIT 500",
-                        (days,)
+                        "SELECT * FROM trades WHERE status='skipped' AND opened_at >= NOW() - INTERVAL %s ORDER BY opened_at DESC LIMIT 500",
+                        (f"{days} days",)
                     )
                 else:
                     cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 500")
