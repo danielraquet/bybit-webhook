@@ -2133,6 +2133,20 @@ def set_media():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/journal/debug-skipped")
+def debug_skipped():
+    """Debug: count skipped trades in DB."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) as cnt FROM trades GROUP BY status ORDER BY cnt DESC")
+            rows = cur.fetchall()
+        conn.close()
+        return jsonify({"status_counts": [{"status": r[0], "count": r[1]} for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/journal/set-status", methods=["POST"])
 def set_status():
     """Manually override trade status."""
