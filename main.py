@@ -315,6 +315,7 @@ function renderTrades(trades){
     if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
     return true;
   });
+  console.log('renderTrades: total='+trades.length+' visible='+visible.length+' SHOW_SKIPPED='+SHOW_SKIPPED+' skipped_in_data='+trades.filter(function(t){return t.status==='skipped';}).length);
   for(var i=0; i<visible.length; i++){
     var t = visible[i];
     var num = visible.length - i;
@@ -466,6 +467,7 @@ document.querySelectorAll('.filter-status').forEach(function(btn){
 // Skipped toggle
 document.getElementById('show-skipped').addEventListener('change', function(){
   SHOW_SKIPPED = this.checked;
+  console.log('SHOW_SKIPPED =', SHOW_SKIPPED);
   loadTrades();
 });
 
