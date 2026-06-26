@@ -3183,18 +3183,47 @@ def journal():
 def journal_data():
     """JSON endpoint for journal data — used by the journal page."""
     try:
-        days = request.args.get("days")
+        days         = request.args.get("days")
         status_filter = request.args.get("status", "all")
         try:
             days = int(days) if days else None
         except:
             days = None
+
         trades = get_all_trades(500, days=days)
+
+        # get_all_trades may exclude skipped trades at DB level — fetch them separately
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                if days:
+                    cur.execute(
+                        "SELECT * FROM trades WHERE status='skipped' AND opened_at >= NOW() - INTERVAL '%s days' ORDER BY opened_at DESC LIMIT 500",
+                        (days,)
+                    )
+                else:
+                    cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 500")
+                cols    = [d[0] for d in cur.description]
+                skipped = [dict(zip(cols, row)) for row in cur.fetchall()]
+            conn.close()
+            # Merge skipped into trades (avoiding duplicates by id)
+            existing_ids = {t.get("id") for t in trades}
+            for t in skipped:
+                if t.get("id") not in existing_ids:
+                    trades.append(t)
+            # Re-sort by opened_at descending
+            trades.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+        except Exception as e:
+            log.warning(f"Could not fetch skipped trades separately: {e}")
+
         # Apply status filter
         if status_filter == "closed":
             trades = [t for t in trades if t.get("status") in ("closed", "note")]
         elif status_filter == "open":
             trades = [t for t in trades if t.get("status") in ("open", "note")]
+        elif status_filter == "all":
+            pass  # include everything including skipped
+
         return jsonify({"trades": trades, "stats": get_stats()})
     except Exception as e:
         log.error(f"Journal data error: {e}")
