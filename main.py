@@ -1540,32 +1540,35 @@ def webhook():
 
     def _log_skip(reason):
         """Log a skipped trade with full metadata then patch all available fields."""
-        row_id = log_order_skipped(symbol, side, entry, sl, tp, reason)
-        if row_id:
-            try:
-                notes_json = json.dumps({
-                    "rr":                data.get("rr"),
-                    "slBuf":             data.get("slBuf"),
-                    "minImpulse":        data.get("minImpulse"),
-                    "entryOffset":       data.get("entryOffset"),
-                    "obSizeAtr":         data.get("obSizeAtr"),
-                    "impulseRatioActual":data.get("impulseRatioActual"),
-                    "structureOk":       data.get("structureOk"),
-                    "klNear":            data.get("klNear"),
-                    "klDistAtr":         data.get("klDistAtr"),
-                    "emaOk":             data.get("emaOk"),
-                }) if data.get("rr") else None
-                conn = get_db()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s WHERE id=%s",
-                        (tf_label, source, variant, cfg.get("leverage"), notes_json or reason, row_id)
-                    )
-                conn.commit()
-                conn.close()
-            except Exception as _e:
-                log.warning(f"Could not patch skipped trade metadata: {_e}")
-        return row_id
+        log_order_skipped(symbol, side, entry, sl, tp, reason)
+        try:
+            notes_json = json.dumps({
+                "rr":                data.get("rr"),
+                "slBuf":             data.get("slBuf"),
+                "minImpulse":        data.get("minImpulse"),
+                "entryOffset":       data.get("entryOffset"),
+                "obSizeAtr":         data.get("obSizeAtr"),
+                "impulseRatioActual":data.get("impulseRatioActual"),
+                "structureOk":       data.get("structureOk"),
+                "klNear":            data.get("klNear"),
+                "klDistAtr":         data.get("klDistAtr"),
+                "emaOk":             data.get("emaOk"),
+            }) if data.get("rr") else None
+            conn = get_db()
+            with conn.cursor() as cur:
+                # Find the row just inserted — most recent skipped for this symbol/side/entry
+                cur.execute(
+                    "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s "
+                    "WHERE id = (SELECT id FROM trades WHERE status='skipped' AND symbol=%s AND side=%s "
+                    "AND entry=%s ORDER BY opened_at DESC LIMIT 1)",
+                    (tf_label, source, variant, cfg.get("leverage"), notes_json or reason,
+                     symbol, side, entry)
+                )
+            conn.commit()
+            conn.close()
+            log.info(f"Patched skipped trade metadata: {symbol} {side} source={source} tf={tf_label}")
+        except Exception as _e:
+            log.warning(f"Could not patch skipped trade metadata: {_e}")
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
     test_bal_pct  = float(data.get("testBalancePct",  0.1))
     test_leverage = int(data.get("testLeverage", 2))
