@@ -1519,6 +1519,36 @@ def webhook():
     bar_seconds   = int(data.get("barSeconds", os.getenv("BAR_SECONDS", "180")))  # from alert, fallback to env
     source        = data.get("source",    "unknown")
     variant       = data.get("variant",   "")
+    tf_label      = gsheets._bar_seconds_to_tf(bar_seconds)
+
+    def _log_skip(reason):
+        """Log a skipped trade with full metadata then patch all available fields."""
+        row_id = log_order_skipped(symbol, side, entry, sl, tp, reason)
+        if row_id:
+            try:
+                notes_json = json.dumps({
+                    "rr":                data.get("rr"),
+                    "slBuf":             data.get("slBuf"),
+                    "minImpulse":        data.get("minImpulse"),
+                    "entryOffset":       data.get("entryOffset"),
+                    "obSizeAtr":         data.get("obSizeAtr"),
+                    "impulseRatioActual":data.get("impulseRatioActual"),
+                    "structureOk":       data.get("structureOk"),
+                    "klNear":            data.get("klNear"),
+                    "klDistAtr":         data.get("klDistAtr"),
+                    "emaOk":             data.get("emaOk"),
+                }) if data.get("rr") else None
+                conn = get_db()
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s WHERE id=%s",
+                        (tf_label, source, variant, cfg.get("leverage"), notes_json or reason, row_id)
+                    )
+                conn.commit()
+                conn.close()
+            except Exception as _e:
+                log.warning(f"Could not patch skipped trade metadata: {_e}")
+        return row_id
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
     test_bal_pct  = float(data.get("testBalancePct",  0.1))
     test_leverage = int(data.get("testLeverage", 2))
@@ -1528,7 +1558,7 @@ def webhook():
     is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""), cfg.get("tz_offset_hours", 0))
     if is_restricted:
         log.info(f"{symbol} {side} skipped — {restrict_reason}")
-        log_order_skipped(symbol, side, entry, sl, tp, restrict_reason)
+        _log_skip(restrict_reason)
         return jsonify({"status": "skipped", "message": restrict_reason}), 200
 
     # ── Deduplication guard — block identical signal within DEDUP_WINDOW seconds ─
@@ -1550,8 +1580,6 @@ def webhook():
         return jsonify({"status": "error", "message": msg}), 400
 
     # ── Server-side filters ───────────────────────────────────────────────────
-    tf_label = gsheets._bar_seconds_to_tf(bar_seconds)
-
     # Extract WR from raw readable text — format: "WR: 28% (7/25)"
     alert_wr = 0.0
     try:
@@ -1574,7 +1602,7 @@ def webhook():
 
     def _filter_skip(reason):
         log.info(f"🚫 Filtered: {reason}")
-        log_order_skipped(symbol, side, entry, sl, tp, f"Filtered: {reason}")
+        _log_skip(f"Filtered: {reason}")
         return jsonify({"status": "filtered", "message": reason}), 200
 
     # Side filter: FILTER_SIDE=long or short
@@ -1663,7 +1691,7 @@ def webhook():
         if symbol not in open_positions and len(open_positions) >= cfg["max_trades"]:
             msg = f"Max trades ({cfg['max_trades']}) reached — skipping {symbol}"
             log.warning(msg)
-            log_order_skipped(symbol, side, entry, sl, tp, msg)
+            _log_skip(msg)
             return jsonify({"status": "skipped", "message": msg}), 200
 
         if symbol in open_positions:
@@ -1676,7 +1704,7 @@ def webhook():
                 if same_dir:
                     msg = f"Already have open {pos_side} position in {symbol} — skipping same direction"
                     log.warning(msg)
-                    log_order_skipped(symbol, side, entry, sl, tp, msg)
+                    _log_skip(msg)
                     return jsonify({"status": "skipped", "message": msg}), 200
                 else:
                     # Opposite direction — cancel any pending limit orders and skip
@@ -1687,13 +1715,13 @@ def webhook():
                         log.info(f"Cancelled {len(open_orders)} pending {side} limit(s) for {symbol} — opposite {pos_side} position running, letting it complete")
                     msg = f"Opposite position running for {symbol} ({pos_side}) — cancelled pending limit, skipping new {side} order"
                     log.warning(msg)
-                    log_order_skipped(symbol, side, entry, sl, tp, msg)
+                    _log_skip(msg)
                     return jsonify({"status": "skipped", "message": msg}), 200
             except Exception as e:
                 log.error(f"Error checking position direction for {symbol}: {e}")
                 msg = f"Already have open position in {symbol} — skipping"
                 log.warning(msg)
-                log_order_skipped(symbol, side, entry, sl, tp, msg)
+                _log_skip(msg)
                 return jsonify({"status": "skipped", "message": msg}), 200
 
         open_orders = get_open_orders(symbol)
@@ -1742,7 +1770,7 @@ def webhook():
             else:
                 msg = f"Already have open order(s) for {symbol} — skipping"
                 log.warning(msg)
-                log_order_skipped(symbol, side, entry, sl, tp, msg)
+                _log_skip(msg)
                 return jsonify({"status": "skipped", "message": msg}), 200
 
         # Use test params if test mode — no main order, just tiny test order
@@ -1847,12 +1875,12 @@ def webhook():
             else:
                 msg = resp.get("retMsg", "Unknown error")
                 log.error(f"❌ Bybit error {ret_code}: {msg}")
-                log_order_skipped(symbol, side, entry, sl, tp, f"Bybit {ret_code}: {msg}")
+                _log_skip(f"Bybit {ret_code}: {msg}")
                 return jsonify({"status": "error", "message": msg, "code": ret_code}), 400
 
         except Exception as e:
             log.error(f"Exception placing order: {e}")
-            log_order_skipped(symbol, side, entry, sl, tp, f"Exception: {e}")
+            _log_skip(f"Exception: {e}")
             return jsonify({"status": "error", "message": str(e)}), 500
 
 
