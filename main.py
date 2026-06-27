@@ -199,6 +199,10 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <button class="btn filter-status active" data-status="all">All</button>
   <button class="btn filter-status" data-status="closed">Closed</button>
   <button class="btn filter-status" data-status="open">Open</button>
+  <span style="margin-left:8px;color:var(--dim);font-size:11px">Outcome:</span>
+  <button class="btn filter-outcome" data-outcome="all" style="border-color:var(--blue);color:var(--blue)">All</button>
+  <button class="btn filter-outcome" data-outcome="tp">TP</button>
+  <button class="btn filter-outcome" data-outcome="sl">SL</button>
   <label style="display:flex;align-items:center;gap:5px;margin-left:8px;cursor:pointer;font-size:12px;color:var(--dim)">
     <input type="checkbox" id="show-skipped" style="cursor:pointer;accent-color:var(--blue)">
     <span>Skipped</span>
@@ -221,8 +225,9 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 </table>
 <script>
 var DAYS_PARAM    = parseInt(new URLSearchParams(location.search).get('days')) || 0;
-var STATUS_FILTER = 'all';
-var SHOW_SKIPPED  = false;
+var STATUS_FILTER  = 'all';
+var OUTCOME_FILTER = 'all';
+var SHOW_SKIPPED   = false;
 
 // Render day filter links
 (function(){
@@ -313,6 +318,7 @@ function renderTrades(trades){
   // Pre-filter to get only visible trades for correct numbering
   var visible = trades.filter(function(t){
     if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
+    if(OUTCOME_FILTER !== 'all' && t.status !== 'note' && t.outcome !== OUTCOME_FILTER) return false;
     return true;
   });
   for(var i=0; i<visible.length; i++){
@@ -460,6 +466,17 @@ document.querySelectorAll('.filter-status').forEach(function(btn){
     this.style.borderColor = 'var(--blue)';
     this.style.color = 'var(--blue)';
     STATUS_FILTER = this.dataset.status;
+    loadTrades();
+  });
+});
+
+// Outcome filter buttons
+document.querySelectorAll('.filter-outcome').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    document.querySelectorAll('.filter-outcome').forEach(function(b){ b.style.borderColor=''; b.style.color=''; });
+    this.style.borderColor = 'var(--blue)';
+    this.style.color = 'var(--blue)';
+    OUTCOME_FILTER = this.dataset.outcome;
     loadTrades();
   });
 });
