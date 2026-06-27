@@ -315,7 +315,6 @@ function renderTrades(trades){
     if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
     return true;
   });
-  console.log('renderTrades: total='+trades.length+' visible='+visible.length+' SHOW_SKIPPED='+SHOW_SKIPPED+' skipped_in_data='+trades.filter(function(t){return t.status==='skipped';}).length);
   for(var i=0; i<visible.length; i++){
     var t = visible[i];
     var num = visible.length - i;
@@ -346,6 +345,7 @@ function renderTrades(trades){
     } catch(e) {}
     var obSizeStr  = (obSizeAtr     != null && !isNaN(obSizeAtr))     ? obSizeAtr.toFixed(2)     + 'x' : '—';
     var impulseStr = (impulseActual != null && !isNaN(impulseActual)) ? impulseActual.toFixed(2) + 'x' : '—';
+    var klDistAtrStr = (klDistAtr !== null && klDistAtr !== undefined && !isNaN(klDistAtr)) ? klDistAtr.toFixed(2) + 'x' : '—';
     function condCell(val) {
       if (val === null) return '<td class="dim">—</td>';
       return val ? '<td style="color:var(--green);font-size:12px">✓</td>' : '<td style="color:var(--red);font-size:12px">✗</td>';
@@ -381,7 +381,7 @@ function renderTrades(trades){
       + '<td class="dim">'+impulseStr+'</td>'
       + condCell(structureOk)
       + condCell(klNear)
-      + '<td class="dim">' + (klDistAtr !== null ? klDistAtr.toFixed(2) + 'x' : '—') + '</td>'
+      + '<td class="dim">' + klDistAtrStr + '</td>'
       + condCell(emaOk)
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
@@ -467,7 +467,6 @@ document.querySelectorAll('.filter-status').forEach(function(btn){
 // Skipped toggle
 document.getElementById('show-skipped').addEventListener('change', function(){
   SHOW_SKIPPED = this.checked;
-  console.log('SHOW_SKIPPED =', SHOW_SKIPPED);
   loadTrades();
 });
 
