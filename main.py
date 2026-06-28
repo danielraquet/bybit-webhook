@@ -3249,9 +3249,15 @@ def journal():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/journal/data")
+@app.route("/journal/data", methods=["GET", "OPTIONS"])
 def journal_data():
     """JSON endpoint for journal data — used by the journal page."""
+    if request.method == "OPTIONS":
+        resp = jsonify({})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
     try:
         days         = request.args.get("days")
         status_filter = request.args.get("status", "all")
@@ -3298,10 +3304,14 @@ def journal_data():
         elif status_filter == "all":
             pass  # include everything including skipped
 
-        return jsonify({"trades": trades, "stats": get_stats()})
+        resp = jsonify({"trades": trades, "stats": get_stats()})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
     except Exception as e:
         log.error(f"Journal data error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        resp = jsonify({"status": "error", "message": str(e)})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
 
 
 ANALYSIS_HTML = """
