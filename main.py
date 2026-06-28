@@ -3528,6 +3528,74 @@ ANALYSIS_HTML = """
 })();
 </script>
 
+<div class="section" style="margin-bottom:16px">
+  <div class="section-title">Performance by hour of day (UTC)</div>
+  <p style="color:var(--dim);font-size:11px;margin-bottom:12px">Bars show cumulative PnL per hour. Colour = win rate. Hover for details.</p>
+  <canvas id="hour-chart" height="180"></canvas>
+  <div style="display:flex;gap:16px;margin-top:8px;font-size:11px;color:var(--dim)">
+    <span><span style="display:inline-block;width:10px;height:10px;background:#4caf50;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR ≥ 40%</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#ffa726;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR 25–40%</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#ef5350;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR &lt; 25%</span>
+    <span><span style="display:inline-block;width:10px;height:10px;background:#2a2a2a;vertical-align:middle;margin-right:4px;border-radius:2px"></span>No data</span>
+  </div>
+</div>
+
+<script>
+(function() {
+  var byHour = {{ by_hour|tojson }};
+  if (!byHour || !byHour.length) return;
+  var canvas = document.getElementById('hour-chart');
+  canvas.style.width = '100%';
+  canvas.width = canvas.offsetWidth || 800;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var pad = {top:10, right:10, bottom:24, left:36};
+  var cw = W - pad.left - pad.right;
+  var ch = H - pad.top - pad.bottom;
+  var barW = cw / 24;
+  var maxAbsPnl = Math.max(1, Math.max.apply(null, byHour.map(function(h){ return Math.abs(h.pnl); })));
+  function wrColor(h) {
+    if (h.total === 0) return '#2a2a2a';
+    if (h.wr >= 40) return '#4caf50';
+    if (h.wr >= 25) return '#ffa726';
+    return '#ef5350';
+  }
+  var zeroY = pad.top + ch / 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(W - pad.right, zeroY); ctx.stroke();
+  ctx.fillStyle = '#888'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText('0', pad.left - 4, zeroY + 3);
+  byHour.forEach(function(h, i) {
+    var x = pad.left + i * barW;
+    var barH = (Math.abs(h.pnl) / maxAbsPnl) * (ch / 2 - 4);
+    var y = h.pnl >= 0 ? zeroY - barH : zeroY;
+    ctx.fillStyle = wrColor(h);
+    ctx.fillRect(x + 1, y, barW - 2, Math.max(1, barH));
+    if (i % 2 === 0) {
+      ctx.fillStyle = '#888'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(h.hour, x + barW / 2, H - 8);
+    }
+  });
+  var tooltip = document.createElement('div');
+  tooltip.style.cssText = 'position:fixed;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;font-size:11px;pointer-events:none;display:none;z-index:999;color:#e8e8e8;line-height:1.6';
+  document.body.appendChild(tooltip);
+  canvas.addEventListener('mousemove', function(e) {
+    var rect = canvas.getBoundingClientRect();
+    var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
+    var idx = Math.floor((mx - pad.left) / barW);
+    if (idx < 0 || idx > 23) { tooltip.style.display = 'none'; return; }
+    var h = byHour[idx];
+    tooltip.innerHTML = '<strong>' + h.label + ' UTC</strong><br>'
+      + 'WR: <strong style="color:' + wrColor(h) + '">' + h.wr + '%</strong> (' + h.wins + 'W / ' + h.losses + 'L)<br>'
+      + 'PnL: <span style="color:' + (h.pnl>=0?'#4caf50':'#ef5350') + '">' + (h.pnl>=0?'+':'') + h.pnl + '</span>';
+    tooltip.style.display = 'block';
+    tooltip.style.left = (e.clientX + 12) + 'px';
+    tooltip.style.top  = (e.clientY - 10) + 'px';
+  });
+  canvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
+})();
+</script>
+
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
 
 <div class="section">
@@ -4048,6 +4116,7 @@ def _analyse_trades(trades):
 
     by_day_raw     = {}
     by_session_raw = {}
+    by_hour_raw    = {}
     wk_stats       = {"Weekend": {"wins":0,"losses":0,"pnl":0.0}, "Weekday": {"wins":0,"losses":0,"pnl":0.0}}
 
     for t in closed_known:
@@ -4069,6 +4138,16 @@ def _analyse_trades(trades):
         wk_stats[key]["wins" if outcome=="tp" else "losses"] += 1
         wk_stats[key]["pnl"] += pnl
 
+        # Hourly bucket
+        try:
+            hr = _dt.strptime((t.get("opened_at") or "")[:19], "%Y-%m-%d %H:%M:%S").hour
+            if hr not in by_hour_raw:
+                by_hour_raw[hr] = {"wins":0,"losses":0,"pnl":0.0}
+            by_hour_raw[hr]["wins" if outcome=="tp" else "losses"] += 1
+            by_hour_raw[hr]["pnl"] += pnl
+        except:
+            pass
+
     def make_time_rows(raw, sort_key=None):
         rows = []
         for k, v in raw.items():
@@ -4082,6 +4161,18 @@ def _analyse_trades(trades):
     by_day     = make_time_rows(by_day_raw,     lambda x: x["_order"])
     by_session = make_time_rows(by_session_raw)
     by_weekend = make_time_rows(wk_stats,        lambda x: x["key"])
+
+    # Hourly breakdown — all 24 hours present
+    by_hour = []
+    for h in range(24):
+        v = by_hour_raw.get(h, {"wins":0,"losses":0,"pnl":0.0})
+        total = v["wins"] + v["losses"]
+        by_hour.append({
+            "hour": h, "label": f"{h:02d}:00",
+            "wins": v["wins"], "losses": v["losses"], "total": total,
+            "wr":   round(v["wins"]/total*100,1) if total>0 else 0,
+            "pnl":  round(v["pnl"],2),
+        })
 
     # Add weekend insight
     for r in by_weekend:
@@ -4189,6 +4280,7 @@ def _analyse_trades(trades):
         "by_day":         by_day,
         "by_session":     by_session,
         "by_weekend":     by_weekend,
+        "by_hour":        by_hour,
         "sl_margins":     sl_margins,
         "by_tf_source":   by_tf_source,
         "by_tf_symbol":   by_tf_symbol,
