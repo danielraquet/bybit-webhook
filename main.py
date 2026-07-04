@@ -650,6 +650,16 @@ loadTrades();
 # ─── BYBIT SESSION ────────────────────────────────────────────────────────────
 BYBIT_PROXY = os.environ.get("BYBIT_PROXY", "")
 
+# ─── TRAIL / TP EXTENSION SETTINGS ───────────────────────────────────────────
+EXTEND_BEYOND_TP    = os.getenv("EXTEND_BEYOND_TP",    "false").lower() == "true"
+TP_EXTEND_TRIGGER_R = float(os.getenv("TP_EXTEND_TRIGGER_R", "2.75") or "2.75")
+TRAIL_STEP_R        = float(os.getenv("TRAIL_STEP_R",        "1.0")  or "1.0")
+BE_TRIGGER_R        = float(os.getenv("BE_TRIGGER_R",        "0")    or "0")
+
+# Per-trade trail state: { order_id: { entry, sl, risk, side, symbol, ... } }
+_trail_state: dict = {}
+_trail_lock = threading.Lock()
+
 try:
     session = HTTP(
         testnet=TESTNET,
@@ -983,6 +993,7 @@ def _handle_order_update(msg):
             order_id = o.get("orderId", "")
             symbol   = o.get("symbol", "")
             status   = o.get("orderStatus", "")
+            side     = o.get("side", "")
             log.info(f"WS order: {symbol} {order_id} status={status}")
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 conn = get_db()
@@ -993,7 +1004,24 @@ def _handle_order_update(msg):
                     )
                 conn.commit()
                 conn.close()
+                _trail_deregister(order_id)
                 log.info(f"WS: {symbol} {order_id} marked skipped")
+            elif status == "Filled" and not o.get("reduceOnly"):
+                # Entry limit order filled — register for trail monitoring
+                try:
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT entry, sl, tp FROM trades WHERE order_id=%s LIMIT 1",
+                            (order_id,)
+                        )
+                        row = cur.fetchone()
+                    conn.close()
+                    if row:
+                        entry_p, sl_p, tp_p = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
+                        _trail_register(order_id, symbol, side, entry_p, sl_p)
+                except Exception as tr_err:
+                    log.warning(f"Trail register on fill failed: {tr_err}")
     except Exception as e:
         log.error(f"WS order handler error: {e}")
 
@@ -1092,6 +1120,7 @@ def _handle_execution_update(msg):
 
             emoji = "✅" if outcome == "tp" else "🔴"
             log.info(f"{emoji} WS closed {symbol} — {outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
+            _trail_deregister(str(trade.get("order_id", "")))
 
             try:
                 if gsheets.is_configured():
@@ -6622,6 +6651,135 @@ def analysis_data():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
+def _trail_watcher():
+    """
+    Background thread — checks open positions every 5s.
+    Manages BE trigger, TP extension, and trailing SL.
+    Only active when EXTEND_BEYOND_TP=true or BE_TRIGGER_R > 0.
+    """
+    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
+        log.info("Trail watcher disabled (EXTEND_BEYOND_TP=false, BE_TRIGGER_R=0)")
+        return
+    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R extend={EXTEND_BEYOND_TP}")
+    while True:
+        try:
+            _trail_check()
+        except Exception as e:
+            log.error(f"Trail watcher error: {e}")
+        time.sleep(5)
+
+
+def _trail_check():
+    """Single pass — check each tracked trade against current mark price."""
+    with _trail_lock:
+        if not _trail_state:
+            return
+        tracked = dict(_trail_state)
+
+    for order_id, state in tracked.items():
+        try:
+            symbol  = state["symbol"]
+            side    = state["side"]
+            entry   = state["entry"]
+            risk    = state["risk"]
+            is_long = side == "Buy"
+            if risk <= 0:
+                continue
+
+            # Get current mark price
+            resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
+            tickers = resp.get("result", {}).get("list", [])
+            if not tickers:
+                continue
+            mark = float(tickers[0].get("markPrice", 0))
+            if mark <= 0:
+                continue
+
+            current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
+            new_sl    = state.get("trail_sl", state["sl"])
+            changed   = False
+
+            # BE trigger
+            if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
+                be_price = entry
+                if (is_long and be_price > new_sl) or (not is_long and be_price < new_sl):
+                    new_sl = be_price
+                    changed = True
+                state["be_done"] = True
+                log.info(f"Trail: {symbol} {side} BE triggered at {current_r:.2f}R → SL {new_sl:.6f}")
+
+            # TP extension trigger
+            if EXTEND_BEYOND_TP and not state.get("tp_removed") and current_r >= TP_EXTEND_TRIGGER_R:
+                try:
+                    for o in get_open_orders(symbol):
+                        if o.get("reduceOnly") or o.get("orderId") == state.get("tp_order_id"):
+                            _api_call(session.cancel_order, category="linear",
+                                      symbol=symbol, orderId=o["orderId"])
+                            log.info(f"Trail: {symbol} TP order {o['orderId']} cancelled")
+                            break
+                except Exception as e:
+                    log.warning(f"Trail: cancel TP failed for {symbol}: {e}")
+                state["tp_removed"] = True
+                log.info(f"Trail: {symbol} {side} TP removed at {current_r:.2f}R — trailing now")
+
+            # Trailing SL (after TP removed or BE done)
+            if state.get("tp_removed") or state.get("be_done"):
+                steps     = int(current_r / TRAIL_STEP_R)
+                locked_r  = max(0, (steps - 1) * TRAIL_STEP_R)
+                trail_tgt = (entry + locked_r * risk) if is_long else (entry - locked_r * risk)
+                trail_tgt = round(trail_tgt, 8)
+                if is_long and trail_tgt > new_sl:
+                    new_sl  = trail_tgt
+                    changed = True
+                    log.info(f"Trail: {symbol} long SL → {new_sl:.6f} (+{locked_r:.1f}R locked, now {current_r:.2f}R)")
+                elif not is_long and trail_tgt < new_sl:
+                    new_sl  = trail_tgt
+                    changed = True
+                    log.info(f"Trail: {symbol} short SL → {new_sl:.6f} (+{locked_r:.1f}R locked, now {current_r:.2f}R)")
+
+            # Apply new SL to Bybit
+            if changed and new_sl != state.get("trail_sl"):
+                try:
+                    _api_call(session.set_trading_stop, category="linear",
+                              symbol=symbol, stopLoss=str(round(new_sl, 8)), positionIdx=0)
+                    state["trail_sl"] = new_sl
+                    with _trail_lock:
+                        _trail_state[order_id] = state
+                    log.info(f"Trail: {symbol} SL set to {new_sl:.6f}")
+                except Exception as e:
+                    log.warning(f"Trail: set_trading_stop failed {symbol}: {e}")
+
+        except Exception as e:
+            log.warning(f"Trail: error on {order_id}: {e}")
+
+
+def _trail_register(order_id: str, symbol: str, side: str,
+                    entry: float, sl: float, tp_order_id: str = ""):
+    """Register a filled trade for trail/BE monitoring."""
+    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
+        return
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return
+    with _trail_lock:
+        _trail_state[order_id] = {
+            "symbol":      symbol, "side":        side,
+            "entry":       entry,  "sl":          sl,
+            "risk":        risk,   "tp_order_id": tp_order_id,
+            "tp_removed":  False,  "be_done":     False,
+            "trail_sl":    sl,
+        }
+    log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl} risk={risk:.6f}")
+
+
+def _trail_deregister(order_id: str):
+    """Remove a trade from trail monitoring when closed/cancelled."""
+    with _trail_lock:
+        removed = _trail_state.pop(order_id, None)
+    if removed:
+        log.info(f"Trail: deregistered {order_id} ({removed.get('symbol')})")
+
+
 def _restricted_time_watcher():
     """
     Background thread — runs every 60s.
@@ -6695,5 +6853,6 @@ def _restricted_time_watcher():
     _start_poller()
     threading.Thread(target=_delayed_startup, daemon=True).start()
     threading.Thread(target=_restricted_time_watcher, daemon=True).start()
+    threading.Thread(target=_trail_watcher, daemon=True).start()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
