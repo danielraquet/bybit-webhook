@@ -1556,18 +1556,23 @@ def webhook():
             })
             conn = get_db()
             with conn.cursor() as cur:
-                # Find the row just inserted — most recent skipped for this symbol/side/entry
+                # Find the most recently inserted skipped row for this symbol+side
+                # Using opened_at DESC without entry cast (avoids type mismatch)
                 cur.execute(
                     "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s "
-                    "WHERE id = (SELECT id FROM trades WHERE status='skipped' AND symbol=%s AND side=%s "
-                    "AND entry::numeric = %s::numeric ORDER BY opened_at DESC LIMIT 1)",
+                    "WHERE id = ("
+                    "  SELECT id FROM trades "
+                    "  WHERE status='skipped' AND symbol=%s AND side=%s "
+                    "  AND timeframe IS NULL "
+                    "  ORDER BY opened_at DESC LIMIT 1"
+                    ")",
                     (tf_label, source, variant, cfg.get("leverage"), notes_json,
-                     symbol, side, str(entry))
+                     symbol, side)
                 )
                 updated = cur.rowcount
             conn.commit()
             conn.close()
-            log.info(f"Patched skipped trade metadata: {symbol} {side} source={source} tf={tf_label} rows={updated}")
+            log.info(f"Patched skipped trade: {symbol} {side} source={source} tf={tf_label} rows={updated}")
         except Exception as _e:
             log.warning(f"Could not patch skipped trade metadata: {_e}")
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
