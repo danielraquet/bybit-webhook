@@ -1553,20 +1553,21 @@ def webhook():
                 "klNear":            data.get("klNear"),
                 "klDistAtr":         data.get("klDistAtr"),
                 "emaOk":             data.get("emaOk"),
-            }) if data.get("rr") else None
+            })
             conn = get_db()
             with conn.cursor() as cur:
                 # Find the row just inserted — most recent skipped for this symbol/side/entry
                 cur.execute(
                     "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s "
                     "WHERE id = (SELECT id FROM trades WHERE status='skipped' AND symbol=%s AND side=%s "
-                    "AND entry=%s ORDER BY opened_at DESC LIMIT 1)",
-                    (tf_label, source, variant, cfg.get("leverage"), notes_json or reason,
-                     symbol, side, entry)
+                    "AND entry::numeric = %s::numeric ORDER BY opened_at DESC LIMIT 1)",
+                    (tf_label, source, variant, cfg.get("leverage"), notes_json,
+                     symbol, side, str(entry))
                 )
+                updated = cur.rowcount
             conn.commit()
             conn.close()
-            log.info(f"Patched skipped trade metadata: {symbol} {side} source={source} tf={tf_label}")
+            log.info(f"Patched skipped trade metadata: {symbol} {side} source={source} tf={tf_label} rows={updated}")
         except Exception as _e:
             log.warning(f"Could not patch skipped trade metadata: {_e}")
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
@@ -2180,6 +2181,55 @@ def set_media():
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/analyse-trade", methods=["POST", "OPTIONS"])
+def analyse_trade():
+    """Proxy endpoint — calls Anthropic API server-side to analyse a trade screenshot."""
+    resp_headers = {"Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "Content-Type"}
+    if request.method == "OPTIONS":
+        return jsonify({}), 200, resp_headers
+    try:
+        import urllib.request as _ur, json as _j, os as _os
+        body   = request.get_json(force=True)
+        prompt = body.get("prompt", "")
+        img_url= body.get("image_url", "")
+        api_key= _os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return jsonify({"error": "ANTHROPIC_API_KEY not set on server"}), 500, resp_headers
+        payload = _j.dumps({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 500,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "url", "url": img_url}},
+                    {"type": "text",  "text": prompt}
+                ]
+            }]
+        }).encode()
+        req = _ur.Request(
+            "https://api.anthropic.com/v1/messages",
+            data=payload,
+            headers={"Content-Type": "application/json",
+                     "x-api-key": api_key,
+                     "anthropic-version": "2023-06-01"}
+        )
+        with _ur.urlopen(req, timeout=30) as r:
+            data = _j.loads(r.read())
+        text = data.get("content", [{}])[0].get("text", "(no response)")
+        resp = jsonify({"text": text})
+        for k, v in resp_headers.items():
+            resp.headers[k] = v
+        return resp
+    except Exception as e:
+        import traceback
+        resp = jsonify({"error": str(e), "trace": traceback.format_exc()})
+        for k, v in resp_headers.items():
+            resp.headers[k] = v
+        return resp, 500
 
 
 @app.route("/journal/debug-skipped")
