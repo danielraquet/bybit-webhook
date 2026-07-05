@@ -242,7 +242,7 @@ var SHOW_SKIPPED   = false;
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
-  'PnL','PnL%','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','R','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -336,6 +336,20 @@ function renderTrades(trades){
     var pnlStr = pnl ? (pnl>0?'+':'')+pnl.toFixed(4) : '—';
     var pnlPct = parseFloat(t.pnl_pct)||0;
     var pnlPctStr = pnlPct ? (pnlPct>0?'+':'')+pnlPct.toFixed(2)+'%' : '—';
+    // R multiple = (exit - entry) / (entry - sl) for long, flipped for short
+    var rMultiple = '—';
+    var rColor = '';
+    if(t.exit_price && t.entry && t.sl) {
+      var exitP  = parseFloat(t.exit_price);
+      var entryP = parseFloat(t.entry);
+      var slP    = parseFloat(t.sl);
+      var risk   = Math.abs(entryP - slP);
+      if(risk > 0) {
+        var rVal = t.side === 'Buy' ? (exitP - entryP) / risk : (entryP - exitP) / risk;
+        rColor = rVal >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+        rMultiple = (rVal >= 0 ? '+' : '') + rVal.toFixed(2) + 'R';
+      }
+    }
     var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
     var notesFull  = (t.notes||'').split('|sheet_row:')[0];
     var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
@@ -380,6 +394,7 @@ function renderTrades(trades){
       + '<td style="color:var(--green)">'+esc(t.tp||'—')+'</td>'
       + '<td class="'+pnlClass(pnl)+' editable" data-id="'+t.id+'" data-type="pnl" data-val="'+(t.pnl||'')+'">'+pnlStr+'</td>'
       + '<td class="'+pnlClass(pnlPct)+'">'+pnlPctStr+'</td>'
+      + '<td style="font-weight:500;'+rColor+'">'+rMultiple+'</td>'
       + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
