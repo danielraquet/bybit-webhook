@@ -71,65 +71,9 @@ def get_config():
         "filter_timeframes":    _str("FILTER_TIMEFRAMES").upper(),
         "filter_symbols_allow": _str("FILTER_SYMBOLS_ALLOW").upper(),
         "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
-        "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),
-        "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0),
-        "restricted_times":     _str("RESTRICTED_TIMES"),  # e.g. "Fri 22:00-Mon 02:00,Sat 00:00-Sat 23:59"
-        "tz_offset_hours":      _float("TIMEZONE_OFFSET", 0),  # hours offset from UTC, e.g. 2 for UTC+2
+        "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),   # consecutive losses to trigger cooldown (0=off)
+        "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0), # hours to block that side after trigger
     }
-
-
-def is_restricted_time(restricted_times_str: str, tz_offset_hours: float = 0) -> tuple[bool, str]:
-    """
-    Check if current time falls within any restricted window.
-    Format: "Day HH:MM-Day HH:MM" windows separated by commas.
-    Day names: Mon,Tue,Wed,Thu,Fri,Sat,Sun
-    Times are interpreted in local timezone (tz_offset_hours from UTC).
-    Example: "Fri 22:00-Mon 02:00" with tz_offset_hours=2 means Fri 22:00 local (= Fri 20:00 UTC)
-    Returns (is_restricted, reason_string)
-    """
-    if not restricted_times_str:
-        return False, ""
-
-    DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
-    now_utc   = datetime.utcnow()
-    # Convert current UTC time to local time by adding offset
-    now_local = now_utc + timedelta(hours=tz_offset_hours)
-    now_mins  = now_local.weekday() * 24 * 60 + now_local.hour * 60 + now_local.minute
-    week_mins = 7 * 24 * 60
-
-    for window in restricted_times_str.split(","):
-        window = window.strip()
-        if not window:
-            continue
-        try:
-            parts = window.split("-", 1)
-            if len(parts) != 2:
-                continue
-            start_str, end_str = parts[0].strip(), parts[1].strip()
-
-            def parse_dt(s):
-                day_s, time_s = s.strip().split(" ", 1)
-                day_idx = DAY_MAP.get(day_s[:3].capitalize(), -1)
-                if day_idx == -1:
-                    raise ValueError(f"Unknown day: {day_s}")
-                h, m = map(int, time_s.split(":"))
-                return day_idx * 24 * 60 + h * 60 + m
-
-            start_m = parse_dt(start_str)
-            end_m   = parse_dt(end_str)
-
-            if end_m >= start_m:
-                in_window = start_m <= now_mins < end_m
-            else:
-                in_window = now_mins >= start_m or now_mins < end_m
-
-            if in_window:
-                tz_str = f"UTC+{int(tz_offset_hours)}" if tz_offset_hours >= 0 else f"UTC{int(tz_offset_hours)}"
-                return True, f"Restricted window: {window} ({tz_str})"
-        except Exception as e:
-            log.warning(f"RESTRICTED_TIMES parse error for '{window}': {e}")
-
-    return False, ""
 
 app = Flask(__name__)
 
@@ -180,7 +124,6 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <body>
 <h1>Trade Journal</h1>
 <div id="img-preview" class="img-preview"><img id="img-preview-img" src="" alt="preview"></div>
-<div id="restricted-banner" style="display:none;margin-bottom:10px;padding:8px 12px;border-radius:6px;font-size:12px;border:1px solid"></div>
 <div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
   <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
@@ -203,9 +146,8 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <button class="btn filter-outcome" data-outcome="all" style="border-color:var(--blue);color:var(--blue)">All</button>
   <button class="btn filter-outcome" data-outcome="tp">TP</button>
   <button class="btn filter-outcome" data-outcome="sl">SL</button>
-  <label style="display:flex;align-items:center;gap:5px;margin-left:8px;cursor:pointer;font-size:12px;color:var(--dim)">
-    <input type="checkbox" id="show-skipped" style="cursor:pointer;accent-color:var(--blue)">
-    <span>Skipped</span>
+  <label style="margin-left:8px;font-size:11px;color:var(--dim);cursor:pointer">
+    <input type="checkbox" id="show-skipped" style="margin-right:4px">Skipped
   </label>
   <div class="days-filter">
     <span id="day-links"></span>
@@ -224,7 +166,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <tbody id="tbody"></tbody>
 </table>
 <script>
-var DAYS_PARAM    = parseInt(new URLSearchParams(location.search).get('days')) || 0;
+var DAYS_PARAM   = parseInt(new URLSearchParams(location.search).get('days')) || 0;
 var STATUS_FILTER  = 'all';
 var OUTCOME_FILTER = 'all';
 var SHOW_SKIPPED   = false;
@@ -296,18 +238,10 @@ function showNotes(el) {
 function loadTrades(){
   var params = [];
   if(DAYS_PARAM) params.push('days='+DAYS_PARAM);
-  // When showing skipped, always fetch all so server doesn't filter them out
-  if(STATUS_FILTER !== 'all' && !SHOW_SKIPPED) params.push('status='+STATUS_FILTER);
+  if(STATUS_FILTER !== 'all') params.push('status='+STATUS_FILTER);
   var url = '/journal/data' + (params.length ? '?'+params.join('&') : '');
   fetch(url).then(function(r){return r.json();}).then(function(d){
-    var trades = d.trades || [];
-    // If a specific status filter is active AND skipped is shown, filter client-side
-    if(STATUS_FILTER !== 'all') {
-      trades = trades.filter(function(t){
-        return t.status === STATUS_FILTER || t.status === 'note' || (SHOW_SKIPPED && t.status === 'skipped');
-      });
-    }
-    renderTrades(trades);
+    renderTrades(d.trades || []);
     updateStats(d.trades || []);
   }).catch(function(e){ console.error('Load failed',e); });
 }
@@ -315,7 +249,6 @@ function loadTrades(){
 function renderTrades(trades){
   var tbody = document.getElementById('tbody');
   var rows = '';
-  // Pre-filter to get only visible trades for correct numbering
   var visible = trades.filter(function(t){
     if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
     if(OUTCOME_FILTER !== 'all' && t.status !== 'note' && t.outcome !== OUTCOME_FILTER) return false;
@@ -326,7 +259,7 @@ function renderTrades(trades){
     var num = visible.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
-        + '<td colspan="26"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<td colspan="27"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
         + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
         + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
         + '</td></tr>';
@@ -336,40 +269,34 @@ function renderTrades(trades){
     var pnlStr = pnl ? (pnl>0?'+':'')+pnl.toFixed(4) : '—';
     var pnlPct = parseFloat(t.pnl_pct)||0;
     var pnlPctStr = pnlPct ? (pnlPct>0?'+':'')+pnlPct.toFixed(2)+'%' : '—';
-    // R multiple = (exit - entry) / (entry - sl) for long, flipped for short
-    var rMultiple = '—';
-    var rColor = '';
-    if(t.exit_price && t.entry && t.sl) {
-      var exitP  = parseFloat(t.exit_price);
-      var entryP = parseFloat(t.entry);
-      var slP    = parseFloat(t.sl);
-      var risk   = Math.abs(entryP - slP);
-      if(risk > 0) {
-        var rVal = t.side === 'Buy' ? (exitP - entryP) / risk : (entryP - exitP) / risk;
-        rColor = rVal >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-        rMultiple = (rVal >= 0 ? '+' : '') + rVal.toFixed(2) + 'R';
+    // R multiple
+    var rStr = '—'; var rCol = '';
+    if(t.exit_price && t.entry && t.sl){
+      var risk = Math.abs(parseFloat(t.entry) - parseFloat(t.sl));
+      if(risk > 0){
+        var rVal = t.side==='Buy' ? (parseFloat(t.exit_price)-parseFloat(t.entry))/risk : (parseFloat(t.entry)-parseFloat(t.exit_price))/risk;
+        rCol = rVal>=0 ? 'color:var(--green)' : 'color:var(--red)';
+        rStr = (rVal>=0?'+':'')+rVal.toFixed(2)+'R';
       }
     }
+    // Condition fields from notes JSON
+    var notesObj = {};
+    try{ notesObj = JSON.parse(t.notes||'{}'); }catch(e){}
+    var obSizeAtr      = notesObj.obSizeAtr;
+    var impulseActual  = notesObj.impulseRatioActual;
+    var structureOk    = notesObj.structureOk;
+    var klNear         = notesObj.klNear;
+    var klDistAtr      = notesObj.klDistAtr;
+    var emaOk          = notesObj.emaOk;
+    var obSizeStr   = (obSizeAtr    != null && !isNaN(obSizeAtr))    ? parseFloat(obSizeAtr).toFixed(2)+'x'    : '—';
+    var impulseStr  = (impulseActual!= null && !isNaN(impulseActual))? parseFloat(impulseActual).toFixed(2)+'x': '—';
+    var klDistStr   = (klDistAtr    != null && !isNaN(klDistAtr))    ? parseFloat(klDistAtr).toFixed(2)+'x'    : '—';
+    var structHtml  = structureOk===true ? '<span style="color:var(--green)">✓</span>' : structureOk===false ? '<span style="color:var(--red)">✗</span>' : '—';
+    var klHtml      = klNear===true      ? '<span style="color:var(--green)">✓</span>' : klNear===false      ? '<span style="color:var(--red)">✗</span>' : '—';
+    var emaHtml     = emaOk===true       ? '<span style="color:var(--green)">✓</span>' : emaOk===false       ? '<span style="color:var(--red)">✗</span>' : '—';
     var outcomeHtml = t.outcome ? badge(t.outcome, t.outcome.toUpperCase()) : '—';
     var notesFull  = (t.notes||'').split('|sheet_row:')[0];
     var notesShort = esc(notesFull.slice(0,35)) + (notesFull.length > 35 ? '…' : '');
-    var obSizeAtr = null, impulseActual = null, structureOk = null, klNear = null, emaOk = null;
-    try {
-      var notesObj = JSON.parse(notesFull.split('|')[0].trim());
-      if (notesObj.obSizeAtr != null)          obSizeAtr     = parseFloat(notesObj.obSizeAtr);
-      if (notesObj.impulseRatioActual != null) impulseActual = parseFloat(notesObj.impulseRatioActual);
-      if (notesObj.structureOk != null)        structureOk   = notesObj.structureOk === true || notesObj.structureOk === 'true';
-      if (notesObj.klNear != null)             klNear        = notesObj.klNear === true || notesObj.klNear === 'true';
-      if (notesObj.emaOk != null)              emaOk         = notesObj.emaOk === true || notesObj.emaOk === 'true';
-      var klDistAtr = (notesObj.klDistAtr != null && parseFloat(notesObj.klDistAtr) >= 0) ? parseFloat(notesObj.klDistAtr) : null;
-    } catch(e) {}
-    var obSizeStr  = (obSizeAtr     != null && !isNaN(obSizeAtr))     ? obSizeAtr.toFixed(2)     + 'x' : '—';
-    var impulseStr = (impulseActual != null && !isNaN(impulseActual)) ? impulseActual.toFixed(2) + 'x' : '—';
-    var klDistAtrStr = (klDistAtr !== null && klDistAtr !== undefined && !isNaN(klDistAtr)) ? klDistAtr.toFixed(2) + 'x' : '—';
-    function condCell(val) {
-      if (val === null) return '<td class="dim">—</td>';
-      return val ? '<td style="color:var(--green);font-size:12px">✓</td>' : '<td style="color:var(--red);font-size:12px">✗</td>';
-    }
     var mediaHtml = '';
     if(t.media){ t.media.split('|').forEach(function(l){ if(l.trim()) mediaHtml += '<a href="'+esc(l.trim())+'" target="_blank" data-preview="'+esc(l.trim())+'" style="color:var(--blue);display:block;font-size:11px">link</a>'; }); }
     mediaHtml += '<span class="editable" data-id="'+t.id+'" data-type="media" style="font-size:11px;color:var(--dim)">'+(t.media?'edit':'+')+' </span>';
@@ -386,7 +313,7 @@ function renderTrades(trades){
         })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
       + '<td class="dim">'+esc(t.timeframe||'—')+'</td>'
-      + '<td class="editable" data-id="'+t.id+'" data-type="status" data-val="'+(t.status||'')+'">'+badge(t.status||'', t.status||'—')+'</td>'
+      + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
       + '<td>'+esc(t.exit_price||'—')+'</td>'
@@ -394,16 +321,16 @@ function renderTrades(trades){
       + '<td style="color:var(--green)">'+esc(t.tp||'—')+'</td>'
       + '<td class="'+pnlClass(pnl)+' editable" data-id="'+t.id+'" data-type="pnl" data-val="'+(t.pnl||'')+'">'+pnlStr+'</td>'
       + '<td class="'+pnlClass(pnlPct)+'">'+pnlPctStr+'</td>'
-      + '<td style="font-weight:500;'+rColor+'">'+rMultiple+'</td>'
+      + '<td style="font-weight:500;'+rCol+'">'+rStr+'</td>'
       + '<td class="editable" data-id="'+t.id+'" data-type="outcome" data-val="'+(t.outcome||'')+'">'+outcomeHtml+'</td>'
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
       + '<td class="dim">'+obSizeStr+'</td>'
       + '<td class="dim">'+impulseStr+'</td>'
-      + condCell(structureOk)
-      + condCell(klNear)
-      + '<td class="dim">' + klDistAtrStr + '</td>'
-      + condCell(emaOk)
+      + '<td>'+structHtml+'</td>'
+      + '<td>'+klHtml+'</td>'
+      + '<td class="dim">'+klDistStr+'</td>'
+      + '<td>'+emaHtml+'</td>'
       + '<td class="dim">'+utcToLocal(t.opened_at||'')+'</td>'
       + '<td class="dim">'+utcToLocal(t.closed_at||'')+'</td>'
       + '<td class="dim" style="cursor:pointer;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="Click to view full notes" onclick="showNotes(this)" data-full="'+esc(notesFull)+'">'+notesShort+'</td>'
@@ -458,13 +385,6 @@ document.addEventListener('click', function(e){
     fetch('/journal/set-outcome',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),outcome:next})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
-  if(type==='status'){
-    var opts=['open','closed','skipped'];
-    var next=opts[(opts.indexOf(val)+1)%opts.length];
-    if(!confirm('Change status to: '+next+'?')) return;
-    fetch('/journal/set-status',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),status:next})})
-      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
-  }
   if(type==='media'){
     var cur = prompt('Enter URL (separate multiple with |):','');
     if(cur===null) return;
@@ -485,7 +405,6 @@ document.querySelectorAll('.filter-status').forEach(function(btn){
   });
 });
 
-// Outcome filter buttons
 document.querySelectorAll('.filter-outcome').forEach(function(btn){
   btn.addEventListener('click', function(){
     document.querySelectorAll('.filter-outcome').forEach(function(b){ b.style.borderColor=''; b.style.color=''; });
@@ -496,7 +415,6 @@ document.querySelectorAll('.filter-outcome').forEach(function(btn){
   });
 });
 
-// Skipped toggle
 document.getElementById('show-skipped').addEventListener('change', function(){
   SHOW_SKIPPED = this.checked;
   loadTrades();
@@ -616,45 +534,6 @@ document.addEventListener('click', function(e) {
   img.addEventListener('error', function() { preview.style.display = 'none'; });
 })();
 
-// Restricted times info banner
-(function() {
-  fetch('/journal/restricted-times').then(function(r){return r.json();}).then(function(d){
-    var banner = document.getElementById('restricted-banner');
-    if (!banner) return;
-    if (d.errors && d.errors.length > 0) {
-      banner.style.display = 'block';
-      banner.style.background = 'rgba(239,83,80,0.1)';
-      banner.style.borderColor = 'rgba(239,83,80,0.4)';
-      banner.style.color = '#ef5350';
-      banner.innerHTML = '⚠️ <strong>RESTRICTED_TIMES config error</strong> — '
-        + d.errors.map(function(e){return '<code style="font-size:11px">'+e+'</code>';}).join(', ')
-        + '<br><span style="color:var(--dim);font-size:11px">Format: <code>Fri 22:00-Mon 02:00</code> &nbsp; Days: Mon Tue Wed Thu Fri Sat Sun &nbsp; Time: HH:MM (UTC)</span>';
-      return;
-    }
-    if (!d.configured) {
-      banner.style.display = 'block';
-      banner.style.background = 'rgba(107,114,128,0.07)';
-      banner.style.borderColor = 'rgba(107,114,128,0.2)';
-      banner.style.color = 'var(--dim)';
-      banner.innerHTML = '🕐 No restricted times set. Add <code style="font-size:11px">RESTRICTED_TIMES=Fri 22:00-Mon 02:00</code> in Railway to block weekend trading.';
-      return;
-    }
-    var statusCol = d.is_restricted ? '#ef5350' : '#4caf50';
-    var statusTxt = d.is_restricted ? '🚫 CURRENTLY RESTRICTED' : '✅ Currently trading';
-    var windowsHtml = d.windows.map(function(w) {
-      if (!w.valid) return '<span style="color:#ef5350">⚠️ '+w.raw+' (invalid: '+w.error+')</span>';
-      return '<strong>'+w.start+'</strong> → <strong>'+w.end+'</strong> ('+w.duration+')';
-    }).join(' &nbsp;|&nbsp; ');
-    banner.style.display = 'block';
-    banner.style.background = d.is_restricted ? 'rgba(239,83,80,0.08)' : 'rgba(26,26,26,0.6)';
-    banner.style.borderColor = d.is_restricted ? 'rgba(239,83,80,0.3)' : 'rgba(42,42,42,0.8)';
-    banner.style.color = 'var(--text)';
-    banner.innerHTML = '<span style="color:'+statusCol+';font-weight:500">'+statusTxt+'</span>'
-      + ' &nbsp;|&nbsp; '+windowsHtml
-      + ' &nbsp;|&nbsp; <span style="color:var(--dim)">Now: '+d.now_utc+'</span>';
-  }).catch(function(){});
-})();
-
 loadTrades();
 </script>
 </body>
@@ -665,15 +544,13 @@ loadTrades();
 # ─── BYBIT SESSION ────────────────────────────────────────────────────────────
 BYBIT_PROXY = os.environ.get("BYBIT_PROXY", "")
 
-# ─── TRAIL / TP EXTENSION SETTINGS ───────────────────────────────────────────
+# ─── TRAIL / TP EXTENSION ────────────────────────────────────────────────────
 EXTEND_BEYOND_TP    = os.getenv("EXTEND_BEYOND_TP",    "false").lower() == "true"
 TP_EXTEND_TRIGGER_R = float(os.getenv("TP_EXTEND_TRIGGER_R", "2.75") or "2.75")
 TRAIL_STEP_R        = float(os.getenv("TRAIL_STEP_R",        "1.0")  or "1.0")
 BE_TRIGGER_R        = float(os.getenv("BE_TRIGGER_R",        "0")    or "0")
-
-# Per-trade trail state: { order_id: { entry, sl, risk, side, symbol, ... } }
-_trail_state: dict = {}
-_trail_lock = threading.Lock()
+_trail_state: dict  = {}
+_trail_lock         = threading.Lock()
 
 try:
     session = HTTP(
@@ -806,35 +683,19 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
 
 
 def get_available_balance() -> float:
-    """Return available USDT balance (free margin only). Falls back to last known balance if API fails."""
+    """Return available USDT balance. Falls back to last known balance if API fails."""
     global _last_known_balance, _last_balance_time
     try:
         resp = _api_call(session.get_wallet_balance, accountType="UNIFIED", coin="USDT")
         for item in resp.get("result", {}).get("list", []):
             for coin in item.get("coin", []):
                 if coin.get("coin") == "USDT":
-                    log.info(f"Bybit wallet fields: availableToWithdraw={coin.get('availableToWithdraw')} walletBalance={coin.get('walletBalance')} equity={coin.get('equity')} totalPositionIM={coin.get('totalPositionIM')} usedMargin={coin.get('usedMargin')} availableToBorrow={coin.get('availableToBorrow')}")
-            for coin in item.get("coin", []):
-                if coin.get("coin") == "USDT":
-                    wallet  = float(coin.get("walletBalance")       or 0)
-                    avail   = float(coin.get("availableToWithdraw") or 0)
-                    equity  = float(coin.get("equity")              or wallet)
-                    locked  = float(coin.get("totalPositionIM")     or
-                                    coin.get("usedMargin")          or 0)
-
-                    # availableToWithdraw can be 0 in cross-margin mode even when funds exist.
-                    # Fall back to equity - locked margin in that case.
-                    if avail > 0:
-                        bal = avail
-                    elif equity > 0 and locked >= 0:
-                        bal = max(0.0, equity - locked)
-                    else:
-                        bal = wallet
-
-                    log.info(f"Balance: {bal:.2f} USDT free / {wallet:.2f} USDT total (live) [equity={equity:.2f} locked={locked:.2f}]")
-                    _last_known_balance = bal
-                    _last_balance_time  = time.time()
-                    return bal
+                    bal = float(coin.get("availableToWithdraw") or coin.get("walletBalance") or 0)
+                    if bal > 0:
+                        _last_known_balance = bal
+                        _last_balance_time  = time.time()
+                        log.info(f"Balance: {bal:.2f} USDT (live)")
+                        return bal
     except Exception as e:
         log.warning(f"Error fetching balance: {e}")
         if _last_known_balance > 0:
@@ -933,31 +794,7 @@ def calculate_qty(symbol: str, entry: float, sl: float, balance_pct: float, leve
 
     actual_risk = qty * sl_distance
     margin      = qty * entry / leverage
-
-    # ── Liquidation safety check ──────────────────────────────────────────────
-    # Approximate liquidation distance (simplified, ignores maintenance margin)
-    liq_distance  = entry / leverage
-    safety_ratio  = liq_distance / sl_distance if sl_distance > 0 else 999
-    liq_price_long  = round(entry * (1 - 1 / leverage), 6)
-    liq_price_short = round(entry * (1 + 1 / leverage), 6)
-
-    liq_warning = ""
-    if safety_ratio < 2:
-        liq_warning = f" ⚠️ DANGER: liquidation only {safety_ratio:.1f}× SL distance away! SL may not trigger before liquidation."
-    elif safety_ratio < 5:
-        liq_warning = f" ⚠️ WARNING: liquidation {safety_ratio:.1f}× SL distance away — consider reducing leverage."
-
-    log.info(
-        f"{symbol}: balance={balance:.2f} risk={risk_amount:.2f} USDT "
-        f"sl_dist={sl_distance:.6f} qty={qty} margin={margin:.2f} USDT "
-        f"actual_risk={actual_risk:.2f} USDT | "
-        f"liq≈{liq_price_long} (long) / {liq_price_short} (short) "
-        f"safety={safety_ratio:.1f}× SL dist{liq_warning}"
-    )
-
-    if safety_ratio < 2:
-        log.error(f"{symbol}: ORDER BLOCKED — liquidation too close to SL (ratio={safety_ratio:.1f}×). Increase SL buffer or reduce leverage.")
-        return 0.0
+    log.info(f"{symbol}: balance={balance:.2f} risk={risk_amount:.2f} USDT sl_dist={sl_distance:.6f} qty={qty} margin={margin:.2f} USDT actual_risk={actual_risk:.2f} USDT")
     return qty
 
 
@@ -1008,7 +845,6 @@ def _handle_order_update(msg):
             order_id = o.get("orderId", "")
             symbol   = o.get("symbol", "")
             status   = o.get("orderStatus", "")
-            side     = o.get("side", "")
             log.info(f"WS order: {symbol} {order_id} status={status}")
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 conn = get_db()
@@ -1019,24 +855,7 @@ def _handle_order_update(msg):
                     )
                 conn.commit()
                 conn.close()
-                _trail_deregister(order_id)
                 log.info(f"WS: {symbol} {order_id} marked skipped")
-            elif status == "Filled" and not o.get("reduceOnly"):
-                # Entry limit order filled — register for trail monitoring
-                try:
-                    conn = get_db()
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT entry, sl, tp FROM trades WHERE order_id=%s LIMIT 1",
-                            (order_id,)
-                        )
-                        row = cur.fetchone()
-                    conn.close()
-                    if row:
-                        entry_p, sl_p, tp_p = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
-                        _trail_register(order_id, symbol, side, entry_p, sl_p)
-                except Exception as tr_err:
-                    log.warning(f"Trail register on fill failed: {tr_err}")
     except Exception as e:
         log.error(f"WS order handler error: {e}")
 
@@ -1135,7 +954,6 @@ def _handle_execution_update(msg):
 
             emoji = "✅" if outcome == "tp" else "🔴"
             log.info(f"{emoji} WS closed {symbol} — {outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
-            _trail_deregister(str(trade.get("order_id", "")))
 
             try:
                 if gsheets.is_configured():
@@ -1580,56 +1398,10 @@ def webhook():
     bar_seconds   = int(data.get("barSeconds", os.getenv("BAR_SECONDS", "180")))  # from alert, fallback to env
     source        = data.get("source",    "unknown")
     variant       = data.get("variant",   "")
-    tf_label      = gsheets._bar_seconds_to_tf(bar_seconds)
-
-    def _log_skip(reason):
-        """Log a skipped trade with full metadata then patch all available fields."""
-        log_order_skipped(symbol, side, entry, sl, tp, reason)
-        try:
-            notes_json = json.dumps({
-                "rr":                data.get("rr"),
-                "slBuf":             data.get("slBuf"),
-                "minImpulse":        data.get("minImpulse"),
-                "entryOffset":       data.get("entryOffset"),
-                "obSizeAtr":         data.get("obSizeAtr"),
-                "impulseRatioActual":data.get("impulseRatioActual"),
-                "structureOk":       data.get("structureOk"),
-                "klNear":            data.get("klNear"),
-                "klDistAtr":         data.get("klDistAtr"),
-                "emaOk":             data.get("emaOk"),
-            })
-            conn = get_db()
-            with conn.cursor() as cur:
-                # Find the most recently inserted skipped row for this symbol+side
-                # Using opened_at DESC without entry cast (avoids type mismatch)
-                cur.execute(
-                    "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s "
-                    "WHERE id = ("
-                    "  SELECT id FROM trades "
-                    "  WHERE status='skipped' AND symbol=%s AND side=%s "
-                    "  AND timeframe IS NULL "
-                    "  ORDER BY opened_at DESC LIMIT 1"
-                    ")",
-                    (tf_label, source, variant, cfg.get("leverage"), notes_json,
-                     symbol, side)
-                )
-                updated = cur.rowcount
-            conn.commit()
-            conn.close()
-            log.info(f"Patched skipped trade: {symbol} {side} source={source} tf={tf_label} rows={updated}")
-        except Exception as _e:
-            log.warning(f"Could not patch skipped trade metadata: {_e}")
     test_mode     = str(data.get("testMode",     "false")).lower() == "true"
     test_bal_pct  = float(data.get("testBalancePct",  0.1))
     test_leverage = int(data.get("testLeverage", 2))
     log.info(f"Parsed: symbol={symbol} side={side} orderType={order_type} entry={entry} sl={sl} tp={tp} barSeconds={bar_seconds} testMode={test_mode}")
-
-    # ── Restricted time window check ─────────────────────────────────────────
-    is_restricted, restrict_reason = is_restricted_time(cfg.get("restricted_times", ""), cfg.get("tz_offset_hours", 0))
-    if is_restricted:
-        log.info(f"{symbol} {side} skipped — {restrict_reason}")
-        _log_skip(restrict_reason)
-        return jsonify({"status": "skipped", "message": restrict_reason}), 200
 
     # ── Deduplication guard — block identical signal within DEDUP_WINDOW seconds ─
     _dedup_key = (symbol, side, round(entry, 6))
@@ -1650,6 +1422,39 @@ def webhook():
         return jsonify({"status": "error", "message": msg}), 400
 
     # ── Server-side filters ───────────────────────────────────────────────────
+    tf_label = gsheets._bar_seconds_to_tf(bar_seconds)
+
+    def _log_skip(reason):
+        """Log a skipped trade with full metadata then patch all available fields."""
+        _log_skip(reason)
+        try:
+            notes_json = json.dumps({
+                "rr":                data.get("rr"),
+                "slBuf":             data.get("slBuf"),
+                "minImpulse":        data.get("minImpulse"),
+                "entryOffset":       data.get("entryOffset"),
+                "obSizeAtr":         data.get("obSizeAtr"),
+                "impulseRatioActual":data.get("impulseRatioActual"),
+                "structureOk":       data.get("structureOk"),
+                "klNear":            data.get("klNear"),
+                "klDistAtr":         data.get("klDistAtr"),
+                "emaOk":             data.get("emaOk"),
+            })
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE trades SET timeframe=%s, source=%s, variant=%s, leverage=%s, notes=%s "
+                    "WHERE id = (SELECT id FROM trades WHERE status='skipped' AND symbol=%s AND side=%s "
+                    "AND timeframe IS NULL ORDER BY opened_at DESC LIMIT 1)",
+                    (tf_label, source, variant, cfg.get("leverage"), notes_json, symbol, side)
+                )
+                updated = cur.rowcount
+            conn.commit()
+            conn.close()
+            log.info(f"Patched skipped trade: {symbol} {side} source={source} tf={tf_label} rows={updated}")
+        except Exception as _e:
+            log.warning(f"Could not patch skipped trade metadata: {_e}")
+
     # Extract WR from raw readable text — format: "WR: 28% (7/25)"
     alert_wr = 0.0
     try:
@@ -1742,7 +1547,7 @@ def webhook():
             "klNear":            data.get("klNear"),
             "klDistAtr":         data.get("klDistAtr"),
             "emaOk":             data.get("emaOk"),
-        }) if data.get("rr") else None
+        })
         # Use a placeholder order_id — will be matched by WebSocket on fill
         placeholder_id = f"bybit_native_{symbol}_{side}_{int(datetime.utcnow().timestamp())}"
         row_id = log_order_placed(
@@ -1855,8 +1660,7 @@ def webhook():
         trade_balance = get_available_balance()  # store for Google Sheets
         qty = calculate_qty(symbol, entry, sl, actual_bal_pct, actual_leverage)
         if qty <= 0:
-            log.warning(f"{symbol}: qty=0, skipping order (balance too low or SL too tight)")
-            return jsonify({"status": "skipped", "message": "Insufficient balance or invalid qty — order not placed"}), 200
+            return jsonify({"status": "error", "message": "Invalid quantity calculated"}), 400
 
         set_leverage(symbol, actual_leverage)
 
@@ -1918,7 +1722,7 @@ def webhook():
                                      "klNear":            data.get("klNear"),
                                      "klDistAtr":         data.get("klDistAtr"),
                                      "emaOk":             data.get("emaOk"),
-                                 }) if data.get("rr") else None)
+                                 }))
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
                 # This avoids cluttering the sheet with trades that never fill
                 # Schedule auto-cancel for limit orders only
@@ -2066,6 +1870,49 @@ def check_ip():
         return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/journal/debug-skipped")
+def debug_skipped():
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("SELECT status, COUNT(*) FROM trades GROUP BY status ORDER BY COUNT(*) DESC")
+            counts = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
+            cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 3")
+            cols   = [d[0] for d in cur.description]
+            sample = [dict(zip(cols, row)) for row in cur.fetchall()]
+        conn.close()
+        import json as _j
+        return jsonify({"status_counts": counts, "sample_skipped": _j.loads(_j.dumps(sample, default=str))})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/analyse-trade", methods=["POST", "OPTIONS"])
+def analyse_trade():
+    cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type"}
+    if request.method == "OPTIONS":
+        r = jsonify({}); [r.headers.__setitem__(k, v) for k, v in cors.items()]; return r
+    try:
+        import urllib.request as _ur, json as _j, os as _os
+        body    = request.get_json(force=True)
+        api_key = _os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return jsonify({"error": "ANTHROPIC_API_KEY not set"}), 500, cors
+        payload = _j.dumps({"model": "claude-sonnet-4-6", "max_tokens": 500,
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "url", "url": body.get("image_url", "")}},
+                {"type": "text", "text": body.get("prompt", "")}]}]}).encode()
+        req = _ur.Request("https://api.anthropic.com/v1/messages", data=payload,
+            headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"})
+        with _ur.urlopen(req, timeout=30) as r:
+            data = _j.loads(r.read())
+        resp = jsonify({"text": data.get("content", [{}])[0].get("text", "")})
+        [resp.headers.__setitem__(k, v) for k, v in cors.items()]
+        return resp
+    except Exception as e:
+        resp = jsonify({"error": str(e)}); [resp.headers.__setitem__(k, v) for k, v in cors.items()]; return resp, 500
 
 
 @app.route("/journal/sync-sheets", methods=["POST"])
@@ -2232,96 +2079,6 @@ def set_media():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/analyse-trade", methods=["POST", "OPTIONS"])
-def analyse_trade():
-    """Proxy endpoint — calls Anthropic API server-side to analyse a trade screenshot."""
-    resp_headers = {"Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type"}
-    if request.method == "OPTIONS":
-        return jsonify({}), 200, resp_headers
-    try:
-        import urllib.request as _ur, json as _j, os as _os
-        body   = request.get_json(force=True)
-        prompt = body.get("prompt", "")
-        img_url= body.get("image_url", "")
-        api_key= _os.environ.get("ANTHROPIC_API_KEY", "")
-        if not api_key:
-            return jsonify({"error": "ANTHROPIC_API_KEY not set on server"}), 500, resp_headers
-        payload = _j.dumps({
-            "model": "claude-sonnet-4-6",
-            "max_tokens": 500,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "url", "url": img_url}},
-                    {"type": "text",  "text": prompt}
-                ]
-            }]
-        }).encode()
-        req = _ur.Request(
-            "https://api.anthropic.com/v1/messages",
-            data=payload,
-            headers={"Content-Type": "application/json",
-                     "x-api-key": api_key,
-                     "anthropic-version": "2023-06-01"}
-        )
-        with _ur.urlopen(req, timeout=30) as r:
-            data = _j.loads(r.read())
-        text = data.get("content", [{}])[0].get("text", "(no response)")
-        resp = jsonify({"text": text})
-        for k, v in resp_headers.items():
-            resp.headers[k] = v
-        return resp
-    except Exception as e:
-        import traceback
-        resp = jsonify({"error": str(e), "trace": traceback.format_exc()})
-        for k, v in resp_headers.items():
-            resp.headers[k] = v
-        return resp, 500
-
-
-@app.route("/journal/debug-skipped")
-def debug_skipped():
-    """Debug: count skipped trades in DB and test fetch."""
-    try:
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("SELECT status, COUNT(*) as cnt FROM trades GROUP BY status ORDER BY cnt DESC")
-            counts = [{"status": r[0], "count": r[1]} for r in cur.fetchall()]
-            cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 3")
-            cols   = [d[0] for d in cur.description]
-            sample = [dict(zip(cols, row)) for row in cur.fetchall()]
-        conn.close()
-        # Convert any non-serialisable types
-        import json as _j
-        sample_safe = _j.loads(_j.dumps(sample, default=str))
-        return jsonify({"status_counts": counts, "sample_skipped": sample_safe})
-    except Exception as e:
-        import traceback
-        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
-
-
-@app.route("/journal/set-status", methods=["POST"])
-def set_status():
-    """Manually override trade status."""
-    try:
-        body   = request.get_json(force=True)
-        tid    = int(body.get("id", 0))
-        status = body.get("status", "").strip()
-        if status not in ("open", "closed", "skipped"):
-            return jsonify({"status": "error", "message": "Invalid status"}), 400
-        conn = get_db()
-        with conn.cursor() as cur:
-            cur.execute("UPDATE trades SET status=%s WHERE id=%s", (status, tid))
-        conn.commit()
-        conn.close()
-        log.info(f"Trade {tid} status manually set to {status}")
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
 @app.route("/journal/set-pnl", methods=["POST"])
 def set_pnl():
     """Manually set PnL for a trade."""
@@ -2379,77 +2136,6 @@ def delete_older_than(days):
         return jsonify({"status": "ok", "message": f"Deleted {deleted} trades older than {days} days"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.route("/journal/restricted-times")
-def journal_restricted_times():
-    """Return parsed restricted times info for the journal UI."""
-    DAY_MAP = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
-    DAY_NAMES = {v: k for k, v in DAY_MAP.items()}
-    cfg_now   = get_config()
-    raw       = cfg_now.get("restricted_times", "")
-    tz        = cfg_now.get("tz_offset_hours", 0)
-    is_restr, reason = is_restricted_time(raw, tz)
-    now_utc   = datetime.utcnow()
-    now_local = now_utc + timedelta(hours=tz)
-    tz_str    = f"UTC+{int(tz)}" if tz >= 0 else f"UTC{int(tz)}"
-
-    windows = []
-    errors  = []
-
-    if raw:
-        for window in raw.split(","):
-            window = window.strip()
-            if not window:
-                continue
-            try:
-                parts = window.split("-", 1)
-                if len(parts) != 2:
-                    errors.append(f"'{window}' — missing '-' separator")
-                    continue
-                start_str, end_str = parts[0].strip(), parts[1].strip()
-
-                def parse_dt(s):
-                    day_s, time_s = s.strip().split(" ", 1)
-                    day_idx = DAY_MAP.get(day_s[:3].capitalize(), -1)
-                    if day_idx == -1:
-                        raise ValueError(f"Unknown day '{day_s}'. Use: Mon Tue Wed Thu Fri Sat Sun")
-                    h, m = map(int, time_s.split(":"))
-                    if not (0 <= h <= 23 and 0 <= m <= 59):
-                        raise ValueError(f"Invalid time '{time_s}'")
-                    return day_idx, h, m
-
-                s_day, s_h, s_m = parse_dt(start_str)
-                e_day, e_h, e_m = parse_dt(end_str)
-
-                # Calculate duration
-                s_mins = s_day * 24 * 60 + s_h * 60 + s_m
-                e_mins = e_day * 24 * 60 + e_h * 60 + e_m
-                dur_mins = (e_mins - s_mins) % (7 * 24 * 60)
-                dur_h = dur_mins // 60
-                dur_m = dur_mins % 60
-
-                windows.append({
-                    "raw":      window,
-                    "start":    f"{DAY_NAMES[s_day]} {s_h:02d}:{s_m:02d} UTC",
-                    "end":      f"{DAY_NAMES[e_day]} {e_h:02d}:{e_m:02d} UTC",
-                    "duration": f"{dur_h}h {dur_m:02d}m" if dur_m else f"{dur_h}h",
-                    "wraps":    e_mins < s_mins,
-                    "valid":    True,
-                })
-            except Exception as e:
-                errors.append(f"'{window}' — {e}")
-                windows.append({"raw": window, "valid": False, "error": str(e)})
-
-    return jsonify({
-        "raw":          raw,
-        "configured":   bool(raw),
-        "is_restricted": is_restr,
-        "reason":       reason,
-        "now_utc":      now_local.strftime(f"%a %H:%M {tz_str}"),
-        "windows":      windows,
-        "errors":       errors,
-    })
 
 
 @app.route("/journal/reset", methods=["GET", "POST"])
@@ -2928,12 +2614,6 @@ def _explain_ob_detection(bars, atrs, cfg, target_bar_index=None):
         srv_cfg   = get_config()
         srv_gates = []
 
-        # Restricted time window
-        is_restr, restr_reason = is_restricted_time(srv_cfg.get("restricted_times", ""), srv_cfg.get("tz_offset_hours", 0))
-        srv_gates.append({"gate": "5a. Restricted time",
-            "pass": not is_restr,
-            "detail": restr_reason if is_restr else f"Not restricted (config: {srv_cfg.get('restricted_times') or 'none'})"})
-
         # Max trades
         open_pos = get_open_positions()
         max_t    = srv_cfg["max_trades"]
@@ -3351,23 +3031,22 @@ def journal():
 @app.route("/journal/data", methods=["GET", "OPTIONS"])
 def journal_data():
     """JSON endpoint for journal data — used by the journal page."""
+    resp_headers = {"Access-Control-Allow-Origin": "*"}
     if request.method == "OPTIONS":
-        resp = jsonify({})
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return resp
+        r = jsonify({})
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        r.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        r.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return r
     try:
-        days         = request.args.get("days")
+        days = request.args.get("days")
         status_filter = request.args.get("status", "all")
         try:
             days = int(days) if days else None
         except:
             days = None
-
         trades = get_all_trades(500, days=days)
-
-        # get_all_trades may exclude skipped trades at DB level — fetch them separately
+        # Fetch skipped trades separately (get_all_trades may exclude them)
         try:
             conn = get_db()
             with conn.cursor() as cur:
@@ -3381,28 +3060,23 @@ def journal_data():
                 cols    = [d[0] for d in cur.description]
                 skipped = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
-            # Merge skipped into trades (avoiding duplicates by id)
-            # Convert datetime/Decimal objects to strings first
             import json as _j
             skipped = _j.loads(_j.dumps(skipped, default=str))
-            existing_ids = {t.get("id") for t in trades}
+            trades_j = _j.loads(_j.dumps(trades, default=str))
+            existing_ids = {t.get("id") for t in trades_j}
             for t in skipped:
                 if t.get("id") not in existing_ids:
-                    trades.append(t)
-            # Re-sort by opened_at descending
-            trades.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+                    trades_j.append(t)
+            trades_j.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+            trades = trades_j
             log.info(f"Journal data: {len(trades)} total trades incl. {len(skipped)} skipped")
         except Exception as e:
             log.warning(f"Could not fetch skipped trades separately: {e}")
-
         # Apply status filter
         if status_filter == "closed":
             trades = [t for t in trades if t.get("status") in ("closed", "note")]
         elif status_filter == "open":
             trades = [t for t in trades if t.get("status") in ("open", "note")]
-        elif status_filter == "all":
-            pass  # include everything including skipped
-
         resp = jsonify({"trades": trades, "stats": get_stats()})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
@@ -3634,74 +3308,6 @@ ANALYSIS_HTML = """
 
   pnlCanvas.addEventListener('mousemove', function(e) { showTooltip(pnlCanvas, e, tl, pX, pY); });
   pnlCanvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
-})();
-</script>
-
-<div class="section" style="margin-bottom:16px">
-  <div class="section-title">Performance by hour of day (UTC)</div>
-  <p style="color:var(--dim);font-size:11px;margin-bottom:12px">Bars show cumulative PnL per hour. Colour = win rate. Hover for details.</p>
-  <canvas id="hour-chart" height="180"></canvas>
-  <div style="display:flex;gap:16px;margin-top:8px;font-size:11px;color:var(--dim)">
-    <span><span style="display:inline-block;width:10px;height:10px;background:#4caf50;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR ≥ 40%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#ffa726;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR 25–40%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#ef5350;vertical-align:middle;margin-right:4px;border-radius:2px"></span>WR &lt; 25%</span>
-    <span><span style="display:inline-block;width:10px;height:10px;background:#2a2a2a;vertical-align:middle;margin-right:4px;border-radius:2px"></span>No data</span>
-  </div>
-</div>
-
-<script>
-(function() {
-  var byHour = {{ by_hour|tojson }};
-  if (!byHour || !byHour.length) return;
-  var canvas = document.getElementById('hour-chart');
-  canvas.style.width = '100%';
-  canvas.width = canvas.offsetWidth || 800;
-  var ctx = canvas.getContext('2d');
-  var W = canvas.width, H = canvas.height;
-  var pad = {top:10, right:10, bottom:24, left:36};
-  var cw = W - pad.left - pad.right;
-  var ch = H - pad.top - pad.bottom;
-  var barW = cw / 24;
-  var maxAbsPnl = Math.max(1, Math.max.apply(null, byHour.map(function(h){ return Math.abs(h.pnl); })));
-  function wrColor(h) {
-    if (h.total === 0) return '#2a2a2a';
-    if (h.wr >= 40) return '#4caf50';
-    if (h.wr >= 25) return '#ffa726';
-    return '#ef5350';
-  }
-  var zeroY = pad.top + ch / 2;
-  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-  ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(W - pad.right, zeroY); ctx.stroke();
-  ctx.fillStyle = '#888'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillText('0', pad.left - 4, zeroY + 3);
-  byHour.forEach(function(h, i) {
-    var x = pad.left + i * barW;
-    var barH = (Math.abs(h.pnl) / maxAbsPnl) * (ch / 2 - 4);
-    var y = h.pnl >= 0 ? zeroY - barH : zeroY;
-    ctx.fillStyle = wrColor(h);
-    ctx.fillRect(x + 1, y, barW - 2, Math.max(1, barH));
-    if (i % 2 === 0) {
-      ctx.fillStyle = '#888'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(h.hour, x + barW / 2, H - 8);
-    }
-  });
-  var tooltip = document.createElement('div');
-  tooltip.style.cssText = 'position:fixed;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:6px;padding:8px 12px;font-size:11px;pointer-events:none;display:none;z-index:999;color:#e8e8e8;line-height:1.6';
-  document.body.appendChild(tooltip);
-  canvas.addEventListener('mousemove', function(e) {
-    var rect = canvas.getBoundingClientRect();
-    var mx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    var idx = Math.floor((mx - pad.left) / barW);
-    if (idx < 0 || idx > 23) { tooltip.style.display = 'none'; return; }
-    var h = byHour[idx];
-    tooltip.innerHTML = '<strong>' + h.label + ' UTC</strong><br>'
-      + 'WR: <strong style="color:' + wrColor(h) + '">' + h.wr + '%</strong> (' + h.wins + 'W / ' + h.losses + 'L)<br>'
-      + 'PnL: <span style="color:' + (h.pnl>=0?'#4caf50':'#ef5350') + '">' + (h.pnl>=0?'+':'') + h.pnl + '</span>';
-    tooltip.style.display = 'block';
-    tooltip.style.left = (e.clientX + 12) + 'px';
-    tooltip.style.top  = (e.clientY - 10) + 'px';
-  });
-  canvas.addEventListener('mouseleave', function() { tooltip.style.display = 'none'; });
 })();
 </script>
 
@@ -4225,7 +3831,6 @@ def _analyse_trades(trades):
 
     by_day_raw     = {}
     by_session_raw = {}
-    by_hour_raw    = {}
     wk_stats       = {"Weekend": {"wins":0,"losses":0,"pnl":0.0}, "Weekday": {"wins":0,"losses":0,"pnl":0.0}}
 
     for t in closed_known:
@@ -4247,16 +3852,6 @@ def _analyse_trades(trades):
         wk_stats[key]["wins" if outcome=="tp" else "losses"] += 1
         wk_stats[key]["pnl"] += pnl
 
-        # Hourly bucket
-        try:
-            hr = _dt.strptime((t.get("opened_at") or "")[:19], "%Y-%m-%d %H:%M:%S").hour
-            if hr not in by_hour_raw:
-                by_hour_raw[hr] = {"wins":0,"losses":0,"pnl":0.0}
-            by_hour_raw[hr]["wins" if outcome=="tp" else "losses"] += 1
-            by_hour_raw[hr]["pnl"] += pnl
-        except:
-            pass
-
     def make_time_rows(raw, sort_key=None):
         rows = []
         for k, v in raw.items():
@@ -4270,18 +3865,6 @@ def _analyse_trades(trades):
     by_day     = make_time_rows(by_day_raw,     lambda x: x["_order"])
     by_session = make_time_rows(by_session_raw)
     by_weekend = make_time_rows(wk_stats,        lambda x: x["key"])
-
-    # Hourly breakdown — all 24 hours present
-    by_hour = []
-    for h in range(24):
-        v = by_hour_raw.get(h, {"wins":0,"losses":0,"pnl":0.0})
-        total = v["wins"] + v["losses"]
-        by_hour.append({
-            "hour": h, "label": f"{h:02d}:00",
-            "wins": v["wins"], "losses": v["losses"], "total": total,
-            "wr":   round(v["wins"]/total*100,1) if total>0 else 0,
-            "pnl":  round(v["pnl"],2),
-        })
 
     # Add weekend insight
     for r in by_weekend:
@@ -4389,7 +3972,6 @@ def _analyse_trades(trades):
         "by_day":         by_day,
         "by_session":     by_session,
         "by_weekend":     by_weekend,
-        "by_hour":        by_hour,
         "sl_margins":     sl_margins,
         "by_tf_source":   by_tf_source,
         "by_tf_symbol":   by_tf_symbol,
@@ -6666,185 +6248,6 @@ def analysis_data():
         return jsonify({"status": "error", "message": str(e), "trace": traceback.format_exc()}), 500
 
 
-def _trail_watcher():
-    """
-    Background thread — checks open positions every 5s.
-    Manages BE trigger, TP extension, and trailing SL.
-    Only active when EXTEND_BEYOND_TP=true or BE_TRIGGER_R > 0.
-    """
-    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
-        log.info("Trail watcher disabled (EXTEND_BEYOND_TP=false, BE_TRIGGER_R=0)")
-        return
-    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R extend={EXTEND_BEYOND_TP}")
-    while True:
-        try:
-            _trail_check()
-        except Exception as e:
-            log.error(f"Trail watcher error: {e}")
-        time.sleep(5)
-
-
-def _trail_check():
-    """Single pass — check each tracked trade against current mark price."""
-    with _trail_lock:
-        if not _trail_state:
-            return
-        tracked = dict(_trail_state)
-
-    for order_id, state in tracked.items():
-        try:
-            symbol  = state["symbol"]
-            side    = state["side"]
-            entry   = state["entry"]
-            risk    = state["risk"]
-            is_long = side == "Buy"
-            if risk <= 0:
-                continue
-
-            # Get current mark price
-            resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
-            tickers = resp.get("result", {}).get("list", [])
-            if not tickers:
-                continue
-            mark = float(tickers[0].get("markPrice", 0))
-            if mark <= 0:
-                continue
-
-            current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
-            new_sl    = state.get("trail_sl", state["sl"])
-            changed   = False
-
-            # BE trigger
-            if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
-                be_price = entry
-                if (is_long and be_price > new_sl) or (not is_long and be_price < new_sl):
-                    new_sl = be_price
-                    changed = True
-                state["be_done"] = True
-                log.info(f"Trail: {symbol} {side} BE triggered at {current_r:.2f}R → SL {new_sl:.6f}")
-
-            # TP extension trigger
-            if EXTEND_BEYOND_TP and not state.get("tp_removed") and current_r >= TP_EXTEND_TRIGGER_R:
-                try:
-                    for o in get_open_orders(symbol):
-                        if o.get("reduceOnly") or o.get("orderId") == state.get("tp_order_id"):
-                            _api_call(session.cancel_order, category="linear",
-                                      symbol=symbol, orderId=o["orderId"])
-                            log.info(f"Trail: {symbol} TP order {o['orderId']} cancelled")
-                            break
-                except Exception as e:
-                    log.warning(f"Trail: cancel TP failed for {symbol}: {e}")
-                state["tp_removed"] = True
-                log.info(f"Trail: {symbol} {side} TP removed at {current_r:.2f}R — trailing now")
-
-            # Trailing SL (after TP removed or BE done)
-            if state.get("tp_removed") or state.get("be_done"):
-                steps     = int(current_r / TRAIL_STEP_R)
-                locked_r  = max(0, (steps - 1) * TRAIL_STEP_R)
-                trail_tgt = (entry + locked_r * risk) if is_long else (entry - locked_r * risk)
-                trail_tgt = round(trail_tgt, 8)
-                if is_long and trail_tgt > new_sl:
-                    new_sl  = trail_tgt
-                    changed = True
-                    log.info(f"Trail: {symbol} long SL → {new_sl:.6f} (+{locked_r:.1f}R locked, now {current_r:.2f}R)")
-                elif not is_long and trail_tgt < new_sl:
-                    new_sl  = trail_tgt
-                    changed = True
-                    log.info(f"Trail: {symbol} short SL → {new_sl:.6f} (+{locked_r:.1f}R locked, now {current_r:.2f}R)")
-
-            # Apply new SL to Bybit
-            if changed and new_sl != state.get("trail_sl"):
-                try:
-                    _api_call(session.set_trading_stop, category="linear",
-                              symbol=symbol, stopLoss=str(round(new_sl, 8)), positionIdx=0)
-                    state["trail_sl"] = new_sl
-                    with _trail_lock:
-                        _trail_state[order_id] = state
-                    log.info(f"Trail: {symbol} SL set to {new_sl:.6f}")
-                except Exception as e:
-                    log.warning(f"Trail: set_trading_stop failed {symbol}: {e}")
-
-        except Exception as e:
-            log.warning(f"Trail: error on {order_id}: {e}")
-
-
-def _trail_register(order_id: str, symbol: str, side: str,
-                    entry: float, sl: float, tp_order_id: str = ""):
-    """Register a filled trade for trail/BE monitoring."""
-    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
-        return
-    risk = abs(entry - sl)
-    if risk <= 0:
-        return
-    with _trail_lock:
-        _trail_state[order_id] = {
-            "symbol":      symbol, "side":        side,
-            "entry":       entry,  "sl":          sl,
-            "risk":        risk,   "tp_order_id": tp_order_id,
-            "tp_removed":  False,  "be_done":     False,
-            "trail_sl":    sl,
-        }
-    log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl} risk={risk:.6f}")
-
-
-def _trail_deregister(order_id: str):
-    """Remove a trade from trail monitoring when closed/cancelled."""
-    with _trail_lock:
-        removed = _trail_state.pop(order_id, None)
-    if removed:
-        log.info(f"Trail: deregistered {order_id} ({removed.get('symbol')})")
-
-
-def _restricted_time_watcher():
-    """
-    Background thread — runs every 60s.
-    When the server crosses INTO a restricted time window, cancels all open
-    limit orders on Bybit and marks them as skipped in the journal.
-    """
-    was_restricted = False
-    while True:
-        try:
-            time.sleep(60)
-            cfg = get_config()
-            is_restr, reason = is_restricted_time(cfg.get("restricted_times", ""), cfg.get("tz_offset_hours", 0))
-
-            if is_restr and not was_restricted:
-                log.info(f"🚫 Entering restricted window: {reason} — cancelling all open limit orders")
-                try:
-                    resp   = session.get_open_orders(category="linear", settleCoin="USDT")
-                    orders = resp.get("result", {}).get("list", [])
-                    cancelled = 0
-                    for order in orders:
-                        sym      = order.get("symbol", "")
-                        order_id = order.get("orderId", "")
-                        o_type   = order.get("orderType", "")
-                        if o_type == "Limit" and order_id:
-                            try:
-                                session.cancel_order(category="linear", symbol=sym, orderId=order_id)
-                                log.info(f"  Cancelled {sym} limit order {order_id} — restricted window")
-                                conn = get_db()
-                                with conn.cursor() as cur:
-                                    cur.execute(
-                                        "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s AND status='open'",
-                                        (f"Auto-cancelled — {reason}", order_id)
-                                    )
-                                conn.commit()
-                                conn.close()
-                                cancelled += 1
-                            except Exception as ce:
-                                log.error(f"  Failed to cancel {sym} {order_id}: {ce}")
-                    if cancelled == 0:
-                        log.info("  No open limit orders to cancel")
-                    else:
-                        log.info(f"  Cancelled {cancelled} limit order(s)")
-                except Exception as e:
-                    log.error(f"Restricted time watcher — error cancelling orders: {e}")
-
-            was_restricted = is_restr
-
-        except Exception as e:
-            log.error(f"Restricted time watcher error: {e}")
-
 
     cfg = get_config()
     log.info(f"Starting webhook server — testnet={TESTNET}")
@@ -6865,9 +6268,81 @@ def _restricted_time_watcher():
         except Exception as e:
             log.error(f"Backtest scheduler error: {e}")
 
+def _trail_watcher():
+    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
+        return
+    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R")
+    while True:
+        try:
+            with _trail_lock:
+                tracked = dict(_trail_state)
+            for order_id, state in tracked.items():
+                try:
+                    symbol  = state["symbol"]; side = state["side"]
+                    entry   = state["entry"];  risk = state["risk"]
+                    is_long = side == "Buy"
+                    if risk <= 0: continue
+                    resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
+                    tickers = resp.get("result", {}).get("list", [])
+                    if not tickers: continue
+                    mark    = float(tickers[0].get("markPrice", 0))
+                    if mark <= 0: continue
+                    current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
+                    new_sl    = state.get("trail_sl", state["sl"])
+                    changed   = False
+                    if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
+                        be_p = entry
+                        if (is_long and be_p > new_sl) or (not is_long and be_p < new_sl):
+                            new_sl = be_p; changed = True
+                        state["be_done"] = True
+                        log.info(f"Trail: {symbol} BE at {current_r:.2f}R → SL {new_sl:.6f}")
+                    if EXTEND_BEYOND_TP and not state.get("tp_removed") and current_r >= TP_EXTEND_TRIGGER_R:
+                        try:
+                            for o in get_open_orders(symbol):
+                                if o.get("reduceOnly") or o.get("orderId") == state.get("tp_order_id"):
+                                    _api_call(session.cancel_order, category="linear", symbol=symbol, orderId=o["orderId"])
+                                    log.info(f"Trail: {symbol} TP cancelled at {current_r:.2f}R")
+                                    break
+                        except Exception as e:
+                            log.warning(f"Trail cancel TP {symbol}: {e}")
+                        state["tp_removed"] = True
+                    if state.get("tp_removed") or state.get("be_done"):
+                        steps    = int(current_r / TRAIL_STEP_R)
+                        locked_r = max(0, (steps - 1) * TRAIL_STEP_R)
+                        trail_t  = (entry + locked_r * risk) if is_long else (entry - locked_r * risk)
+                        trail_t  = round(trail_t, 8)
+                        if is_long and trail_t > new_sl:
+                            new_sl = trail_t; changed = True
+                        elif not is_long and trail_t < new_sl:
+                            new_sl = trail_t; changed = True
+                    if changed and new_sl != state.get("trail_sl"):
+                        _api_call(session.set_trading_stop, category="linear", symbol=symbol, stopLoss=str(round(new_sl, 8)), positionIdx=0)
+                        state["trail_sl"] = new_sl
+                        with _trail_lock: _trail_state[order_id] = state
+                        log.info(f"Trail: {symbol} SL → {new_sl:.6f}")
+                except Exception as e:
+                    log.warning(f"Trail error {order_id}: {e}")
+        except Exception as e:
+            log.error(f"Trail watcher: {e}")
+        time.sleep(5)
+
+
+def _trail_register(order_id, symbol, side, entry, sl):
+    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0: return
+    risk = abs(entry - sl)
+    if risk <= 0: return
+    with _trail_lock:
+        _trail_state[order_id] = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
+                                   "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl}
+    log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}")
+
+
+def _trail_deregister(order_id):
+    with _trail_lock: _trail_state.pop(order_id, None)
+
+
     _start_poller()
     threading.Thread(target=_delayed_startup, daemon=True).start()
-    threading.Thread(target=_restricted_time_watcher, daemon=True).start()
     threading.Thread(target=_trail_watcher, daemon=True).start()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
