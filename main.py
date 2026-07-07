@@ -845,6 +845,7 @@ def _handle_order_update(msg):
             order_id = o.get("orderId", "")
             symbol   = o.get("symbol", "")
             status   = o.get("orderStatus", "")
+            side     = o.get("side", "")
             log.info(f"WS order: {symbol} {order_id} status={status}")
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 conn = get_db()
@@ -855,7 +856,26 @@ def _handle_order_update(msg):
                     )
                 conn.commit()
                 conn.close()
+                _trail_deregister(order_id)
                 log.info(f"WS: {symbol} {order_id} marked skipped")
+            elif status == "Filled" and not o.get("reduceOnly"):
+                # Entry limit order filled — register for trail monitoring
+                try:
+                    import psycopg2.extras as _pge2
+                    conn = get_db()
+                    with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
+                        cur.execute(
+                            "SELECT entry, sl FROM trades WHERE order_id=%s LIMIT 1",
+                            (order_id,)
+                        )
+                        row = cur.fetchone()
+                    conn.close()
+                    if row:
+                        _trail_register(order_id, symbol, side,
+                                        float(row["entry"] or 0),
+                                        float(row["sl"] or 0))
+                except Exception as tr_err:
+                    log.warning(f"Trail register failed: {tr_err}")
     except Exception as e:
         log.error(f"WS order handler error: {e}")
 
@@ -954,6 +974,7 @@ def _handle_execution_update(msg):
 
             emoji = "✅" if outcome == "tp" else "🔴"
             log.info(f"{emoji} WS closed {symbol} — {outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
+            _trail_deregister(str(trade.get("order_id", "")))
 
             try:
                 if gsheets.is_configured():
