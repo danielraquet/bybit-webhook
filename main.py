@@ -1784,6 +1784,13 @@ def status():
             "balance_pct":     cfg["balance_pct"],
             "leverage":        cfg["leverage"],
             "poll_interval":   cfg["poll_interval"],
+            "trail": {
+                "extend_beyond_tp":    EXTEND_BEYOND_TP,
+                "tp_extend_trigger_r": TP_EXTEND_TRIGGER_R,
+                "trail_step_r":        TRAIL_STEP_R,
+                "be_trigger_r":        BE_TRIGGER_R,
+                "tracked_trades":      len(_trail_state),
+            },
             "filters": {
                 "side":            cfg["filter_side"]          or "both",
                 "min_wr":          cfg["filter_min_wr"]        or "disabled",
