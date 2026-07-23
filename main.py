@@ -153,6 +153,12 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <span id="day-links"></span>
   </div>
 </div>
+<div id="restricted-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(239,83,80,0.15);border:1px solid rgba(239,83,80,0.4);color:#ef5350">
+  🚫 <strong>Trading restricted</strong> — <span id="restricted-reason"></span>
+</div>
+<div id="restricted-info" style="display:none;margin:8px 0;padding:8px 14px;border-radius:6px;font-size:11px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);color:var(--dim)">
+  Restricted windows: <span id="restricted-windows"></span>
+</div>
 <div class="stats">
   <div class="stat"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div>
   <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" id="s-wr">—</div></div>
@@ -233,6 +239,25 @@ function showNotes(el) {
   } catch(e) {
     alert(full);
   }
+}
+
+function loadRestrictedStatus(){
+  fetch('/journal/restricted-times').then(function(r){ return r.json(); }).then(function(d){
+    var banner = document.getElementById('restricted-banner');
+    var info   = document.getElementById('restricted-info');
+    var reason = document.getElementById('restricted-reason');
+    var wins   = document.getElementById('restricted-windows');
+    if(d.is_restricted){
+      banner.style.display = 'block';
+      reason.textContent   = d.reason || '';
+    } else {
+      banner.style.display = 'none';
+    }
+    if(d.windows && d.windows.length){
+      info.style.display = 'block';
+      wins.textContent   = d.windows.join(' | ') + ' (UTC+' + d.timezone_offset + ')';
+    }
+  }).catch(function(){});
 }
 
 function loadTrades(){
@@ -535,6 +560,8 @@ document.addEventListener('click', function(e) {
 })();
 
 loadTrades();
+loadRestrictedStatus();
+setInterval(loadRestrictedStatus, 60000);
 </script>
 </body>
 </html>
@@ -549,6 +576,10 @@ EXTEND_BEYOND_TP    = os.getenv("EXTEND_BEYOND_TP",    "false").lower() == "true
 TP_EXTEND_TRIGGER_R = float(os.getenv("TP_EXTEND_TRIGGER_R", "2.75") or "2.75")
 TRAIL_STEP_R        = float(os.getenv("TRAIL_STEP_R",        "1.0")  or "1.0")
 BE_TRIGGER_R        = float(os.getenv("BE_TRIGGER_R",        "0")    or "0")
+
+# Restricted trading times — e.g. "Fri 22:00-Mon 02:00" (local time, multiple separated by |)
+RESTRICTED_TIMES  = os.getenv("RESTRICTED_TIMES",  "")
+TIMEZONE_OFFSET   = int(os.getenv("TIMEZONE_OFFSET", "2") or "2")  # UTC+X
 _trail_state: dict  = {}
 _trail_lock         = threading.Lock()
 
@@ -1447,7 +1478,7 @@ def webhook():
 
     def _log_skip(reason):
         """Log a skipped trade with full metadata then patch all available fields."""
-        _log_skip(reason)
+        log_order_skipped(symbol, side, entry, sl, tp, reason)
         try:
             notes_json = json.dumps({
                 "rr":                data.get("rr"),
@@ -1475,6 +1506,13 @@ def webhook():
             log.info(f"Patched skipped trade: {symbol} {side} source={source} tf={tf_label} rows={updated}")
         except Exception as _e:
             log.warning(f"Could not patch skipped trade metadata: {_e}")
+
+    # ── Restricted time window check ──────────────────────────────────────────
+    is_restricted, restrict_reason = is_restricted_time(RESTRICTED_TIMES, TIMEZONE_OFFSET)
+    if is_restricted:
+        log.info(f"{symbol} {side} skipped — {restrict_reason}")
+        _log_skip(restrict_reason)
+        return jsonify({"status": "skipped", "message": restrict_reason}), 200
 
     # Extract WR from raw readable text — format: "WR: 28% (7/25)"
     alert_wr = 0.0
@@ -1898,6 +1936,24 @@ def check_ip():
         return jsonify({"ip": ip, "message": "This is the IP Bybit sees"}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/journal/restricted-times")
+def journal_restricted_times():
+    """Returns current restricted time status and parsed windows."""
+    is_restricted, reason = is_restricted_time(RESTRICTED_TIMES, TIMEZONE_OFFSET)
+    windows = []
+    for w in RESTRICTED_TIMES.split("|"):
+        w = w.strip()
+        if w:
+            windows.append(w)
+    return jsonify({
+        "is_restricted": is_restricted,
+        "reason": reason,
+        "windows": windows,
+        "timezone_offset": TIMEZONE_OFFSET,
+        "raw": RESTRICTED_TIMES,
+    })
 
 
 @app.route("/journal/debug-skipped")
@@ -6296,6 +6352,92 @@ def analysis_data():
         except Exception as e:
             log.error(f"Backtest scheduler error: {e}")
 
+def is_restricted_time(windows_str: str, tz_offset: int = 0) -> tuple:
+    """Check if current time falls within any restricted trading window.
+    windows_str format: 'Fri 22:00-Mon 02:00' or multiple separated by '|'
+    Returns (is_restricted: bool, reason: str)
+    """
+    if not windows_str.strip():
+        return False, ""
+    from datetime import datetime, timezone, timedelta
+    DAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+    now_utc   = datetime.now(timezone.utc)
+    now_local = now_utc + timedelta(hours=tz_offset)
+    now_day   = now_local.weekday()
+    now_mins  = now_local.hour * 60 + now_local.minute
+    for window in windows_str.split("|"):
+        window = window.strip()
+        if not window:
+            continue
+        try:
+            parts = window.split("-")
+            if len(parts) != 2:
+                continue
+            start_str, end_str = parts[0].strip(), parts[1].strip()
+            s_day_str, s_time  = start_str.split()
+            e_day_str, e_time  = end_str.split()
+            s_day = DAY_MAP.get(s_day_str.lower())
+            e_day = DAY_MAP.get(e_day_str.lower())
+            if s_day is None or e_day is None:
+                continue
+            sh, sm = map(int, s_time.split(":"))
+            eh, em = map(int, e_time.split(":"))
+            s_mins = sh * 60 + sm
+            e_mins = eh * 60 + em
+            # Convert to minutes since Monday 00:00
+            s_total = s_day * 1440 + s_mins
+            e_total = e_day * 1440 + e_mins
+            n_total = now_day * 1440 + now_mins
+            if s_total <= e_total:
+                in_window = s_total <= n_total < e_total
+            else:  # wraps around week boundary
+                in_window = n_total >= s_total or n_total < e_total
+            if in_window:
+                return True, f"Restricted window: {window} (UTC+{tz_offset})"
+        except Exception as e:
+            log.warning(f"Restricted time parse error '{window}': {e}")
+    return False, ""
+
+
+def _restricted_time_watcher():
+    """Background thread — cancels open limit orders when restricted window starts."""
+    log.info(f"Restricted time watcher started — windows: '{RESTRICTED_TIMES}' UTC+{TIMEZONE_OFFSET}")
+    was_restricted = False
+    while True:
+        try:
+            is_restricted, reason = is_restricted_time(RESTRICTED_TIMES, TIMEZONE_OFFSET)
+            if is_restricted and not was_restricted:
+                log.info(f"Restricted window started: {reason} — cancelling open limit orders")
+                try:
+                    conn = get_db()
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT order_id, symbol FROM trades WHERE status='open'")
+                        open_trades = cur.fetchall()
+                    conn.close()
+                    for order_id, symbol in open_trades:
+                        if order_id:
+                            try:
+                                _api_call(session.cancel_order, category="linear",
+                                          symbol=symbol, orderId=order_id)
+                                log.info(f"Restricted: cancelled {symbol} {order_id}")
+                            except Exception as e:
+                                log.warning(f"Restricted: cancel failed {symbol}: {e}")
+                        conn2 = get_db()
+                        with conn2.cursor() as cur2:
+                            cur2.execute(
+                                "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s",
+                                (reason, order_id)
+                            )
+                        conn2.commit()
+                        conn2.close()
+                except Exception as e:
+                    log.error(f"Restricted watcher cancel error: {e}")
+            was_restricted = is_restricted
+        except Exception as e:
+            log.error(f"Restricted watcher error: {e}")
+        time.sleep(60)
+
+
 def _trail_watcher():
     if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
         return
@@ -6371,6 +6513,7 @@ def _trail_deregister(order_id):
 
     _start_poller()
     threading.Thread(target=_delayed_startup, daemon=True).start()
+    threading.Thread(target=_restricted_time_watcher, daemon=True).start()
     threading.Thread(target=_trail_watcher, daemon=True).start()
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
