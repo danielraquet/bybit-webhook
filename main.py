@@ -834,35 +834,31 @@ def poll_closed_trades():
     Background thread — tries WebSocket first, falls back to REST polling.
     WebSocket is preferred as it avoids IP rate limits on REST endpoints.
     """
-    # Try WebSocket first
+    # WebSocket with auto-reconnect on ping/pong timeout
     ws_started = False
-    max_retries = 5
-    retry_delay = 5  # seconds between retries
-    for attempt in range(max_retries):
+    while True:
         try:
-            if attempt > 0:
-                log.info(f"WebSocket retry {attempt}/{max_retries} in {retry_delay}s...")
-                time.sleep(retry_delay)
             log.info("Starting Bybit WebSocket stream...")
             ws = WebSocket(
                 testnet=TESTNET,
                 channel_type="private",
                 api_key=API_KEY,
                 api_secret=API_SECRET,
+                ping_interval=20,
+                ping_timeout=10,
             )
             ws.order_stream(callback=_handle_order_update)
             ws.execution_stream(callback=_handle_execution_update)
             log.info("✅ WebSocket connected — listening for real-time order updates")
             _ws_connected = True
             ws_started = True
-            # Keep thread alive — WebSocket runs its own callbacks
+            # Keep alive — detect stale connection via heartbeat
             while True:
-                time.sleep(60)
+                time.sleep(30)
         except Exception as e:
-            import traceback
-            log.error(f"WebSocket attempt {attempt+1} failed: {e}")
+            log.warning(f"WebSocket dropped ({e}) — reconnecting in 5s...")
             _ws_connected = False
-    log.warning("WebSocket failed after all retries — falling back to REST polling")
+            time.sleep(5)
 
     # Fallback to REST polling
     if not ws_started:
