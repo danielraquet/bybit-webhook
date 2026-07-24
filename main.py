@@ -836,26 +836,33 @@ def poll_closed_trades():
     """
     # Try WebSocket first
     ws_started = False
-    try:
-        log.info("Starting Bybit WebSocket stream...")
-        ws = WebSocket(
-            testnet=TESTNET,
-            channel_type="private",
-            api_key=API_KEY,
-            api_secret=API_SECRET,
-        )
-        ws.order_stream(callback=_handle_order_update)
-        ws.execution_stream(callback=_handle_execution_update)
-        log.info("✅ WebSocket connected — listening for real-time order updates")
-        _ws_connected = True
-        ws_started = True
-        # Keep thread alive — WebSocket runs its own callbacks
-        while True:
-            time.sleep(60)
-    except Exception as e:
-        import traceback
-        log.error(f"WebSocket failed to connect: {e}\n{traceback.format_exc()}")
-        log.info("Falling back to REST poller...")
+    max_retries = 5
+    retry_delay = 5  # seconds between retries
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                log.info(f"WebSocket retry {attempt}/{max_retries} in {retry_delay}s...")
+                time.sleep(retry_delay)
+            log.info("Starting Bybit WebSocket stream...")
+            ws = WebSocket(
+                testnet=TESTNET,
+                channel_type="private",
+                api_key=API_KEY,
+                api_secret=API_SECRET,
+            )
+            ws.order_stream(callback=_handle_order_update)
+            ws.execution_stream(callback=_handle_execution_update)
+            log.info("✅ WebSocket connected — listening for real-time order updates")
+            _ws_connected = True
+            ws_started = True
+            # Keep thread alive — WebSocket runs its own callbacks
+            while True:
+                time.sleep(60)
+        except Exception as e:
+            import traceback
+            log.error(f"WebSocket attempt {attempt+1} failed: {e}")
+            _ws_connected = False
+    log.warning("WebSocket failed after all retries — falling back to REST polling")
 
     # Fallback to REST polling
     if not ws_started:
