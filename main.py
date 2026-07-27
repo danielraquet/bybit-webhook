@@ -6540,7 +6540,3 @@ _start_poller()
 threading.Thread(target=_delayed_startup, daemon=True).start()
 threading.Thread(target=_restricted_time_watcher, daemon=True).start()
 threading.Thread(target=_trail_watcher, daemon=True).start()
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
