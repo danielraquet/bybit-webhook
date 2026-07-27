@@ -6340,24 +6340,24 @@ def analysis_data():
 
 
 
-    cfg = get_config()
-    log.info(f"Starting webhook server — testnet={TESTNET}")
-    log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
-    # Delay startup tasks slightly to let gunicorn finish booting
-    def _delayed_startup():
-        time.sleep(3)
-        try:
-            _bt_init_table()
-        except Exception as e:
-            log.error(f"BT init error: {e}")
-        try:
-            _bt_init_configs_table()
-        except Exception as e:
-            log.error(f"BT configs init error: {e}")
-        try:
-            _start_backtest_scheduler()
-        except Exception as e:
-            log.error(f"Backtest scheduler error: {e}")
+cfg = get_config()
+log.info(f"Starting webhook server — testnet={TESTNET}")
+log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trades, {cfg['leverage']}x leverage")
+
+def _delayed_startup():
+    time.sleep(3)
+    try:
+        _bt_init_table()
+    except Exception as e:
+        log.error(f"BT init error: {e}")
+    try:
+        _bt_init_configs_table()
+    except Exception as e:
+        log.error(f"BT configs init error: {e}")
+    try:
+        _start_backtest_scheduler()
+    except Exception as e:
+        log.error(f"Backtest scheduler error: {e}")
 
 def is_restricted_time(windows_str: str, tz_offset: int = 0) -> tuple:
     """Check if current time falls within any restricted trading window.
