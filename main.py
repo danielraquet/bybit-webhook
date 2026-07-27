@@ -876,11 +876,12 @@ def _handle_order_update(msg):
     try:
         orders = msg.get("data", [])
         for o in orders:
-            order_id = o.get("orderId", "")
-            symbol   = o.get("symbol", "")
-            status   = o.get("orderStatus", "")
-            side     = o.get("side", "")
-            log.info(f"WS order: {symbol} {order_id} status={status}")
+            order_id   = o.get("orderId", "")
+            symbol     = o.get("symbol", "")
+            status     = o.get("orderStatus", "")
+            side       = o.get("side", "")
+            reduce_only = o.get("reduceOnly", False)
+            log.info(f"WS order: {symbol} {order_id} status={status} reduceOnly={reduce_only}")
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 conn = get_db()
                 with conn.cursor() as cur:
@@ -892,7 +893,7 @@ def _handle_order_update(msg):
                 conn.close()
                 _trail_deregister(order_id)
                 log.info(f"WS: {symbol} {order_id} marked skipped")
-            elif status == "Filled" and not o.get("reduceOnly"):
+            elif status in ("Filled", "PartiallyFilled") and not reduce_only:
                 # Entry limit order filled — register for trail monitoring
                 try:
                     import psycopg2.extras as _pge2
@@ -905,9 +906,12 @@ def _handle_order_update(msg):
                         row = cur.fetchone()
                     conn.close()
                     if row:
+                        log.info(f"Trail: registering {symbol} {side} on order fill (status={status})")
                         _trail_register(order_id, symbol, side,
                                         float(row["entry"] or 0),
                                         float(row["sl"] or 0))
+                    else:
+                        log.warning(f"Trail: no DB row found for order_id={order_id}")
                 except Exception as tr_err:
                     log.warning(f"Trail register failed: {tr_err}")
     except Exception as e:
@@ -6445,6 +6449,24 @@ def _trail_watcher():
     if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
         return
     log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R")
+
+    # On startup, register any already-open trades from DB
+    try:
+        import psycopg2.extras as _pge2s
+        conn = get_db()
+        with conn.cursor(cursor_factory=_pge2s.RealDictCursor) as cur:
+            cur.execute("SELECT order_id, symbol, side, entry, sl FROM trades WHERE status='open' AND order_id IS NOT NULL")
+            open_trades = cur.fetchall()
+        conn.close()
+        for t in open_trades:
+            if t["order_id"] and t["entry"] and t["sl"]:
+                _trail_register(t["order_id"], t["symbol"], t["side"],
+                                float(t["entry"] or 0), float(t["sl"] or 0))
+        if open_trades:
+            log.info(f"Trail watcher: recovered {len(open_trades)} open trades from DB")
+    except Exception as e:
+        log.warning(f"Trail watcher startup recovery failed: {e}")
+
     while True:
         try:
             with _trail_lock:
