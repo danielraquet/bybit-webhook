@@ -6536,9 +6536,9 @@ def _trail_deregister(order_id):
     with _trail_lock: _trail_state.pop(order_id, None)
 
 
-    _start_poller()
-    threading.Thread(target=_delayed_startup, daemon=True).start()
-    threading.Thread(target=_restricted_time_watcher, daemon=True).start()
-    threading.Thread(target=_trail_watcher, daemon=True).start()
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+_start_poller()
+threading.Thread(target=_delayed_startup, daemon=True).start()
+threading.Thread(target=_restricted_time_watcher, daemon=True).start()
+threading.Thread(target=_trail_watcher, daemon=True).start()
+port = int(os.getenv("PORT", "5000"))
+app.run(host="0.0.0.0", port=port, debug=False)
