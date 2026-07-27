@@ -1289,14 +1289,6 @@ def _start_poller():
     except Exception as e:
         log.error(f"Failed to start poller: {e}")
 
-# Start poller — deferred to avoid blocking module import
-try:
-    _start_poller()
-except Exception as _e:
-    import logging as _log
-    _log.getLogger("main").error(f"Poller start failed: {_e}")
-
-
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -6347,11 +6339,13 @@ log.info(f"Config: {cfg['balance_pct']}% per trade, max {cfg['max_trades']} trad
 def _delayed_startup():
     time.sleep(3)
     try:
-        _bt_init_table()
+        if callable(globals().get("_bt_init_table")):
+            _bt_init_table()
     except Exception as e:
         log.error(f"BT init error: {e}")
     try:
-        _bt_init_configs_table()
+        if callable(globals().get("_bt_init_configs_table")):
+            _bt_init_configs_table()
     except Exception as e:
         log.error(f"BT configs init error: {e}")
     try:
@@ -6536,7 +6530,10 @@ def _trail_deregister(order_id):
     with _trail_lock: _trail_state.pop(order_id, None)
 
 
-_start_poller()
-threading.Thread(target=_delayed_startup, daemon=True).start()
-threading.Thread(target=_restricted_time_watcher, daemon=True).start()
-threading.Thread(target=_trail_watcher, daemon=True).start()
+import os as _os_guard
+if not _os_guard.environ.get("_MAIN_STARTED"):
+    _os_guard.environ["_MAIN_STARTED"] = "1"
+    _start_poller()
+    threading.Thread(target=_delayed_startup, daemon=True).start()
+    threading.Thread(target=_restricted_time_watcher, daemon=True).start()
+    threading.Thread(target=_trail_watcher, daemon=True).start()
