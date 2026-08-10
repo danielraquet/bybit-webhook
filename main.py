@@ -183,6 +183,12 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <span style="font-size:11px;color:var(--dim)">to</span>
     <input type="date" id="range-date-to" style="font-size:11px">
   </div>
+  <div style="display:flex;align-items:center;gap:6px">
+    <span style="font-size:11px;color:var(--dim)">Variant</span>
+    <select id="range-variant" style="font-size:11px;min-width:90px">
+      <option value="">All</option>
+    </select>
+  </div>
   <button onclick="calcRange()" style="font-size:11px;padding:4px 12px">Calculate</button>
   <button onclick="clearRange()" style="font-size:11px;padding:4px 8px;opacity:0.5">Clear</button>
   <span id="range-result" style="font-size:12px;margin-left:4px"></span>
@@ -293,6 +299,18 @@ function loadTrades(){
     var closedCount = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; }).length;
     var hint = document.getElementById('range-hint');
     if(hint) hint.textContent = closedCount ? '1 – '+closedCount : '';
+    // Populate variant dropdown
+    var variants = {};
+    _allTrades.forEach(function(t){ if(t.variant) variants[t.variant] = true; });
+    var sel = document.getElementById('range-variant');
+    var cur = sel.value;
+    sel.innerHTML = '<option value="">All</option>';
+    Object.keys(variants).sort().forEach(function(v){
+      var o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      if(v === cur) o.selected = true;
+      sel.appendChild(o);
+    });
   }).catch(function(e){ console.error('Load failed',e); });
 }
 
@@ -420,6 +438,7 @@ function calcRange(){
   var toNum    = parseInt(document.getElementById('range-to').value);
   var fromDate = document.getElementById('range-date-from').value;
   var toDate   = document.getElementById('range-date-to').value;
+  var variant  = document.getElementById('range-variant').value;
   var result   = document.getElementById('range-result');
 
   // Get closed trades sorted by trade number (descending in UI = ascending by index)
@@ -448,6 +467,11 @@ function calcRange(){
     });
   }
 
+  // Filter by variant
+  if(variant){
+    filtered = filtered.filter(function(t){ return t.variant === variant; });
+  }
+
   if(!filtered.length){ result.textContent = 'No trades in range'; result.style.color='var(--dim)'; return; }
 
   var wins=0, losses=0, pnl=0;
@@ -472,6 +496,7 @@ function clearRange(){
   document.getElementById('range-to').value   = '';
   document.getElementById('range-date-from').value = '';
   document.getElementById('range-date-to').value   = '';
+  document.getElementById('range-variant').value   = '';
   document.getElementById('range-result').textContent = '';
 }
 
