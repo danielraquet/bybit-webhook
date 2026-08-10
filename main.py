@@ -167,6 +167,25 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" id="s-pnl">—</div></div>
   <div class="stat"><div class="stat-label">Open</div><div class="stat-value amber" id="s-open">—</div></div>
 </div>
+
+<div style="margin:10px 0;padding:10px 14px;background:var(--panel);border:0.5px solid var(--border);border-radius:6px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+  <span style="font-size:11px;color:var(--dim);font-weight:500">RANGE STATS</span>
+  <div style="display:flex;align-items:center;gap:6px">
+    <span style="font-size:11px;color:var(--dim)">Trades #</span>
+    <input type="number" id="range-from" placeholder="from" min="1" style="width:70px;font-size:11px">
+    <span style="font-size:11px;color:var(--dim)">to</span>
+    <input type="number" id="range-to" placeholder="to" min="1" style="width:70px;font-size:11px">
+  </div>
+  <div style="display:flex;align-items:center;gap:6px">
+    <span style="font-size:11px;color:var(--dim)">or dates</span>
+    <input type="date" id="range-date-from" style="font-size:11px">
+    <span style="font-size:11px;color:var(--dim)">to</span>
+    <input type="date" id="range-date-to" style="font-size:11px">
+  </div>
+  <button onclick="calcRange()" style="font-size:11px;padding:4px 12px">Calculate</button>
+  <button onclick="clearRange()" style="font-size:11px;padding:4px 8px;opacity:0.5">Clear</button>
+  <span id="range-result" style="font-size:12px;margin-left:4px"></span>
+</div>
 <table>
 <thead><tr id="thead-row"></tr></thead>
 <tbody id="tbody"></tbody>
@@ -266,8 +285,9 @@ function loadTrades(){
   if(STATUS_FILTER !== 'all') params.push('status='+STATUS_FILTER);
   var url = '/journal/data' + (params.length ? '?'+params.join('&') : '');
   fetch(url).then(function(r){return r.json();}).then(function(d){
-    renderTrades(d.trades || []);
-    updateStats(d.trades || []);
+    _allTrades = d.trades || [];
+    renderTrades(_allTrades);
+    updateStats(_allTrades);
   }).catch(function(e){ console.error('Load failed',e); });
 }
 
@@ -387,6 +407,65 @@ function updateStats(trades){
   document.getElementById('s-pnl').textContent = (pnlSum>=0?'+':'')+pnlSum.toFixed(2)+' USDT';
   document.getElementById('s-pnl').className = 'stat-value '+(pnlSum>=0?'green':'red');
   document.getElementById('s-open').textContent = open;
+}
+
+var _allTrades = [];
+function calcRange(){
+  var fromNum  = parseInt(document.getElementById('range-from').value);
+  var toNum    = parseInt(document.getElementById('range-to').value);
+  var fromDate = document.getElementById('range-date-from').value;
+  var toDate   = document.getElementById('range-date-to').value;
+  var result   = document.getElementById('range-result');
+
+  // Get closed trades sorted by trade number (descending in UI = ascending by index)
+  var closed = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; });
+  // Assign sequential numbers (1 = oldest)
+  var numbered = closed.slice().reverse();
+
+  var filtered = numbered;
+
+  // Filter by trade number range
+  if(!isNaN(fromNum) || !isNaN(toNum)){
+    var f = isNaN(fromNum) ? 1 : fromNum;
+    var t = isNaN(toNum)   ? numbered.length : toNum;
+    filtered = numbered.slice(f-1, t);
+  }
+
+  // Filter by date range
+  if(fromDate || toDate){
+    filtered = filtered.filter(function(t){
+      var d = (t.opened_at||'').slice(0,10);
+      if(fromDate && d < fromDate) return false;
+      if(toDate   && d > toDate)   return false;
+      return true;
+    });
+  }
+
+  if(!filtered.length){ result.textContent = 'No trades in range'; result.style.color='var(--dim)'; return; }
+
+  var wins=0, losses=0, pnl=0;
+  filtered.forEach(function(t){
+    var p = parseFloat(t.pnl)||0;
+    if(t.outcome==='tp'){ wins++; pnl+=p; }
+    if(t.outcome==='sl'){ losses++; pnl+=p; }
+  });
+  var total = wins+losses;
+  var wr    = total>0 ? Math.round(wins/total*100) : 0;
+  var wrCol = wr>=50?'var(--green)':wr>=35?'var(--amber)':'var(--red)';
+  var pnlCol = pnl>=0?'var(--green)':'var(--red)';
+  result.innerHTML =
+    filtered.length + ' trades &nbsp;|&nbsp; ' +
+    '<span style="color:'+wrCol+';font-weight:500">WR: '+wr+'%</span>' +
+    ' &nbsp;|&nbsp; ' + wins + 'W / ' + losses + 'L' +
+    ' &nbsp;|&nbsp; PnL: <span style="color:'+pnlCol+';font-weight:500">'+(pnl>=0?'+':'')+pnl.toFixed(2)+' USDT</span>';
+}
+
+function clearRange(){
+  document.getElementById('range-from').value = '';
+  document.getElementById('range-to').value   = '';
+  document.getElementById('range-date-from').value = '';
+  document.getElementById('range-date-to').value   = '';
+  document.getElementById('range-result').textContent = '';
 }
 
 // Event delegation for editable cells
@@ -1952,6 +2031,45 @@ def journal_restricted_times():
         "windows": windows,
         "timezone_offset": TIMEZONE_OFFSET,
         "raw": RESTRICTED_TIMES,
+    })
+
+
+@app.route("/debug/trail")
+def debug_trail():
+    """Show current trail watcher state."""
+    with _trail_lock:
+        state = dict(_trail_state)
+    # Get current prices for tracked trades
+    result = []
+    for order_id, s in state.items():
+        try:
+            resp = _api_call(session.get_tickers, category="linear", symbol=s["symbol"])
+            mark = float(resp.get("result", {}).get("list", [{}])[0].get("markPrice", 0))
+            risk = s["risk"]
+            current_r = (mark - s["entry"]) / risk if s["side"] == "Buy" else (s["entry"] - mark) / risk
+        except:
+            mark = 0
+            current_r = 0
+        result.append({
+            "order_id":    order_id,
+            "symbol":      s["symbol"],
+            "side":        s["side"],
+            "entry":       s["entry"],
+            "sl":          s["sl"],
+            "trail_sl":    s["trail_sl"],
+            "risk":        s["risk"],
+            "tp_removed":  s["tp_removed"],
+            "be_done":     s["be_done"],
+            "mark_price":  mark,
+            "current_r":   round(current_r, 3),
+        })
+    return jsonify({
+        "extend_beyond_tp":    EXTEND_BEYOND_TP,
+        "tp_extend_trigger_r": TP_EXTEND_TRIGGER_R,
+        "trail_step_r":        TRAIL_STEP_R,
+        "be_trigger_r":        BE_TRIGGER_R,
+        "tracked_trades":      len(state),
+        "trades":              result,
     })
 
 
@@ -6471,44 +6589,55 @@ def _trail_watcher():
                     entry   = state["entry"];  risk = state["risk"]
                     is_long = side == "Buy"
                     if risk <= 0: continue
+
+                    # Only need to poll until TP is removed — after that Bybit handles trail natively
+                    if state.get("tp_removed"):
+                        continue
+
                     resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
                     tickers = resp.get("result", {}).get("list", [])
                     if not tickers: continue
                     mark    = float(tickers[0].get("markPrice", 0))
                     if mark <= 0: continue
                     current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
-                    new_sl    = state.get("trail_sl", state["sl"])
-                    changed   = False
+
+                    # BE trigger (optional)
                     if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
-                        be_p = entry
-                        if (is_long and be_p > new_sl) or (not is_long and be_p < new_sl):
-                            new_sl = be_p; changed = True
-                        state["be_done"] = True
-                        log.info(f"Trail: {symbol} BE at {current_r:.2f}R → SL {new_sl:.6f}")
-                    if EXTEND_BEYOND_TP and not state.get("tp_removed") and current_r >= TP_EXTEND_TRIGGER_R:
+                        try:
+                            _api_call(session.set_trading_stop, category="linear",
+                                      symbol=symbol, stopLoss=str(round(entry, 8)), positionIdx=0)
+                            state["be_done"] = True
+                            with _trail_lock: _trail_state[order_id] = state
+                            log.info(f"Trail: {symbol} BE triggered at {current_r:.2f}R → SL moved to entry {entry}")
+                        except Exception as e:
+                            log.warning(f"Trail BE failed {symbol}: {e}")
+
+                    # TP extension trigger — cancel TP and activate Bybit native trailing stop
+                    if EXTEND_BEYOND_TP and current_r >= TP_EXTEND_TRIGGER_R:
+                        # Cancel the TP order
                         try:
                             for o in get_open_orders(symbol):
                                 if o.get("reduceOnly") or o.get("orderId") == state.get("tp_order_id"):
-                                    _api_call(session.cancel_order, category="linear", symbol=symbol, orderId=o["orderId"])
+                                    _api_call(session.cancel_order, category="linear",
+                                              symbol=symbol, orderId=o["orderId"])
                                     log.info(f"Trail: {symbol} TP cancelled at {current_r:.2f}R")
                                     break
                         except Exception as e:
                             log.warning(f"Trail cancel TP {symbol}: {e}")
-                        state["tp_removed"] = True
-                    if state.get("tp_removed") or state.get("be_done"):
-                        steps    = int(current_r / TRAIL_STEP_R)
-                        locked_r = max(0, (steps - 1) * TRAIL_STEP_R)
-                        trail_t  = (entry + locked_r * risk) if is_long else (entry - locked_r * risk)
-                        trail_t  = round(trail_t, 8)
-                        if is_long and trail_t > new_sl:
-                            new_sl = trail_t; changed = True
-                        elif not is_long and trail_t < new_sl:
-                            new_sl = trail_t; changed = True
-                    if changed and new_sl != state.get("trail_sl"):
-                        _api_call(session.set_trading_stop, category="linear", symbol=symbol, stopLoss=str(round(new_sl, 8)), positionIdx=0)
-                        state["trail_sl"] = new_sl
-                        with _trail_lock: _trail_state[order_id] = state
-                        log.info(f"Trail: {symbol} SL → {new_sl:.6f}")
+
+                        # Set Bybit native trailing stop — distance = TRAIL_STEP_R x risk
+                        trail_distance = round(TRAIL_STEP_R * risk, 8)
+                        try:
+                            _api_call(session.set_trading_stop, category="linear",
+                                      symbol=symbol,
+                                      trailingStop=str(trail_distance),
+                                      positionIdx=0)
+                            state["tp_removed"] = True
+                            with _trail_lock: _trail_state[order_id] = state
+                            log.info(f"Trail: {symbol} native trailing stop set — distance={trail_distance} ({TRAIL_STEP_R}R) at {current_r:.2f}R")
+                        except Exception as e:
+                            log.warning(f"Trail set_trading_stop failed {symbol}: {e}")
+
                 except Exception as e:
                     log.warning(f"Trail error {order_id}: {e}")
         except Exception as e:
