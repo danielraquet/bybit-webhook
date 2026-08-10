@@ -175,6 +175,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
     <input type="number" id="range-from" placeholder="from" min="1" style="width:70px;font-size:11px">
     <span style="font-size:11px;color:var(--dim)">to</span>
     <input type="number" id="range-to" placeholder="to" min="1" style="width:70px;font-size:11px">
+    <span id="range-hint" style="font-size:10px;color:var(--dim);opacity:0.6"></span>
   </div>
   <div style="display:flex;align-items:center;gap:6px">
     <span style="font-size:11px;color:var(--dim)">or dates</span>
@@ -288,6 +289,10 @@ function loadTrades(){
     _allTrades = d.trades || [];
     renderTrades(_allTrades);
     updateStats(_allTrades);
+    // Update range hint
+    var closedCount = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; }).length;
+    var hint = document.getElementById('range-hint');
+    if(hint) hint.textContent = closedCount ? '1 – '+closedCount : '';
   }).catch(function(e){ console.error('Load failed',e); });
 }
 
@@ -419,15 +424,17 @@ function calcRange(){
 
   // Get closed trades sorted by trade number (descending in UI = ascending by index)
   var closed = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; });
-  // Assign sequential numbers (1 = oldest)
   var numbered = closed.slice().reverse();
+
+  if(!numbered.length){ result.textContent = 'No closed trades loaded'; result.style.color='var(--dim)'; return; }
 
   var filtered = numbered;
 
   // Filter by trade number range
   if(!isNaN(fromNum) || !isNaN(toNum)){
-    var f = isNaN(fromNum) ? 1 : fromNum;
-    var t = isNaN(toNum)   ? numbered.length : toNum;
+    var f = isNaN(fromNum) ? 1 : Math.max(1, fromNum);
+    var t = isNaN(toNum)   ? numbered.length : Math.min(numbered.length, toNum);
+    if(f > numbered.length){ result.textContent = 'From # exceeds total trades ('+numbered.length+')'; result.style.color='var(--red)'; return; }
     filtered = numbered.slice(f-1, t);
   }
 
