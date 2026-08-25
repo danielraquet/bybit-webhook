@@ -35,7 +35,6 @@ COL_STRATEGY     = 16  # P
 COL_EXIT_DT      = 28  # AB
 COL_EXIT_QTY     = 29  # AC
 COL_EXIT_PRICE   = 30  # AD
-COL_TV_LINK      = 57  # BE — After Trade (Link)
 
 
 def _get_service():
@@ -82,39 +81,6 @@ def _next_row(service) -> int:
     except Exception as e:
         log.error(f"Error finding next row: {e}")
         return DATA_START_ROW
-
-
-def _tv_url(symbol: str, timeframe: str, opened_at: str) -> str:
-    """Build a TradingView chart URL for a trade entry."""
-    tf_map = {
-        "M3":"3","M5":"5","M15":"15","M30":"30",
-        "H1":"60","H2":"120","H4":"240","H12":"720","D1":"D",
-    }
-    url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{symbol}.P"
-    iv  = tf_map.get(timeframe, "")
-    if iv:
-        url += f"&interval={iv}"
-    if opened_at:
-        try:
-            dt = datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S")
-            url += f"&time={int(dt.timestamp())}"
-        except Exception:
-            pass
-    return url
-
-
-def _write_tv_link(service, sheet_row: int, url: str):
-    """Write TradingView URL to the After Trade (Link) column BE."""
-    try:
-        service.spreadsheets().values().update(
-            spreadsheetId    = SHEET_ID,
-            range            = f"'{SHEET_TAB}'!{_col_letter(COL_TV_LINK)}{sheet_row}",
-            valueInputOption = "USER_ENTERED",
-            body             = {"values": [[url]]}
-        ).execute()
-        log.info(f"📊 Sheets: TV link written to row {sheet_row}")
-    except Exception as e:
-        log.error(f"Sheets _write_tv_link error: {e}")
 
 
 def _bar_seconds_to_tf(bar_seconds: int) -> str:
@@ -244,7 +210,7 @@ def push_closed_trade(symbol: str, side: str, qty: float, entry: float,
 
         service.spreadsheets().values().update(
             spreadsheetId    = SHEET_ID,
-            range            = f"'{SHEET_TAB}'!A{row}",
+            range            = f"'{SHEET_TAB}'!A{row}:{_col_letter(len(row_data))}{row}",
             valueInputOption = "USER_ENTERED",
             body             = {"values": [row_data]}
         ).execute()
@@ -253,25 +219,6 @@ def push_closed_trade(symbol: str, side: str, qty: float, entry: float,
     except Exception as e:
         log.error(f"Sheets push_closed_trade error: {e}")
         return -1
-
-
-def push_media_link(sheet_row: int, media: str):
-    """Write screenshot/media URL to the After Trade (Link) column BE."""
-    if sheet_row < DATA_START_ROW or not media:
-        return
-    service = _get_service()
-    if not service:
-        return
-    try:
-        service.spreadsheets().values().update(
-            spreadsheetId    = SHEET_ID,
-            range            = f"'{SHEET_TAB}'!{_col_letter(COL_TV_LINK)}{sheet_row}",
-            valueInputOption = "USER_ENTERED",
-            body             = {"values": [[media]]}
-        ).execute()
-        log.info(f"📊 Sheets: media link written to row {sheet_row}")
-    except Exception as e:
-        log.error(f"Sheets push_media_link error: {e}")
 
 
 def is_configured() -> bool:
