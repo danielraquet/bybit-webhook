@@ -36,6 +36,13 @@ COL_EXIT_DT      = 28  # AB
 COL_EXIT_QTY     = 29  # AC
 COL_EXIT_PRICE   = 30  # AD
 
+# Column used to detect the "next empty row". Must be a column that EVERY
+# write path (push_trade_opened AND push_closed_trade) actually populates.
+# COL_SR_NO is NOT safe for this — push_closed_trade never sets it, which
+# previously caused _next_row to always return DATA_START_ROW and every
+# closed trade to overwrite row 4.
+ROW_DETECT_COL   = COL_PAIR  # I
+
 
 def _get_service():
     """Build Google Sheets service from service account JSON."""
@@ -65,11 +72,14 @@ def _col_letter(n: int) -> str:
 
 
 def _next_row(service) -> int:
-    """Find the next empty row by checking Entry Date/Time column (B)."""
+    """Find the next empty row by checking the Pair column (I), which every
+    write path populates. Do not key this off COL_SR_NO — see comment above
+    ROW_DETECT_COL."""
     try:
+        col = _col_letter(ROW_DETECT_COL)
         result = service.spreadsheets().values().get(
             spreadsheetId=SHEET_ID,
-            range=f"'{SHEET_TAB}'!B{DATA_START_ROW}:B"
+            range=f"'{SHEET_TAB}'!{col}{DATA_START_ROW}:{col}"
         ).execute()
         values = result.get("values", [])
         # Find last non-empty row
@@ -124,7 +134,7 @@ def push_trade_opened(symbol: str, side: str, qty: float, entry: float,
         row_data[COL_ACCOUNT    - 1] = "Trading"
         row_data[COL_EXCHANGE   - 1] = "Bybit"
         row_data[COL_CURRENCY   - 1] = "$"
-        row_data[COL_START_BAL  - 1] = 2500
+        row_data[COL_START_BAL  - 1] = balance
         row_data[COL_SIDE       - 1] = "LONG" if side == "Buy" else "SHORT"
         row_data[COL_PAIR       - 1] = symbol
         row_data[COL_QTY        - 1] = qty
