@@ -6,6 +6,7 @@ Requires GOOGLE_SHEETS_ID and GOOGLE_SERVICE_ACCOUNT_JSON env vars
 import os
 import json
 import logging
+import httplib2
 from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -14,6 +15,18 @@ SHEET_ID       = os.getenv("GOOGLE_SHEETS_ID", "")
 CREDS_JSON     = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 SHEET_TAB      = "Trading Journal"
 DATA_START_ROW = 4  # first data row
+
+# Hard timeout (seconds) on every Sheets API call. Without this, a slow or
+# hung Google API response blocks the calling thread indefinitely — on a
+# single-worker gunicorn setup that means a stalled Sheets call can trigger
+# the worker timeout and kill the ENTIRE webhook server, not just the sync.
+# This bounds the damage to a fast, loggable failure instead.
+REQUEST_TIMEOUT_SECONDS = 10
+
+# Cached service object — rebuilding this (JSON parse + OAuth credential
+# construction) on every single call adds latency to the request path for
+# no reason; the credentials don't change between calls.
+_service_cache = None
 
 # Column mapping (1-indexed)
 COL_SR_NO        = 2   # B
@@ -45,17 +58,30 @@ ROW_DETECT_COL   = COL_PAIR  # I
 
 
 def _get_service():
-    """Build Google Sheets service from service account JSON."""
+    """Build (or return cached) Google Sheets service, with a hard request
+    timeout so a stalled Google API call can't hang the calling thread."""
+    global _service_cache
+    if _service_cache is not None:
+        return _service_cache
+
     if not CREDS_JSON or not SHEET_ID:
         return None
     try:
         from google.oauth2.service_account import Credentials
         from googleapiclient.discovery import build
+        from google_auth_httplib2 import AuthorizedHttp
 
         creds_dict = json.loads(CREDS_JSON)
         scopes     = ["https://www.googleapis.com/auth/spreadsheets"]
         creds      = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        service    = build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+        # AuthorizedHttp wraps httplib2 so the timeout applies to every
+        # request made through this service, including token refreshes.
+        authed_http = AuthorizedHttp(
+            creds, http=httplib2.Http(timeout=REQUEST_TIMEOUT_SECONDS)
+        )
+        service = build("sheets", "v4", http=authed_http, cache_discovery=False)
+        _service_cache = service
         return service
     except Exception as e:
         log.error(f"Google Sheets service error: {e}")
