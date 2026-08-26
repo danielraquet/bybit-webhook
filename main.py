@@ -1011,7 +1011,7 @@ def _handle_order_update(msg):
                     conn = get_db()
                     with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
                         cur.execute(
-                            "SELECT entry, sl FROM trades WHERE order_id=%s LIMIT 1",
+                            "SELECT entry, sl, tp1, tp1_pct FROM trades WHERE order_id=%s LIMIT 1",
                             (order_id,)
                         )
                         row = cur.fetchone()
@@ -1020,7 +1020,9 @@ def _handle_order_update(msg):
                         log.info(f"Trail: registering {symbol} {side} on order fill (status={status})")
                         _trail_register(order_id, symbol, side,
                                         float(row["entry"] or 0),
-                                        float(row["sl"] or 0))
+                                        float(row["sl"] or 0),
+                                        tp1=float(row["tp1"]) if row.get("tp1") is not None else None,
+                                        tp1_pct=float(row["tp1_pct"] or 0))
                     else:
                         log.warning(f"Trail: no DB row found for order_id={order_id}")
                 except Exception as tr_err:
@@ -1892,6 +1894,24 @@ def webhook():
                                      "klDistAtr":         data.get("klDistAtr"),
                                      "emaOk":             data.get("emaOk"),
                                  }))
+                # Persist tp1/tp1Pct (partial-exit level) if this alert included one —
+                # read back at fill time so the trail watcher can register the partial
+                # exit, and survives server restarts via the recovery query below.
+                tp1_raw     = data.get("tp1")
+                tp1_pct_raw = data.get("tp1Pct")
+                if tp1_raw is not None:
+                    try:
+                        tconn = get_db()
+                        with tconn.cursor() as tcur:
+                            tcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
+                            tcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
+                            tcur.execute("UPDATE trades SET tp1=%s, tp1_pct=%s WHERE order_id=%s",
+                                        (float(tp1_raw), float(tp1_pct_raw or 0), order_id))
+                        tconn.commit()
+                        tconn.close()
+                        log.info(f"Partial exit stored: {symbol} tp1={tp1_raw} ({tp1_pct_raw}%)")
+                    except Exception as _tp1_err:
+                        log.warning(f"Could not persist tp1/tp1Pct for {order_id}: {_tp1_err}")
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
                 # This avoids cluttering the sheet with trades that never fill
                 # Schedule auto-cancel for limit orders only
@@ -6590,22 +6610,25 @@ def _restricted_time_watcher():
 
 
 def _trail_watcher():
-    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0:
-        return
-    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R")
+    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R (partial-exit driven per-trade via tp1)")
 
     # On startup, register any already-open trades from DB
     try:
         import psycopg2.extras as _pge2s
         conn = get_db()
         with conn.cursor(cursor_factory=_pge2s.RealDictCursor) as cur:
-            cur.execute("SELECT order_id, symbol, side, entry, sl FROM trades WHERE status='open' AND order_id IS NOT NULL")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
+            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct FROM trades WHERE status='open' AND order_id IS NOT NULL")
             open_trades = cur.fetchall()
+        conn.commit()
         conn.close()
         for t in open_trades:
             if t["order_id"] and t["entry"] and t["sl"]:
                 _trail_register(t["order_id"], t["symbol"], t["side"],
-                                float(t["entry"] or 0), float(t["sl"] or 0))
+                                float(t["entry"] or 0), float(t["sl"] or 0),
+                                tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
+                                tp1_pct=float(t["tp1_pct"] or 0))
         if open_trades:
             log.info(f"Trail watcher: recovered {len(open_trades)} open trades from DB")
     except Exception as e:
@@ -6632,6 +6655,40 @@ def _trail_watcher():
                     mark    = float(tickers[0].get("markPrice", 0))
                     if mark <= 0: continue
                     current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
+
+                    # Partial exit — close tp1_pct% of the position at partial_r.
+                    # SL is left completely untouched; Bybit's native full-position TP
+                    # (already set to the runner target at order placement) auto-tracks
+                    # the reduced position size for the remainder.
+                    if state.get("tp1") and not state.get("partial_done") and state.get("partial_r") and current_r >= state["partial_r"]:
+                        try:
+                            pos_resp  = _api_call(session.get_positions, category="linear", symbol=symbol)
+                            positions = pos_resp.get("result", {}).get("list", [])
+                            live_size = 0.0
+                            for p in positions:
+                                if float(p.get("size", 0)) > 0:
+                                    live_size = float(p["size"])
+                                    break
+                            if live_size > 0:
+                                info      = get_instrument_info(symbol)
+                                close_qty = round_to_step(live_size * state["tp1_pct"] / 100.0, info["qty_step"])
+                                if close_qty > 0 and close_qty < live_size:
+                                    close_side = "Sell" if is_long else "Buy"
+                                    presp = _api_call(session.place_order, category="linear", symbol=symbol,
+                                                       side=close_side, orderType="Market", qty=str(close_qty),
+                                                       reduceOnly=True, timeInForce="IOC", positionIdx=0)
+                                    if presp.get("retCode", -1) == 0:
+                                        state["partial_done"] = True
+                                        with _trail_lock: _trail_state[order_id] = state
+                                        log.info(f"Trail: {symbol} partial exit — closed {close_qty} ({state['tp1_pct']}%) at {current_r:.2f}R, SL unchanged")
+                                    else:
+                                        log.warning(f"Trail: partial exit order failed {symbol}: {presp.get('retMsg')}")
+                                else:
+                                    log.warning(f"Trail: partial exit qty invalid for {symbol} — live_size={live_size} pct={state['tp1_pct']} rounded={close_qty}")
+                            else:
+                                log.warning(f"Trail: no live position found for {symbol} — skipping partial exit")
+                        except Exception as e:
+                            log.warning(f"Trail partial exit failed {symbol}: {e}")
 
                     # BE trigger (optional)
                     if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
@@ -6677,14 +6734,18 @@ def _trail_watcher():
         time.sleep(5)
 
 
-def _trail_register(order_id, symbol, side, entry, sl):
-    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0: return
+def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0):
+    if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0 and not tp1:
+        return
     risk = abs(entry - sl)
     if risk <= 0: return
+    partial_r = (abs(tp1 - entry) / risk) if tp1 else None
     with _trail_lock:
         _trail_state[order_id] = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
-                                   "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl}
-    log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}")
+                                   "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl,
+                                   "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r, "partial_done": False}
+    log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}" +
+             (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else ""))
 
 
 def _trail_deregister(order_id):
