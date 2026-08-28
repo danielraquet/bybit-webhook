@@ -728,6 +728,19 @@ def get_open_positions() -> list:
         return []
 
 
+def get_live_position_size(symbol: str) -> float:
+    """Return the current live position size for a symbol (0 if flat)."""
+    try:
+        resp = _api_call(session.get_positions, category="linear", symbol=symbol)
+        for p in resp.get("result", {}).get("list", []):
+            if float(p.get("size", 0)) > 0:
+                return float(p["size"])
+        return 0.0
+    except Exception as e:
+        log.warning(f"Error fetching live position size for {symbol}: {e}")
+        return -1.0  # -1 = lookup failed, distinct from "confirmed flat" (0)
+
+
 def _api_call(fn, *args, **kwargs):
     """Wrapper for Bybit API calls with retry on rate limit."""
     for attempt in range(3):
@@ -1088,6 +1101,64 @@ def _handle_execution_update(msg):
                 if tp_price > 0:
                     outcome = "tp"
                     log.info(f"WS {symbol}: SL execType but PnL={closed_pnl:.4f} positive — classifying as TP")
+
+            # A position can now close in more than one leg (partial exit, then the
+            # remainder). Check what's actually still open on the exchange before
+            # deciding whether this execution finished the trade or was one leg of it.
+            live_size = get_live_position_size(symbol)
+            prior_partial_pnl = float(trade.get("realized_pnl_partial") or 0)
+
+            if live_size < 0:
+                # Position-size lookup failed — don't guess. Log this leg's PnL but
+                # leave the trade record open rather than risk closing it on stale data.
+                log.warning(f"WS {symbol}: could not confirm live position size — recording leg PnL={closed_pnl:.4f} but leaving trade open, will reconcile on next execution")
+                try:
+                    aconn = get_db()
+                    with aconn.cursor() as acur:
+                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
+                        acur.execute("UPDATE trades SET realized_pnl_partial=%s WHERE id=%s AND status='open'",
+                                    (prior_partial_pnl + closed_pnl, trade["id"]))
+                    aconn.commit()
+                    aconn.close()
+                except Exception as acc_err:
+                    log.warning(f"WS {symbol}: could not record partial leg PnL: {acc_err}")
+                conn.close()
+                continue
+
+            if live_size > 0:
+                # Position still open — this was a partial exit, not the full close.
+                # Accumulate its PnL so the eventual full-close record is correct;
+                # do NOT mark closed, do NOT deregister from the trail watcher (the
+                # remaining size still needs BE/trail management).
+                log.info(f"WS {symbol}: partial close leg PnL={closed_pnl:.4f} — {live_size} still open, trade stays open")
+                try:
+                    aconn = get_db()
+                    with aconn.cursor() as acur:
+                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
+                        acur.execute("UPDATE trades SET realized_pnl_partial=%s WHERE id=%s AND status='open'",
+                                    (prior_partial_pnl + closed_pnl, trade["id"]))
+                    aconn.commit()
+                    aconn.close()
+                except Exception as acc_err:
+                    log.warning(f"WS {symbol}: could not record partial leg PnL: {acc_err}")
+                conn.close()
+                continue
+
+            # live_size == 0 — position is actually flat now. This execution is the
+            # leg that finished the trade. Combine it with any earlier partial PnL
+            # so the journal shows the trade's true total result, not just this leg.
+            closed_pnl = closed_pnl + prior_partial_pnl
+            if prior_partial_pnl != 0:
+                log.info(f"WS {symbol}: final leg — combining with {prior_partial_pnl:.4f} from earlier partial exit, total PnL={closed_pnl:.4f}")
+
+            # If a partial exit happened earlier on this trade, label the outcome by
+            # what the remainder did — tp1_tp2 (ran to the runner target) or tp1_sl
+            # (reversed and hit stop). A trade with no partial keeps the plain tp/sl
+            # label, same as before.
+            journal_outcome = outcome
+            if prior_partial_pnl != 0:
+                journal_outcome = "tp1_tp2" if outcome == "tp" else "tp1_sl"
+
             closed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
             entry     = float(trade.get("entry") or exec_price)
             qty       = float(trade.get("qty") or 0)
@@ -1113,18 +1184,18 @@ def _handle_execution_update(msg):
                         UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
                             pnl=%s, pnl_pct=%s, closed_at=%s, opened_at=%s
                         WHERE id=%s AND status='open'
-                    """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, fill_time, trade["id"]))
+                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, fill_time, trade["id"]))
                 else:
                     cur.execute("""
                         UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
                             pnl=%s, pnl_pct=%s, closed_at=%s
                         WHERE id=%s AND status='open'
-                    """, (outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
+                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
             conn.commit()
             conn.close()
 
             emoji = "✅" if outcome == "tp" else "🔴"
-            log.info(f"{emoji} WS closed {symbol} — {outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
+            log.info(f"{emoji} WS closed {symbol} — {journal_outcome.upper()} @ {exec_price} PnL={closed_pnl:.4f}")
             _trail_deregister(str(trade.get("order_id", "")))
 
             try:
@@ -1136,7 +1207,7 @@ def _handle_execution_update(msg):
                         sl=float(trade.get("sl") or 0),
                         tp=float(trade.get("tp") or 0),
                         exit_price=exec_price, pnl=closed_pnl,
-                        outcome=outcome, source=trade.get("source","ob"),
+                        outcome=journal_outcome, source=trade.get("source","ob"),
                         timeframe=trade.get("timeframe",""),
                         leverage=int(trade.get("leverage") or 1),
                         opened_at=str(trade.get("opened_at") or ""),
@@ -6662,13 +6733,7 @@ def _trail_watcher():
                     # the reduced position size for the remainder.
                     if state.get("tp1") and not state.get("partial_done") and state.get("partial_r") and current_r >= state["partial_r"]:
                         try:
-                            pos_resp  = _api_call(session.get_positions, category="linear", symbol=symbol)
-                            positions = pos_resp.get("result", {}).get("list", [])
-                            live_size = 0.0
-                            for p in positions:
-                                if float(p.get("size", 0)) > 0:
-                                    live_size = float(p["size"])
-                                    break
+                            live_size = get_live_position_size(symbol)
                             if live_size > 0:
                                 info      = get_instrument_info(symbol)
                                 close_qty = round_to_step(live_size * state["tp1_pct"] / 100.0, info["qty_step"])
