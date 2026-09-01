@@ -693,6 +693,12 @@ RESTRICTED_TIMES  = os.getenv("RESTRICTED_TIMES",  "")
 TIMEZONE_OFFSET   = int(os.getenv("TIMEZONE_OFFSET", "2") or "2")  # UTC+X
 _trail_state: dict  = {}
 _trail_lock         = threading.Lock()
+# Dedup for execution events — Bybit's WS can redeliver the same fill; without
+# this, a redelivered partial-exit fill would add its PnL to the trade a
+# second time. Bounded size so it can't grow unbounded over a long session.
+_processed_exec_ids: set = set()
+_processed_exec_lock     = threading.Lock()
+_PROCESSED_EXEC_MAX      = 2000
 
 try:
     session = HTTP(
@@ -1049,6 +1055,15 @@ def _handle_execution_update(msg):
     try:
         execs = msg.get("data", [])
         for e in execs:
+            exec_id    = e.get("execId", "")
+            if exec_id:
+                with _processed_exec_lock:
+                    if exec_id in _processed_exec_ids:
+                        continue
+                    _processed_exec_ids.add(exec_id)
+                    if len(_processed_exec_ids) > _PROCESSED_EXEC_MAX:
+                        _processed_exec_ids.clear()  # simple bound — session-scoped dedup, not persisted
+
             order_id   = e.get("orderId", "")
             symbol     = e.get("symbol", "")
             exec_type  = e.get("execType", "")
@@ -1077,7 +1092,11 @@ def _handle_execution_update(msg):
                 conn.close()
                 continue
 
-            # If PnL is 0 (e.g. execType=Trade), try to get it from closed PnL API
+            # If PnL is 0 (e.g. execType=Trade), try to get it from closed PnL API.
+            # Match against THIS execution's actual closed qty, not the trade's full
+            # original size — a partial exit's closed qty is smaller than that and
+            # would never match, leaving closed_pnl silently stuck at 0.
+            exec_qty = float(e.get("execQty", 0) or 0)
             if closed_pnl == 0.0:
                 try:
                     opened_at = str(trade.get("opened_at") or "")
@@ -1085,12 +1104,15 @@ def _handle_execution_update(msg):
                     kwargs    = dict(category="linear", symbol=symbol, limit=10)
                     if start_ms:
                         kwargs["startTime"] = start_ms
-                    pnl_resp = _api_call(session.get_closed_pnl, **kwargs)
+                    pnl_resp   = _api_call(session.get_closed_pnl, **kwargs)
+                    match_qty  = exec_qty if exec_qty > 0 else float(trade.get("qty") or 0)
                     for rec in pnl_resp.get("result", {}).get("list", []):
-                        if abs(float(rec.get("qty", 0)) - float(trade.get("qty") or 0)) < 0.01:
+                        if abs(float(rec.get("qty", 0)) - match_qty) < 0.01:
                             closed_pnl = float(rec.get("closedPnl", 0) or 0)
-                            log.info(f"WS: fetched PnL from closed PnL API: {closed_pnl}")
+                            log.info(f"WS: fetched PnL from closed PnL API: {closed_pnl} (matched qty={match_qty})")
                             break
+                    else:
+                        log.warning(f"WS {symbol}: no closed-PnL record matched qty={match_qty} — leg PnL may be recorded as 0")
                 except Exception as pnl_err:
                     log.warning(f"WS: could not fetch PnL from API: {pnl_err}")
 
