@@ -16,6 +16,7 @@ Set the webhook URL in TradingView to: http://YOUR_SERVER:5000/webhook
 
 import os
 import re
+import uuid
 import logging
 import threading
 import time
@@ -693,6 +694,11 @@ RESTRICTED_TIMES  = os.getenv("RESTRICTED_TIMES",  "")
 TIMEZONE_OFFSET   = int(os.getenv("TIMEZONE_OFFSET", "2") or "2")  # UTC+X
 _trail_state: dict  = {}
 _trail_lock         = threading.Lock()
+# Prefix on every order this bot places, via orderLinkId. Lets the WS handlers
+# tell bot orders apart from ones placed manually (e.g. directly in the Bybit
+# app) — an order/execution with no orderLinkId starting with this tag is not
+# ours.
+BOT_ORDER_TAG       = "obbot_"
 # Dedup for execution events — Bybit's WS can redeliver the same fill; without
 # this, a redelivered partial-exit fill would add its PnL to the trade a
 # second time. Bounded size so it can't grow unbounded over a long session.
@@ -1088,9 +1094,65 @@ def _handle_execution_update(msg):
                 trade = cur.fetchone()
 
             if not trade:
-                log.warning(f"WS: no open {symbol} {entry_side} trade found")
-                conn.close()
-                continue
+                order_link_id = e.get("orderLinkId", "") or ""
+                is_bot_order  = order_link_id.startswith(BOT_ORDER_TAG)
+
+                if is_bot_order:
+                    # Expected — e.g. the entry-fill echo, which never matches an
+                    # open row by design (see entry_side flip above). Not manual.
+                    log.warning(f"WS: no open {symbol} {entry_side} trade found")
+                    conn.close()
+                    continue
+
+                # Untagged order — not placed by this bot. Could be a manual
+                # trade's opening or closing leg. Wrapped defensively: a bug here
+                # must never break processing of the bot's own trades below.
+                try:
+                    exec_qty_m = float(e.get("execQty", 0) or 0)
+                    if exec_qty_m <= 0:
+                        conn.close()
+                        continue
+
+                    with conn.cursor(cursor_factory=_pge.RealDictCursor) as mcur:
+                        mcur.execute("""
+                            SELECT * FROM trades
+                            WHERE symbol=%s AND side=%s AND status='open' AND source='manual'
+                            ORDER BY opened_at DESC LIMIT 1
+                        """, (symbol, entry_side))
+                        manual_open = mcur.fetchone()
+
+                    if manual_open:
+                        # Closing leg of a manual trade — reuse the same
+                        # combine/close logic as bot trades below.
+                        trade = manual_open
+                        log.info(f"WS {symbol}: detected manual trade close (untagged order)")
+                    elif exec_type == "Trade":
+                        # No open manual position for this symbol+direction —
+                        # this is a new manual position opening. Record it and
+                        # stop; nothing to close yet.
+                        mconn = get_db()
+                        with mconn.cursor() as icur:
+                            icur.execute("""
+                                INSERT INTO trades (symbol, side, qty, entry, status, source, opened_at, order_id)
+                                VALUES (%s, %s, %s, %s, 'open', 'manual', %s, %s)
+                            """, (symbol, side, exec_qty_m, exec_price,
+                                  datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                                  order_id or f"manual_{exec_id or int(time.time())}"))
+                        mconn.commit()
+                        mconn.close()
+                        log.info(f"WS {symbol}: detected manual trade OPEN — {side} {exec_qty_m} @ {exec_price}, tracking as source=manual")
+                        conn.close()
+                        continue
+                    else:
+                        # TP/SL exec type with no matching manual open — can't be
+                        # an opening leg, and no open position to close. Skip.
+                        log.warning(f"WS {symbol}: untagged {exec_type} execution with no open manual trade — skipping")
+                        conn.close()
+                        continue
+                except Exception as manual_err:
+                    log.warning(f"WS {symbol}: manual-trade detection failed: {manual_err}")
+                    conn.close()
+                    continue
 
             # If PnL is 0 (e.g. execType=Trade), try to get it from closed PnL API.
             # Match against THIS execution's actual closed qty, not the trade's full
@@ -1960,6 +2022,7 @@ def webhook():
                 timeInForce  = "IOC" if order_type == "Market" else "GTC",
                 reduceOnly   = False,
                 closeOnTrigger = False,
+                orderLinkId  = f"{BOT_ORDER_TAG}{uuid.uuid4().hex[:20]}",
             )
             # Only include price for limit orders
             if order_type == "Limit":
@@ -6763,7 +6826,8 @@ def _trail_watcher():
                                     close_side = "Sell" if is_long else "Buy"
                                     presp = _api_call(session.place_order, category="linear", symbol=symbol,
                                                        side=close_side, orderType="Market", qty=str(close_qty),
-                                                       reduceOnly=True, timeInForce="IOC", positionIdx=0)
+                                                       reduceOnly=True, timeInForce="IOC", positionIdx=0,
+                                                       orderLinkId=f"{BOT_ORDER_TAG}{uuid.uuid4().hex[:20]}")
                                     if presp.get("retCode", -1) == 0:
                                         state["partial_done"] = True
                                         with _trail_lock: _trail_state[order_id] = state
