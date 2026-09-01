@@ -811,14 +811,14 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
                 # Per-symbol: only look at this symbol's recent trades
                 cur.execute("""
                     SELECT outcome, closed_at FROM trades
-                    WHERE symbol = %s AND side = %s AND outcome IN ('tp','sl') AND status = 'closed'
+                    WHERE symbol = %s AND side = %s AND outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND status = 'closed'
                     ORDER BY closed_at DESC LIMIT %s
                 """, (symbol, side, max_losses + 1))
             else:
                 # Fallback: global (used by /status endpoint summary)
                 cur.execute("""
                     SELECT outcome, closed_at FROM trades
-                    WHERE side = %s AND outcome IN ('tp','sl') AND status = 'closed'
+                    WHERE side = %s AND outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND status = 'closed'
                     ORDER BY closed_at DESC LIMIT %s
                 """, (side, max_losses + 1))
             recent = cur.fetchall()
@@ -828,7 +828,9 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
             return False, ""
 
         last_n = recent[:max_losses]
-        if not all(r["outcome"] == "sl" for r in last_n):
+        # tp1_sl = partial secured, but the runner still got stopped out — same
+        # signal a cooldown is meant to catch as a plain sl.
+        if not all(r["outcome"] in ("sl", "tp1_sl") for r in last_n):
             return False, ""
 
         most_recent_loss_at = str(last_n[0]["closed_at"])
@@ -1189,23 +1191,42 @@ def _handle_execution_update(msg):
             # A position can now close in more than one leg (partial exit, then the
             # remainder). Check what's actually still open on the exchange before
             # deciding whether this execution finished the trade or was one leg of it.
-            live_size = get_live_position_size(symbol)
-            prior_partial_pnl = float(trade.get("realized_pnl_partial") or 0)
+            live_size    = get_live_position_size(symbol)
+            trail_key    = str(trade.get("order_id", ""))
 
-            if live_size < 0:
-                # Position-size lookup failed — don't guess. Log this leg's PnL but
-                # leave the trade record open rather than risk closing it on stale data.
-                log.warning(f"WS {symbol}: could not confirm live position size — recording leg PnL={closed_pnl:.4f} but leaving trade open, will reconcile on next execution")
+            # Prefer in-memory trail state — it's alive for the trade's whole
+            # lifetime and isn't subject to the DB write failing partway through.
+            # Fall back to the DB column only if trail state doesn't have this
+            # trade (e.g. a server restart lost it, but an earlier write succeeded).
+            with _trail_lock:
+                mem_partial_pnl = _trail_state.get(trail_key, {}).get("partial_pnl")
+            prior_partial_pnl = mem_partial_pnl if mem_partial_pnl is not None else float(trade.get("realized_pnl_partial") or 0)
+
+            def _persist_partial_pnl(new_total):
+                # Best-effort backup only — in-memory trail state above is the
+                # real source of truth and is updated regardless of whether this
+                # succeeds.
                 try:
                     aconn = get_db()
                     with aconn.cursor() as acur:
                         acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
                         acur.execute("UPDATE trades SET realized_pnl_partial=%s WHERE id=%s AND status='open'",
-                                    (prior_partial_pnl + closed_pnl, trade["id"]))
+                                    (new_total, trade["id"]))
                     aconn.commit()
                     aconn.close()
                 except Exception as acc_err:
-                    log.warning(f"WS {symbol}: could not record partial leg PnL: {acc_err}")
+                    log.warning(f"WS {symbol}: DB backup write for partial PnL failed (non-critical, in-memory value still correct): {acc_err}")
+
+            if live_size < 0:
+                # Position-size lookup failed — don't guess whether this is the
+                # final leg. Update in-memory total (reliable), attempt DB backup,
+                # leave the trade open to reconcile on the next execution.
+                new_total = prior_partial_pnl + closed_pnl
+                with _trail_lock:
+                    if trail_key in _trail_state:
+                        _trail_state[trail_key]["partial_pnl"] = new_total
+                log.warning(f"WS {symbol}: could not confirm live position size — recording leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) but leaving trade open, will reconcile on next execution")
+                _persist_partial_pnl(new_total)
                 conn.close()
                 continue
 
@@ -1214,23 +1235,19 @@ def _handle_execution_update(msg):
                 # Accumulate its PnL so the eventual full-close record is correct;
                 # do NOT mark closed, do NOT deregister from the trail watcher (the
                 # remaining size still needs BE/trail management).
-                log.info(f"WS {symbol}: partial close leg PnL={closed_pnl:.4f} — {live_size} still open, trade stays open")
-                try:
-                    aconn = get_db()
-                    with aconn.cursor() as acur:
-                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-                        acur.execute("UPDATE trades SET realized_pnl_partial=%s WHERE id=%s AND status='open'",
-                                    (prior_partial_pnl + closed_pnl, trade["id"]))
-                    aconn.commit()
-                    aconn.close()
-                except Exception as acc_err:
-                    log.warning(f"WS {symbol}: could not record partial leg PnL: {acc_err}")
+                new_total = prior_partial_pnl + closed_pnl
+                with _trail_lock:
+                    if trail_key in _trail_state:
+                        _trail_state[trail_key]["partial_pnl"] = new_total
+                log.info(f"WS {symbol}: partial close leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) — {live_size} still open, trade stays open")
+                _persist_partial_pnl(new_total)
                 conn.close()
                 continue
 
             # live_size == 0 — position is actually flat now. This execution is the
             # leg that finished the trade. Combine it with any earlier partial PnL
-            # so the journal shows the trade's true total result, not just this leg.
+            # (read from in-memory trail state above) so the journal shows the
+            # trade's true total result, not just this leg.
             closed_pnl = closed_pnl + prior_partial_pnl
             if prior_partial_pnl != 0:
                 log.info(f"WS {symbol}: final leg — combining with {prior_partial_pnl:.4f} from earlier partial exit, total PnL={closed_pnl:.4f}")
@@ -1295,7 +1312,9 @@ def _handle_execution_update(msg):
                         timeframe=trade.get("timeframe",""),
                         leverage=int(trade.get("leverage") or 1),
                         opened_at=str(trade.get("opened_at") or ""),
-                        closed_at=closed_at
+                        closed_at=closed_at,
+                        tp1=float(trade["tp1"]) if trade.get("tp1") is not None else None,
+                        tp1_pct=float(trade["tp1_pct"]) if trade.get("tp1_pct") is not None else None
                     )
             except Exception as gs_err:
                 log.warning(f"Sheets update failed: {gs_err}")
@@ -2333,7 +2352,7 @@ def sync_sheets():
         import psycopg2.extras as _pge
         conn = get_db()
         with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
-            cur.execute("SELECT * FROM trades WHERE status='closed' AND outcome IN ('tp','sl') AND source != 'bybit_import' ORDER BY opened_at ASC LIMIT 200")
+            cur.execute("SELECT * FROM trades WHERE status='closed' AND outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND source != 'bybit_import' ORDER BY opened_at ASC LIMIT 200")
             trades = [dict(r) for r in cur.fetchall()]
         conn.close()
         synced = 0
@@ -2355,7 +2374,9 @@ def sync_sheets():
                     timeframe=t.get("timeframe",""),
                     leverage=int(t.get("leverage") or 1),
                     opened_at=str(t.get("opened_at") or ""),
-                    closed_at=str(t.get("closed_at") or "")
+                    closed_at=str(t.get("closed_at") or ""),
+                    tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
+                    tp1_pct=float(t["tp1_pct"]) if t.get("tp1_pct") is not None else None
                 )
                 synced += 1
             except Exception as te:
