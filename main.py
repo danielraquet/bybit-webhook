@@ -1198,26 +1198,46 @@ def _handle_execution_update(msg):
                     continue
 
             # If PnL is 0 (e.g. execType=Trade), try to get it from closed PnL API.
-            # Match against THIS execution's actual closed qty, not the trade's full
-            # original size — a partial exit's closed qty is smaller than that and
-            # would never match, leaving closed_pnl silently stuck at 0.
+            # Match priority: exact orderId (most reliable) > qty+side within a
+            # tolerance (Bybit doesn't always report qty at the same granularity
+            # as a single execution chunk, so an exact match is too fragile —
+            # this mirrors the matching already used elsewhere in this file for
+            # the same reason) > most recent same-side close as last resort.
             exec_qty = float(e.get("execQty", 0) or 0)
             if closed_pnl == 0.0:
                 try:
                     opened_at = str(trade.get("opened_at") or "")
                     start_ms  = int((datetime.strptime(opened_at[:19], "%Y-%m-%d %H:%M:%S").timestamp() - 300) * 1000) if opened_at else None
-                    kwargs    = dict(category="linear", symbol=symbol, limit=10)
+                    kwargs    = dict(category="linear", symbol=symbol, limit=20)
                     if start_ms:
                         kwargs["startTime"] = start_ms
-                    pnl_resp   = _api_call(session.get_closed_pnl, **kwargs)
-                    match_qty  = exec_qty if exec_qty > 0 else float(trade.get("qty") or 0)
-                    for rec in pnl_resp.get("result", {}).get("list", []):
-                        if abs(float(rec.get("qty", 0)) - match_qty) < 0.01:
-                            closed_pnl = float(rec.get("closedPnl", 0) or 0)
-                            log.info(f"WS: fetched PnL from closed PnL API: {closed_pnl} (matched qty={match_qty})")
+                    pnl_resp  = _api_call(session.get_closed_pnl, **kwargs)
+                    records   = pnl_resp.get("result", {}).get("list", [])
+                    match_qty = exec_qty if exec_qty > 0 else float(trade.get("qty") or 0)
+
+                    best = None
+                    for rec in records:
+                        if rec.get("orderId", "") == order_id:
+                            best = rec
                             break
+                    if best is None:
+                        for rec in records:
+                            rqty = float(rec.get("qty", 0) or 0)
+                            if match_qty > 0 and abs(rqty - match_qty) <= max(match_qty * 0.1, 0.01) and rec.get("side", "") == side:
+                                best = rec
+                                break
+                    if best is None:
+                        for rec in records:
+                            if rec.get("side", "") == side:
+                                best = rec
+                                log.warning(f"WS {symbol}: no orderId/qty match — using most recent {side} close as fallback")
+                                break
+
+                    if best:
+                        closed_pnl = float(best.get("closedPnl", 0) or 0)
+                        log.info(f"WS: fetched PnL from closed PnL API: {closed_pnl} (orderId={'match' if best.get('orderId','')==order_id else 'no-match'}, qty={best.get('qty')})")
                     else:
-                        log.warning(f"WS {symbol}: no closed-PnL record matched qty={match_qty} — leg PnL may be recorded as 0")
+                        log.warning(f"WS {symbol}: no closed-PnL record found at all for side={side} — leg PnL recorded as 0")
                 except Exception as pnl_err:
                     log.warning(f"WS: could not fetch PnL from API: {pnl_err}")
 
