@@ -1115,6 +1115,33 @@ def _handle_execution_update(msg):
                         conn.close()
                         continue
 
+                    # Check same-direction first — a manual order (or a large
+                    # order matching in multiple chunks against the order book)
+                    # can generate several separate execution events for what is
+                    # really one accumulating position, not a series of new ones.
+                    with conn.cursor(cursor_factory=_pge.RealDictCursor) as mcur:
+                        mcur.execute("""
+                            SELECT * FROM trades
+                            WHERE symbol=%s AND side=%s AND status='open' AND source='manual'
+                            ORDER BY opened_at DESC LIMIT 1
+                        """, (symbol, side))
+                        same_dir_open = mcur.fetchone()
+
+                    if same_dir_open:
+                        old_qty   = float(same_dir_open.get("qty") or 0)
+                        old_entry = float(same_dir_open.get("entry") or exec_price)
+                        new_qty   = old_qty + exec_qty_m
+                        new_entry = ((old_qty * old_entry) + (exec_qty_m * exec_price)) / new_qty if new_qty > 0 else exec_price
+                        mconn = get_db()
+                        with mconn.cursor() as ucur:
+                            ucur.execute("UPDATE trades SET qty=%s, entry=%s WHERE id=%s",
+                                        (new_qty, new_entry, same_dir_open["id"]))
+                        mconn.commit()
+                        mconn.close()
+                        log.info(f"WS {symbol}: manual position addition — qty {old_qty}->{new_qty}, avg entry {new_entry:.6f}")
+                        conn.close()
+                        continue
+
                     with conn.cursor(cursor_factory=_pge.RealDictCursor) as mcur:
                         mcur.execute("""
                             SELECT * FROM trades
@@ -1129,20 +1156,34 @@ def _handle_execution_update(msg):
                         trade = manual_open
                         log.info(f"WS {symbol}: detected manual trade close (untagged order)")
                     elif exec_type == "Trade":
-                        # No open manual position for this symbol+direction —
-                        # this is a new manual position opening. Record it and
-                        # stop; nothing to close yet.
+                        # Genuinely new manual position. sl/tp are unknown for a
+                        # manual trade unless the user set Bybit's native SL/TP
+                        # when opening it — read those off the live position if
+                        # present; the trades table requires non-null sl/tp, so
+                        # fall back to 0 (Bybit's own "not set" convention).
+                        sl_val = 0.0
+                        tp_val = 0.0
+                        try:
+                            posresp = _api_call(session.get_positions, category="linear", symbol=symbol)
+                            for p in posresp.get("result", {}).get("list", []):
+                                if float(p.get("size", 0)) > 0:
+                                    sl_val = float(p.get("stopLoss") or 0)
+                                    tp_val = float(p.get("takeProfit") or 0)
+                                    break
+                        except Exception as pos_err:
+                            log.warning(f"WS {symbol}: could not read live SL/TP for manual trade: {pos_err}")
+
                         mconn = get_db()
                         with mconn.cursor() as icur:
                             icur.execute("""
-                                INSERT INTO trades (symbol, side, qty, entry, status, source, opened_at, order_id)
-                                VALUES (%s, %s, %s, %s, 'open', 'manual', %s, %s)
-                            """, (symbol, side, exec_qty_m, exec_price,
+                                INSERT INTO trades (symbol, side, qty, entry, sl, tp, status, source, opened_at, order_id)
+                                VALUES (%s, %s, %s, %s, %s, %s, 'open', 'manual', %s, %s)
+                            """, (symbol, side, exec_qty_m, exec_price, sl_val, tp_val,
                                   datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                                   order_id or f"manual_{exec_id or int(time.time())}"))
                         mconn.commit()
                         mconn.close()
-                        log.info(f"WS {symbol}: detected manual trade OPEN — {side} {exec_qty_m} @ {exec_price}, tracking as source=manual")
+                        log.info(f"WS {symbol}: detected manual trade OPEN — {side} {exec_qty_m} @ {exec_price} (sl={sl_val}, tp={tp_val}), tracking as source=manual")
                         conn.close()
                         continue
                     else:
