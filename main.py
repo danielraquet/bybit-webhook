@@ -381,7 +381,7 @@ function renderTrades(trades){
           return '<a href="'+url+'" target="_blank" style="color:var(--text);text-decoration:none;border-bottom:1px dashed rgba(96,165,250,0.5)" title="Open in TradingView at entry time">'+esc(t.symbol)+'</a>';
         })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
-      + '<td class="dim">'+esc(t.timeframe||'—')+'</td>'
+      + '<td class="dim editable" data-id="'+t.id+'" data-type="timeframe" data-val="'+esc(t.timeframe||'')+'">'+esc(t.timeframe||'—')+'</td>'
       + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
@@ -513,6 +513,12 @@ document.addEventListener('click', function(e){
     var num = parseFloat(nv);
     if(isNaN(num)){alert('Invalid number');return;}
     fetch('/journal/set-pnl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),pnl:num})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='timeframe'){
+    var nv = prompt('Enter timeframe (e.g. M3, M5, M15, H1, H4, D1) — blank to clear:', val);
+    if(nv===null) return;
+    fetch('/journal/set-timeframe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),timeframe:nv.trim()})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
   if(type==='outcome'){
@@ -699,6 +705,13 @@ _trail_lock         = threading.Lock()
 # app) — an order/execution with no orderLinkId starting with this tag is not
 # ours.
 BOT_ORDER_TAG       = "obbot_"
+# Second, more reliable signal alongside the tag: orderLinkId isn't always
+# present on every individual execution chunk of a multi-fill order (only
+# reliably on the consolidated order-status event) — tracking orderId
+# directly at placement time catches those chunks the tag alone misses.
+_bot_order_ids: set = set()
+_bot_order_ids_lock = threading.Lock()
+_BOT_ORDER_IDS_MAX  = 2000
 # Dedup for execution events — Bybit's WS can redeliver the same fill; without
 # this, a redelivered partial-exit fill would add its PnL to the trade a
 # second time. Bounded size so it can't grow unbounded over a long session.
@@ -1097,7 +1110,9 @@ def _handle_execution_update(msg):
 
             if not trade:
                 order_link_id = e.get("orderLinkId", "") or ""
-                is_bot_order  = order_link_id.startswith(BOT_ORDER_TAG)
+                with _bot_order_ids_lock:
+                    is_tracked_order_id = order_id in _bot_order_ids
+                is_bot_order  = order_link_id.startswith(BOT_ORDER_TAG) or is_tracked_order_id
 
                 if is_bot_order:
                     # Expected — e.g. the entry-fill echo, which never matches an
@@ -2112,6 +2127,10 @@ def webhook():
             ret_code = resp.get("retCode", -1)
             if ret_code == 0:
                 order_id = resp.get("result", {}).get("orderId", "?")
+                with _bot_order_ids_lock:
+                    _bot_order_ids.add(order_id)
+                    if len(_bot_order_ids) > _BOT_ORDER_IDS_MAX:
+                        _bot_order_ids.clear()
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
@@ -2595,8 +2614,8 @@ def set_outcome():
         body    = request.get_json(force=True)
         trade_id = int(body.get("id", 0))
         outcome  = body.get("outcome", "").strip().lower()
-        if outcome not in ("tp", "sl", ""):
-            return jsonify({"status": "error", "message": "outcome must be tp, sl or empty"}), 400
+        if outcome not in ("tp", "sl", "tp1_tp2", "tp1_sl", ""):
+            return jsonify({"status": "error", "message": "outcome must be tp, sl, tp1_tp2, tp1_sl or empty"}), 400
         conn = get_db()
         with conn.cursor() as cur:
             if outcome:
@@ -2606,6 +2625,25 @@ def set_outcome():
         conn.commit()
         conn.close()
         log.info(f"Manual outcome set: trade {trade_id} → {outcome or 'NULL'}")
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/set-timeframe", methods=["POST"])
+def set_timeframe():
+    """Manually set the timeframe for a trade — mainly for manual trades, which
+    have no bar-based source to infer one from."""
+    try:
+        body      = request.get_json(force=True)
+        trade_id  = int(body.get("id", 0))
+        timeframe = body.get("timeframe", "").strip()
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET timeframe=%s WHERE id=%s", (timeframe or None, trade_id))
+        conn.commit()
+        conn.close()
+        log.info(f"Manual timeframe set: trade {trade_id} → {timeframe or 'NULL'}")
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -6988,6 +7026,12 @@ def _trail_watcher():
                                                        reduceOnly=True, timeInForce="IOC", positionIdx=0,
                                                        orderLinkId=f"{BOT_ORDER_TAG}{uuid.uuid4().hex[:20]}")
                                     if presp.get("retCode", -1) == 0:
+                                        p_order_id = presp.get("result", {}).get("orderId", "")
+                                        if p_order_id:
+                                            with _bot_order_ids_lock:
+                                                _bot_order_ids.add(p_order_id)
+                                                if len(_bot_order_ids) > _BOT_ORDER_IDS_MAX:
+                                                    _bot_order_ids.clear()
                                         state["partial_done"] = True
                                         with _trail_lock: _trail_state[order_id] = state
                                         log.info(f"Trail: {symbol} partial exit — closed {close_qty} ({state['tp1_pct']}%) at {current_r:.2f}R, SL unchanged")
