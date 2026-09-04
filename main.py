@@ -5750,8 +5750,36 @@ def run_backtest_job():
         log.info(f"Backtest complete — {saved} results saved")
 
 
+def _get_setting(key: str, default: str = "") -> str:
+    """Tiny key-value settings store, created on first use."""
+    try:
+        conn = get_db()
+        with conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
+            cur.execute("SELECT value FROM app_settings WHERE key=%s", (key,))
+            row = cur.fetchone()
+        conn.commit()
+        conn.close()
+        return row[0] if row else default
+    except Exception as e:
+        log.warning(f"_get_setting({key}) failed, using default: {e}")
+        return default
+
+
+def _set_setting(key: str, value: str):
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)")
+        cur.execute("""
+            INSERT INTO app_settings (key, value) VALUES (%s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        """, (key, value))
+    conn.commit()
+    conn.close()
+
+
 def _schedule_daily_backtest():
-    """Run backtest daily at 02:00 UTC."""
+    """Run backtest daily at 02:00 UTC — unless switched off via the backtest configs page."""
     while True:
         now  = datetime.utcnow()
         next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
@@ -5760,6 +5788,9 @@ def _schedule_daily_backtest():
         wait = (next_run - now).total_seconds()
         log.info(f"Next backtest scheduled at {next_run.strftime('%Y-%m-%d %H:%M UTC')} ({int(wait/3600)}h from now)")
         time.sleep(wait)
+        if _get_setting("daily_backtest_enabled", "true") != "true":
+            log.info("Daily backtest is switched off (backtest configs page) — skipping this run")
+            continue
         try:
             run_backtest_job()
         except Exception as e:
@@ -5881,7 +5912,17 @@ def backtest_status():
         "last_run": _bt_last_run.strftime("%Y-%m-%d %H:%M UTC") if _bt_last_run else None,
         "status":   _bt_status,
         "progress": _bt_progress,
+        "daily_backtest_enabled": _get_setting("daily_backtest_enabled", "true") == "true",
     })
+
+
+@app.route("/backtest/scheduler-toggle", methods=["POST"])
+def backtest_scheduler_toggle():
+    data    = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled", True))
+    _set_setting("daily_backtest_enabled", "true" if enabled else "false")
+    log.info(f"Daily backtest scheduler {'enabled' if enabled else 'disabled'} via backtest configs page")
+    return jsonify({"status": "ok", "daily_backtest_enabled": enabled})
 
 
 # ─── BACKTEST CONFIGS ─────────────────────────────────────────────────────────
@@ -5934,6 +5975,15 @@ td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .bar-wrap{background:var(--border);border-radius:3px;height:5px;width:60px;display:inline-block;vertical-align:middle;margin-left:6px}
 .bar{height:5px;border-radius:3px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.toggle-row .label{font-size:12px}
+.toggle-row .sub{font-size:11px;color:var(--dim);margin-top:2px}
+.switch{position:relative;display:inline-block;width:38px;height:21px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;inset:0;background-color:var(--border);transition:.2s;border-radius:21px}
+.slider:before{position:absolute;content:"";height:15px;width:15px;left:3px;bottom:3px;background-color:var(--dim);transition:.2s;border-radius:50%}
+input:checked + .slider{background-color:rgba(76,175,80,.3)}
+input:checked + .slider:before{background-color:var(--green);transform:translateX(17px)}
 </style>
 </head>
 <body>
@@ -5944,6 +5994,19 @@ td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
 </div>
 <h1>// Backtest Configs</h1>
 <p style="color:var(--dim);font-size:12px;margin-bottom:20px">Paste your TradingView indicator status bar string to import settings. Each config runs a backtest independently so you can compare variants.</p>
+
+<div class="section">
+  <div class="toggle-row">
+    <div>
+      <div class="label">Daily automatic backtest (02:00 UTC, all symbols × timeframes)</div>
+      <div class="sub" id="scheduler-sub">Uses a large number of API calls each run — turn off if you're not actively using it.</div>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="scheduler-toggle" onchange="toggleScheduler(this.checked)">
+      <span class="slider"></span>
+    </label>
+  </div>
+</div>
 
 <div id="running-status" style="display:none;margin-bottom:12px">
   <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px">
@@ -6305,7 +6368,21 @@ function pollStatus() {
         loadConfigs();
       }
     }
+    var toggle = document.getElementById('scheduler-toggle');
+    if (toggle) toggle.checked = !!d.daily_backtest_enabled;
   });
+}
+
+function toggleScheduler(enabled) {
+  fetch('/backtest/scheduler-toggle', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({enabled: enabled})
+  }).then(r => r.json()).then(d => {
+    document.getElementById('scheduler-sub').textContent = enabled
+      ? 'Uses a large number of API calls each run — turn off if you\'re not actively using it.'
+      : 'Off — the daily 02:00 UTC run will be skipped until you switch this back on.';
+  }).catch(e => alert('Could not update setting: ' + e));
 }
 
 loadConfigs();
