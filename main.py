@@ -18,6 +18,7 @@ import os
 import re
 import uuid
 import logging
+from collections import deque
 import threading
 import time
 import json
@@ -710,14 +711,20 @@ BOT_ORDER_TAG       = "obbot_"
 # reliably on the consolidated order-status event) — tracking orderId
 # directly at placement time catches those chunks the tag alone misses.
 _bot_order_ids: set = set()
+_bot_order_ids_order: 'deque' = deque()
 _bot_order_ids_lock = threading.Lock()
 _BOT_ORDER_IDS_MAX  = 2000
 # Dedup for execution events — Bybit's WS can redeliver the same fill; without
 # this, a redelivered partial-exit fill would add its PnL to the trade a
-# second time. Bounded size so it can't grow unbounded over a long session.
-_processed_exec_ids: set = set()
-_processed_exec_lock     = threading.Lock()
-_PROCESSED_EXEC_MAX      = 2000
+# second time. Bounded with FIFO eviction (deque + set, not a wholesale
+# .clear()) — a trade can stay open for hours, and clearing the whole set
+# once it filled up (from ALL symbols' activity, not just this one trade)
+# was wiping still-relevant entries mid-trade, which is exactly what let a
+# genuine redelivery slip through and triple-count a partial exit's PnL.
+_processed_exec_ids: set              = set()
+_processed_exec_order: 'deque'        = deque()
+_processed_exec_lock                  = threading.Lock()
+_PROCESSED_EXEC_MAX                   = 5000
 
 try:
     session = HTTP(
@@ -1082,8 +1089,10 @@ def _handle_execution_update(msg):
                     if exec_id in _processed_exec_ids:
                         continue
                     _processed_exec_ids.add(exec_id)
-                    if len(_processed_exec_ids) > _PROCESSED_EXEC_MAX:
-                        _processed_exec_ids.clear()  # simple bound — session-scoped dedup, not persisted
+                    _processed_exec_order.append(exec_id)
+                    while len(_processed_exec_order) > _PROCESSED_EXEC_MAX:
+                        oldest = _processed_exec_order.popleft()
+                        _processed_exec_ids.discard(oldest)
 
             order_id   = e.get("orderId", "")
             symbol     = e.get("symbol", "")
@@ -2129,8 +2138,9 @@ def webhook():
                 order_id = resp.get("result", {}).get("orderId", "?")
                 with _bot_order_ids_lock:
                     _bot_order_ids.add(order_id)
-                    if len(_bot_order_ids) > _BOT_ORDER_IDS_MAX:
-                        _bot_order_ids.clear()
+                    _bot_order_ids_order.append(order_id)
+                    while len(_bot_order_ids_order) > _BOT_ORDER_IDS_MAX:
+                        _bot_order_ids.discard(_bot_order_ids_order.popleft())
                 log.info(f"✅ {order_type} order placed: {symbol} {side} {qty} @ {entry_str} | SL {sl_str} | TP {tp_str} | ID {order_id}")
                 log_order_placed(symbol, side, qty, entry, sl, tp, order_id,
                                  source=source + ("_test" if test_mode else ""),
@@ -7030,8 +7040,9 @@ def _trail_watcher():
                                         if p_order_id:
                                             with _bot_order_ids_lock:
                                                 _bot_order_ids.add(p_order_id)
-                                                if len(_bot_order_ids) > _BOT_ORDER_IDS_MAX:
-                                                    _bot_order_ids.clear()
+                                                _bot_order_ids_order.append(p_order_id)
+                                                while len(_bot_order_ids_order) > _BOT_ORDER_IDS_MAX:
+                                                    _bot_order_ids.discard(_bot_order_ids_order.popleft())
                                         state["partial_done"] = True
                                         with _trail_lock: _trail_state[order_id] = state
                                         log.info(f"Trail: {symbol} partial exit — closed {close_qty} ({state['tp1_pct']}%) at {current_r:.2f}R, SL unchanged")
