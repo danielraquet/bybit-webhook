@@ -6949,21 +6949,30 @@ def _restricted_time_watcher():
                         open_trades = cur.fetchall()
                     conn.close()
                     for order_id, symbol in open_trades:
-                        if order_id:
-                            try:
-                                _api_call(session.cancel_order, category="linear",
-                                          symbol=symbol, orderId=order_id)
-                                log.info(f"Restricted: cancelled {symbol} {order_id}")
-                            except Exception as e:
-                                log.warning(f"Restricted: cancel failed {symbol}: {e}")
-                        conn2 = get_db()
-                        with conn2.cursor() as cur2:
-                            cur2.execute(
-                                "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s",
-                                (reason, order_id)
-                            )
-                        conn2.commit()
-                        conn2.close()
+                        if not order_id:
+                            continue
+                        cancelled = False
+                        try:
+                            _api_call(session.cancel_order, category="linear",
+                                      symbol=symbol, orderId=order_id)
+                            log.info(f"Restricted: cancelled {symbol} {order_id}")
+                            cancelled = True
+                        except Exception as e:
+                            # A failed cancel here almost always means the order
+                            # already filled and became a live position — not a
+                            # pending order to skip. Leave its status alone; the
+                            # trail watcher / close-detection logic already owns
+                            # that trade's lifecycle.
+                            log.warning(f"Restricted: cancel failed {symbol} (likely already filled — leaving trade status untouched): {e}")
+                        if cancelled:
+                            conn2 = get_db()
+                            with conn2.cursor() as cur2:
+                                cur2.execute(
+                                    "UPDATE trades SET status='skipped', notes=%s WHERE order_id=%s",
+                                    (reason, order_id)
+                                )
+                            conn2.commit()
+                            conn2.close()
                 except Exception as e:
                     log.error(f"Restricted watcher cancel error: {e}")
             was_restricted = is_restricted
