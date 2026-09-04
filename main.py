@@ -1057,11 +1057,13 @@ def _handle_order_update(msg):
                     import psycopg2.extras as _pge2
                     conn = get_db()
                     with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
+                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
                         cur.execute(
-                            "SELECT entry, sl, tp1, tp1_pct FROM trades WHERE order_id=%s LIMIT 1",
+                            "SELECT entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE order_id=%s LIMIT 1",
                             (order_id,)
                         )
                         row = cur.fetchone()
+                    conn.commit()
                     conn.close()
                     if row:
                         log.info(f"Trail: registering {symbol} {side} on order fill (status={status})")
@@ -1069,7 +1071,9 @@ def _handle_order_update(msg):
                                         float(row["entry"] or 0),
                                         float(row["sl"] or 0),
                                         tp1=float(row["tp1"]) if row.get("tp1") is not None else None,
-                                        tp1_pct=float(row["tp1_pct"] or 0))
+                                        tp1_pct=float(row["tp1_pct"] or 0),
+                                        partial_done=bool(row.get("partial_done", False)),
+                                        partial_pnl=float(row["realized_pnl_partial"]) if row.get("realized_pnl_partial") is not None else None)
                     else:
                         log.warning(f"Trail: no DB row found for order_id={order_id}")
                 except Exception as tr_err:
@@ -6995,7 +6999,8 @@ def _trail_watcher():
         with conn.cursor(cursor_factory=_pge2s.RealDictCursor) as cur:
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
-            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct FROM trades WHERE status='open' AND order_id IS NOT NULL")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
+            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE status='open' AND order_id IS NOT NULL")
             open_trades = cur.fetchall()
         conn.commit()
         conn.close()
@@ -7004,7 +7009,9 @@ def _trail_watcher():
                 _trail_register(t["order_id"], t["symbol"], t["side"],
                                 float(t["entry"] or 0), float(t["sl"] or 0),
                                 tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
-                                tp1_pct=float(t["tp1_pct"] or 0))
+                                tp1_pct=float(t["tp1_pct"] or 0),
+                                partial_done=bool(t.get("partial_done", False)),
+                                partial_pnl=float(t["realized_pnl_partial"]) if t.get("realized_pnl_partial") is not None else None)
         if open_trades:
             log.info(f"Trail watcher: recovered {len(open_trades)} open trades from DB")
     except Exception as e:
@@ -7059,6 +7066,21 @@ def _trail_watcher():
                                         state["partial_done"] = True
                                         with _trail_lock: _trail_state[order_id] = state
                                         log.info(f"Trail: {symbol} partial exit — closed {close_qty} ({state['tp1_pct']}%) at {current_r:.2f}R, SL unchanged")
+                                        # Small, independent write — deliberately separate from the
+                                        # PnL-accumulator backup write below, which has repeatedly hit
+                                        # statement timeouts. This one matters more: without it, a
+                                        # server restart before the trade fully closes can't tell a
+                                        # partial exit already happened, and will fire a SECOND one on
+                                        # the already-reduced position.
+                                        try:
+                                            pdconn = get_db()
+                                            with pdconn.cursor() as pdcur:
+                                                pdcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
+                                                pdcur.execute("UPDATE trades SET partial_done=TRUE WHERE order_id=%s", (order_id,))
+                                            pdconn.commit()
+                                            pdconn.close()
+                                        except Exception as pd_err:
+                                            log.error(f"Trail: FAILED to persist partial_done for {symbol} order_id={order_id} — a restart before this trade fully closes WILL trigger a duplicate partial exit: {pd_err}")
                                     else:
                                         log.warning(f"Trail: partial exit order failed {symbol}: {presp.get('retMsg')}")
                                 else:
@@ -7112,18 +7134,29 @@ def _trail_watcher():
         time.sleep(5)
 
 
-def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0):
+def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, partial_done=False, partial_pnl=None):
     if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0 and not tp1:
         return
     risk = abs(entry - sl)
     if risk <= 0: return
     partial_r = (abs(tp1 - entry) / risk) if tp1 else None
     with _trail_lock:
+        # If this trade already had a live in-memory trail state (e.g. a
+        # duplicate registration call on the same fill event), don't clobber
+        # a partial_done that's already True there — only widen it, never
+        # reset it back to False.
+        existing = _trail_state.get(order_id, {})
+        already_done = existing.get("partial_done", False) or partial_done
+        seeded_pnl    = existing.get("partial_pnl", None)
+        if seeded_pnl is None:
+            seeded_pnl = partial_pnl
         _trail_state[order_id] = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
                                    "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl,
-                                   "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r, "partial_done": False}
+                                   "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r,
+                                   "partial_done": already_done, "partial_pnl": seeded_pnl}
     log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}" +
-             (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else ""))
+             (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else "") +
+             (f" [partial already done, PnL so far={seeded_pnl}]" if already_done else ""))
 
 
 def _trail_deregister(order_id):
