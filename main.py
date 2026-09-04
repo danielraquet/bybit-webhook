@@ -420,7 +420,7 @@ function updateStats(trades){
   var total=0,wins=0,losses=0,pnlSum=0,open=0;
   trades.forEach(function(t){
     if(t.status==='note') return;
-    if(t.status==='closed'){ total++; var pnl=parseFloat(t.pnl)||0; if(t.outcome==='tp'){wins++;pnlSum+=pnl;} if(t.outcome==='sl'){losses++;pnlSum+=pnl;} }
+    if(t.status==='closed'){ total++; var pnl=parseFloat(t.pnl)||0; pnlSum+=pnl; if(pnl>0){wins++;} else {losses++;} }
     if(t.status==='open') open++;
   });
   var wr = total>0 ? Math.round(wins/total*100) : 0;
@@ -479,8 +479,8 @@ function calcRange(){
   var wins=0, losses=0, pnl=0;
   filtered.forEach(function(t){
     var p = parseFloat(t.pnl)||0;
-    if(t.outcome==='tp'){ wins++; pnl+=p; }
-    if(t.outcome==='sl'){ losses++; pnl+=p; }
+    pnl += p;
+    if(p>0){ wins++; } else { losses++; }
   });
   var total = wins+losses;
   var wr    = total>0 ? Math.round(wins/total*100) : 0;
@@ -4208,7 +4208,7 @@ ANALYSIS_HTML = """
 def _analyse_trades(trades):
     """Compute analysis metrics from trade list."""
     # All resolved trades for overall stats (including imports — we know TP/SL)
-    closed  = [t for t in trades if t.get("outcome") in ("tp", "sl")]
+    closed  = [t for t in trades if t.get("outcome") in ("tp", "sl", "tp1_tp2", "tp1_sl")]
     open_t  = [t for t in trades if t.get("status") == "open"]
 
     # For breakdowns — exclude unmatched imports (no source/timeframe data)
@@ -4217,8 +4217,12 @@ def _analyse_trades(trades):
         return src != "bybit_import" or bool(t.get("timeframe"))
     closed_known = [t for t in closed if has_indicator(t)]
 
-    wins   = [t for t in closed if t["outcome"] == "tp"]
-    losses = [t for t in closed if t["outcome"] == "sl"]
+    # Win/loss by actual PnL sign, not the outcome label — a two-stage trade
+    # (tp1_sl: partial secured, runner stopped out) can still be net profitable
+    # overall, and should count as a win. Using the label alone undercounts
+    # wins for exactly that case.
+    wins   = [t for t in closed if float(t.get("pnl") or 0) > 0]
+    losses = [t for t in closed if float(t.get("pnl") or 0) <= 0]
 
     total_closed = len(closed)
     wr = round(len(wins) / total_closed * 100, 1) if total_closed > 0 else 0
@@ -4241,7 +4245,7 @@ def _analyse_trades(trades):
             k = key_fn(t)
             if k not in groups:
                 groups[k] = {"wins": 0, "losses": 0, "pnl": 0.0}
-            if t["outcome"] == "tp":
+            if float(t.get("pnl") or 0) > 0:
                 groups[k]["wins"] += 1
             else:
                 groups[k]["losses"] += 1
@@ -4324,8 +4328,8 @@ def _analyse_trades(trades):
     if total_closed >= 5:
         long_trades  = [t for t in closed if t["side"] == "Buy"]
         short_trades = [t for t in closed if t["side"] == "Sell"]
-        long_wins    = len([t for t in long_trades  if t["outcome"] == "tp"])
-        short_wins   = len([t for t in short_trades if t["outcome"] == "tp"])
+        long_wins    = len([t for t in long_trades  if float(t.get("pnl") or 0) > 0])
+        short_wins   = len([t for t in short_trades if float(t.get("pnl") or 0) > 0])
         long_wr  = round(long_wins  / len(long_trades)  * 100, 1) if long_trades  else 0
         short_wr = round(short_wins / len(short_trades) * 100, 1) if short_trades else 0
         if abs(long_wr - short_wr) > 20:
@@ -4379,16 +4383,16 @@ def _analyse_trades(trades):
 
         if day not in by_day_raw:
             by_day_raw[day] = {"wins":0,"losses":0,"pnl":0.0,"order":d_order}
-        by_day_raw[day]["wins" if outcome=="tp" else "losses"] += 1
+        by_day_raw[day]["wins" if pnl > 0 else "losses"] += 1
         by_day_raw[day]["pnl"] += pnl
 
         if session not in by_session_raw:
             by_session_raw[session] = {"wins":0,"losses":0,"pnl":0.0}
-        by_session_raw[session]["wins" if outcome=="tp" else "losses"] += 1
+        by_session_raw[session]["wins" if pnl > 0 else "losses"] += 1
         by_session_raw[session]["pnl"] += pnl
 
         key = "Weekend" if is_weekend else "Weekday"
-        wk_stats[key]["wins" if outcome=="tp" else "losses"] += 1
+        wk_stats[key]["wins" if pnl > 0 else "losses"] += 1
         wk_stats[key]["pnl"] += pnl
 
     def make_time_rows(raw, sort_key=None):
@@ -4418,7 +4422,7 @@ def _analyse_trades(trades):
 
     def _wr(trades):
         if not trades: return 0
-        return round(sum(1 for t in trades if t["outcome"] == "tp") / len(trades) * 100, 1)
+        return round(sum(1 for t in trades if float(t.get("pnl") or 0) > 0) / len(trades) * 100, 1)
 
     kl_analysis = {
         "with_kl":    {"count": len(with_kl),    "wr": _wr(with_kl),    "pnl": round(sum(float(t.get("pnl") or 0) for t in with_kl), 2)},
@@ -4433,7 +4437,7 @@ def _analyse_trades(trades):
             key = (k1, k2)
             if key not in groups:
                 groups[key] = {"wins": 0, "losses": 0, "pnl": 0.0}
-            groups[key]["wins"   if t["outcome"] == "tp" else "losses"] += 1
+            groups[key]["wins"   if float(t.get("pnl") or 0) > 0 else "losses"] += 1
             groups[key]["pnl"] += float(t.get("pnl") or 0)
         rows = []
         for (k1, k2), v in groups.items():
@@ -4473,10 +4477,10 @@ def _analyse_trades(trades):
     sorted_closed = sorted(closed, key=lambda t: t.get("opened_at") or "")
     cum_wins = 0
     for idx, t in enumerate(sorted_closed):
-        cum_wins += 1 if t["outcome"] == "tp" else 0
+        cum_wins += 1 if float(t.get("pnl") or 0) > 0 else 0
         cum_wr    = round(cum_wins / (idx + 1) * 100, 1)
         window    = sorted_closed[max(0, idx - 19): idx + 1]
-        roll_wins = sum(1 for x in window if x["outcome"] == "tp")
+        roll_wins = sum(1 for x in window if float(x.get("pnl") or 0) > 0)
         roll_wr   = round(roll_wins / len(window) * 100, 1)
         date_str  = (t.get("opened_at") or "")[:10]
         cum_pnl   = round(sum(float(x.get("pnl") or 0) for x in sorted_closed[:idx+1]), 2)
@@ -4840,7 +4844,7 @@ def _build_recommendations(trades, min_trades=3):
             groups[key] = {"wins": 0, "losses": 0, "pnl": 0.0,
                            "win_pnls": [], "loss_pnls": []}
         pnl = float(t.get("pnl") or 0)
-        if t["outcome"] == "tp":
+        if pnl > 0:
             groups[key]["wins"]  += 1
             groups[key]["win_pnls"].append(pnl)
         else:
