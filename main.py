@@ -1058,6 +1058,7 @@ def _handle_order_update(msg):
                     conn = get_db()
                     with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
                         cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
+                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
                         cur.execute(
                             "SELECT entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE order_id=%s LIMIT 1",
                             (order_id,)
@@ -1122,6 +1123,33 @@ def _handle_execution_update(msg):
                 trade = cur.fetchone()
 
             if not trade:
+                # Before assuming this is manual: is this the SAME trade,
+                # closed very recently? A redelivered copy of an already-
+                # processed closing execution would land here too, since the
+                # trade no longer matches status='open'. This is common —
+                # Bybit's own native SL/TP conditional order (which handles
+                # most closes) is never tagged with our orderLinkId, so it
+                # can't be caught by the tag/ID check below on a redelivery.
+                # Without this, every such redelivery got misread as a brand
+                # new manual position in the opposite direction.
+                try:
+                    with conn.cursor(cursor_factory=_pge.RealDictCursor) as rcur:
+                        rcur.execute("""
+                            SELECT id FROM trades
+                            WHERE symbol=%s AND side=%s AND status='closed'
+                              AND closed_at > (NOW() - INTERVAL '15 minutes')
+                            ORDER BY closed_at DESC LIMIT 1
+                        """, (symbol, entry_side))
+                        recently_closed = rcur.fetchone()
+                except Exception as rc_err:
+                    recently_closed = None
+                    log.warning(f"WS {symbol}: recently-closed check failed (continuing): {rc_err}")
+
+                if recently_closed:
+                    log.info(f"WS {symbol}: execution matches a trade closed in the last 15min (id={recently_closed['id']}) — treating as a duplicate/late-arriving closing execution, not a new manual trade")
+                    conn.close()
+                    continue
+
                 order_link_id = e.get("orderLinkId", "") or ""
                 with _bot_order_ids_lock:
                     is_tracked_order_id = order_id in _bot_order_ids
@@ -7000,6 +7028,7 @@ def _trail_watcher():
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
             cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE status='open' AND order_id IS NOT NULL")
             open_trades = cur.fetchall()
         conn.commit()
