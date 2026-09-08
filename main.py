@@ -1137,12 +1137,15 @@ def _handle_execution_update(msg):
                         rcur.execute("""
                             SELECT id FROM trades
                             WHERE symbol=%s AND side=%s AND status='closed'
-                              AND closed_at > (NOW() - INTERVAL '15 minutes')
+                              AND closed_at::timestamp > (NOW() AT TIME ZONE 'UTC' - INTERVAL '15 minutes')
                             ORDER BY closed_at DESC LIMIT 1
                         """, (symbol, entry_side))
                         recently_closed = rcur.fetchone()
                 except Exception as rc_err:
                     recently_closed = None
+                    conn.rollback()  # failed query aborts the transaction — without this,
+                                      # every later query on this same connection would also
+                                      # fail with "current transaction is aborted"
                     log.warning(f"WS {symbol}: recently-closed check failed (continuing): {rc_err}")
 
                 if recently_closed:
@@ -1249,6 +1252,10 @@ def _handle_execution_update(msg):
                         conn.close()
                         continue
                 except Exception as manual_err:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     log.warning(f"WS {symbol}: manual-trade detection failed: {manual_err}")
                     conn.close()
                     continue
