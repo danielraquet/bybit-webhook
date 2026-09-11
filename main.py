@@ -160,8 +160,14 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <div id="restricted-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(239,83,80,0.15);border:1px solid rgba(239,83,80,0.4);color:#ef5350">
   🚫 <strong>Trading restricted</strong> — <span id="restricted-reason"></span>
 </div>
+<div id="cooldown-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(255,167,38,0.15);border:1px solid rgba(255,167,38,0.4);color:#ffa726">
+  ⏸ <strong>Drawdown pause active</strong> — <span id="cooldown-reason"></span>
+</div>
 <div id="restricted-info" style="display:none;margin:8px 0;padding:8px 14px;border-radius:6px;font-size:11px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);color:var(--dim)">
   Restricted windows: <span id="restricted-windows"></span>
+</div>
+<div id="cooldown-info" style="display:none;margin:8px 0;padding:8px 14px;border-radius:6px;font-size:11px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);color:var(--dim)">
+  Cooldown rules: <span id="cooldown-rules"></span>
 </div>
 <div class="stats">
   <div class="stat"><div class="stat-label">Total</div><div class="stat-value" id="s-total">—</div></div>
@@ -286,6 +292,32 @@ function loadRestrictedStatus(){
     if(d.windows && d.windows.length){
       info.style.display = 'block';
       wins.textContent   = d.windows.join(' | ') + ' (UTC+' + d.timezone_offset + ')';
+    }
+  }).catch(function(){});
+}
+
+function loadCooldownStatus(){
+  fetch('/journal/cooldown-status').then(function(r){ return r.json(); }).then(function(d){
+    var banner = document.getElementById('cooldown-banner');
+    var info   = document.getElementById('cooldown-info');
+    var reason = document.getElementById('cooldown-reason');
+    var rules  = document.getElementById('cooldown-rules');
+    if(d.is_paused){
+      banner.style.display = 'block';
+      reason.textContent   = d.reason || '';
+    } else {
+      banner.style.display = 'none';
+    }
+    var parts = [];
+    if(d.per_symbol_losses > 0){
+      parts.push(d.per_symbol_losses + ' losses (same symbol+side) \u2192 ' + d.per_symbol_hours + 'h pause');
+    }
+    if(d.global_losses > 0){
+      parts.push(d.global_losses + ' losses (any symbol) \u2192 ' + d.global_hours + 'h pause, all trades');
+    }
+    if(parts.length){
+      info.style.display = 'block';
+      rules.textContent  = parts.join(' | ');
     }
   }).catch(function(){});
 }
@@ -684,6 +716,8 @@ document.addEventListener('click', function(e) {
 loadTrades();
 loadRestrictedStatus();
 setInterval(loadRestrictedStatus, 60000);
+loadCooldownStatus();
+setInterval(loadCooldownStatus, 60000);
 </script>
 </body>
 </html>
@@ -2462,6 +2496,25 @@ def journal_restricted_times():
         "windows": windows,
         "timezone_offset": TIMEZONE_OFFSET,
         "raw": RESTRICTED_TIMES,
+    })
+
+
+@app.route("/journal/cooldown-status")
+def journal_cooldown_status():
+    """Returns current cooldown/drawdown-pause status — both the configured
+    rules (static, like restricted windows) and whether the global pause is
+    actively blocking trades right now."""
+    cfg = get_config()
+    is_paused, reason = (False, "")
+    if cfg["global_cooldown_losses"] > 0:
+        is_paused, reason = _check_global_cooldown(cfg)
+    return jsonify({
+        "is_paused": is_paused,
+        "reason": reason,
+        "per_symbol_losses": cfg["cooldown_losses"],
+        "per_symbol_hours":  cfg["cooldown_hours"],
+        "global_losses": cfg["global_cooldown_losses"],
+        "global_hours":  cfg["global_cooldown_hours"],
     })
 
 
