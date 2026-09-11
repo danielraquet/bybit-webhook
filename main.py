@@ -75,6 +75,8 @@ def get_config():
         "filter_symbols_block": _str("FILTER_SYMBOLS_BLOCK").upper(),
         "cooldown_losses":      _int("COOLDOWN_LOSSES",    0),   # consecutive losses to trigger cooldown (0=off)
         "cooldown_hours":       _float("COOLDOWN_HOURS",   48.0), # hours to block that side after trigger
+        "global_cooldown_losses": _int("GLOBAL_COOLDOWN_LOSSES", 0),   # consecutive losses ACROSS ALL symbols/sides to trigger a full pause (0=off)
+        "global_cooldown_hours":  _float("GLOBAL_COOLDOWN_HOURS", 24.0), # hours to pause ALL new trades after trigger
     }
 
 app = Flask(__name__)
@@ -830,14 +832,14 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
             if symbol:
                 # Per-symbol: only look at this symbol's recent trades
                 cur.execute("""
-                    SELECT outcome, closed_at FROM trades
+                    SELECT outcome, pnl, closed_at FROM trades
                     WHERE symbol = %s AND side = %s AND outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND status = 'closed'
                     ORDER BY closed_at DESC LIMIT %s
                 """, (symbol, side, max_losses + 1))
             else:
                 # Fallback: global (used by /status endpoint summary)
                 cur.execute("""
-                    SELECT outcome, closed_at FROM trades
+                    SELECT outcome, pnl, closed_at FROM trades
                     WHERE side = %s AND outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND status = 'closed'
                     ORDER BY closed_at DESC LIMIT %s
                 """, (side, max_losses + 1))
@@ -850,7 +852,7 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
         last_n = recent[:max_losses]
         # tp1_sl = partial secured, but the runner still got stopped out — same
         # signal a cooldown is meant to catch as a plain sl.
-        if not all(r["outcome"] in ("sl", "tp1_sl") for r in last_n):
+        if not all(float(r["pnl"] or 0) <= 0 for r in last_n):
             return False, ""
 
         most_recent_loss_at = str(last_n[0]["closed_at"])
@@ -867,6 +869,59 @@ def _check_cooldown(side: str, cfg: dict, symbol: str = "") -> tuple:
 
     except Exception as e:
         log.warning(f"Cooldown check failed: {e}")
+
+    return False, ""
+
+
+def _check_global_cooldown(cfg: dict) -> tuple:
+    """
+    Global drawdown pause — if the last N closed trades, across ALL symbols
+    and both sides, were all losses, pause every new trade for a set number
+    of hours. Separate from the per-symbol/per-side cooldown above — this one
+    is a full account-wide circuit breaker, not scoped to any one symbol.
+    Returns (blocked: bool, reason: str)
+    """
+    max_losses = cfg.get("global_cooldown_losses", 0)
+    if not max_losses:
+        return False, ""  # disabled
+
+    cooldown_hours = cfg.get("global_cooldown_hours", 24.0)
+    cooldown_secs  = cooldown_hours * 3600
+
+    try:
+        conn = get_db()
+        import psycopg2.extras as _pge
+        with conn.cursor(cursor_factory=_pge.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT outcome, pnl, closed_at FROM trades
+                WHERE outcome IN ('tp','sl','tp1_tp2','tp1_sl') AND status = 'closed'
+                ORDER BY closed_at DESC LIMIT %s
+            """, (max_losses + 1,))
+            recent = cur.fetchall()
+        conn.close()
+
+        if len(recent) < max_losses:
+            return False, ""
+
+        last_n = recent[:max_losses]
+        # tp1_sl = partial secured, but the runner still got stopped out — same
+        # signal a pause is meant to catch as a plain sl.
+        if not all(float(r["pnl"] or 0) <= 0 for r in last_n):
+            return False, ""
+
+        most_recent_loss_at = str(last_n[0]["closed_at"])
+        try:
+            loss_dt   = datetime.strptime(most_recent_loss_at[:19], "%Y-%m-%d %H:%M:%S")
+            elapsed   = (datetime.utcnow() - loss_dt).total_seconds()
+            remaining = cooldown_secs - elapsed
+            if remaining > 0:
+                hrs = remaining / 3600
+                return True, f"Global drawdown pause active — {max_losses} consecutive losses across all symbols. {hrs:.1f}h remaining ({cooldown_hours:.0f}h pause)"
+        except Exception:
+            pass
+
+    except Exception as e:
+        log.warning(f"Global cooldown check failed: {e}")
 
     return False, ""
 
@@ -1961,6 +2016,13 @@ def webhook():
         if blocked:
             return _filter_skip(f"{symbol} {side} — {reason}")
 
+    # Global drawdown pause: GLOBAL_COOLDOWN_LOSSES=4 GLOBAL_COOLDOWN_HOURS=24
+    # (all symbols, both sides — a full account-wide circuit breaker)
+    if cfg["global_cooldown_losses"] > 0:
+        g_blocked, g_reason = _check_global_cooldown(cfg)
+        if g_blocked:
+            return _filter_skip(f"{symbol} {side} — {g_reason}")
+
     # Min WR filter: FILTER_MIN_WR=49
     if cfg["filter_min_wr"] > 0:
         if alert_wr == 0.0:
@@ -2295,6 +2357,9 @@ def status():
                 "cooldown_hours":  cfg["cooldown_hours"],
                 "buy_cooldown":    buy_cd,
                 "sell_cooldown":   sell_cd,
+                "global_cooldown_losses": cfg["global_cooldown_losses"],
+                "global_cooldown_hours":  cfg["global_cooldown_hours"],
+                "global_pause":    (_check_global_cooldown(cfg)[1] or "none") if cfg["global_cooldown_losses"] else "disabled",
             },
         })
     except Exception as e:
