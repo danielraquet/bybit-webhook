@@ -219,7 +219,7 @@ var SHOW_SKIPPED   = false;
 
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
-  '#','Symbol','Side','TF','Status','Qty','Entry','Exit','SL','TP',
+  '#','Symbol','Side','TF','Status','Qty','Entry','Exit TP1','Exit TP','SL','TP',
   'PnL','PnL%','R','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
@@ -388,6 +388,7 @@ function renderTrades(trades){
       + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
+      + '<td class="dim">'+esc(t.exit_tp1_price||'—')+'</td>'
       + '<td>'+esc(t.exit_price||'—')+'</td>'
       + '<td style="color:var(--red)">'+esc(t.sl||'—')+'</td>'
       + '<td style="color:var(--green)">'+esc(t.tp||'—')+'</td>'
@@ -1114,8 +1115,9 @@ def _handle_order_update(msg):
                     with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
                         cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
                         cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
+                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
                         cur.execute(
-                            "SELECT entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE order_id=%s LIMIT 1",
+                            "SELECT entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, exit_tp1_price FROM trades WHERE order_id=%s LIMIT 1",
                             (order_id,)
                         )
                         row = cur.fetchone()
@@ -1129,7 +1131,8 @@ def _handle_order_update(msg):
                                         tp1=float(row["tp1"]) if row.get("tp1") is not None else None,
                                         tp1_pct=float(row["tp1_pct"] or 0),
                                         partial_done=bool(row.get("partial_done", False)),
-                                        partial_pnl=float(row["realized_pnl_partial"]) if row.get("realized_pnl_partial") is not None else None)
+                                        partial_pnl=float(row["realized_pnl_partial"]) if row.get("realized_pnl_partial") is not None else None,
+                                        exit_tp1_price=float(row["exit_tp1_price"]) if row.get("exit_tp1_price") is not None else None)
                     else:
                         log.warning(f"Trail: no DB row found for order_id={order_id}")
                 except Exception as tr_err:
@@ -1378,10 +1381,12 @@ def _handle_execution_update(msg):
             # Fall back to the DB column only if trail state doesn't have this
             # trade (e.g. a server restart lost it, but an earlier write succeeded).
             with _trail_lock:
-                mem_partial_pnl = _trail_state.get(trail_key, {}).get("partial_pnl")
+                mem_partial_pnl   = _trail_state.get(trail_key, {}).get("partial_pnl")
+                mem_tp1_price     = _trail_state.get(trail_key, {}).get("exit_tp1_price")
             prior_partial_pnl = mem_partial_pnl if mem_partial_pnl is not None else float(trade.get("realized_pnl_partial") or 0)
+            prior_tp1_price   = mem_tp1_price if mem_tp1_price is not None else (float(trade["exit_tp1_price"]) if trade.get("exit_tp1_price") is not None else None)
 
-            def _persist_partial_pnl(new_total):
+            def _persist_partial_pnl(new_total, fill_price):
                 # Best-effort backup only — in-memory trail state above is the
                 # real source of truth and is updated regardless of whether this
                 # succeeds.
@@ -1389,8 +1394,9 @@ def _handle_execution_update(msg):
                     aconn = get_db()
                     with aconn.cursor() as acur:
                         acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-                        acur.execute("UPDATE trades SET realized_pnl_partial=%s WHERE id=%s AND status='open'",
-                                    (new_total, trade["id"]))
+                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
+                        acur.execute("UPDATE trades SET realized_pnl_partial=%s, exit_tp1_price=%s WHERE id=%s AND status='open'",
+                                    (new_total, fill_price, trade["id"]))
                     aconn.commit()
                     aconn.close()
                 except Exception as acc_err:
@@ -1404,8 +1410,9 @@ def _handle_execution_update(msg):
                 with _trail_lock:
                     if trail_key in _trail_state:
                         _trail_state[trail_key]["partial_pnl"] = new_total
+                        _trail_state[trail_key]["exit_tp1_price"] = exec_price
                 log.warning(f"WS {symbol}: could not confirm live position size — recording leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) but leaving trade open, will reconcile on next execution")
-                _persist_partial_pnl(new_total)
+                _persist_partial_pnl(new_total, exec_price)
                 conn.close()
                 continue
 
@@ -1418,8 +1425,9 @@ def _handle_execution_update(msg):
                 with _trail_lock:
                     if trail_key in _trail_state:
                         _trail_state[trail_key]["partial_pnl"] = new_total
+                        _trail_state[trail_key]["exit_tp1_price"] = exec_price
                 log.info(f"WS {symbol}: partial close leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) — {live_size} still open, trade stays open")
-                _persist_partial_pnl(new_total)
+                _persist_partial_pnl(new_total, exec_price)
                 conn.close()
                 continue
 
@@ -1459,18 +1467,19 @@ def _handle_execution_update(msg):
                 log.warning(f"WS: could not fetch fill time: {ft_err}")
 
             with conn.cursor() as cur:
+                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
                 if fill_time:
                     cur.execute("""
                         UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
-                            pnl=%s, pnl_pct=%s, closed_at=%s, opened_at=%s
+                            pnl=%s, pnl_pct=%s, closed_at=%s, opened_at=%s, exit_tp1_price=%s
                         WHERE id=%s AND status='open'
-                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, fill_time, trade["id"]))
+                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, fill_time, prior_tp1_price, trade["id"]))
                 else:
                     cur.execute("""
                         UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
-                            pnl=%s, pnl_pct=%s, closed_at=%s
+                            pnl=%s, pnl_pct=%s, closed_at=%s, exit_tp1_price=%s
                         WHERE id=%s AND status='open'
-                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, trade["id"]))
+                    """, (journal_outcome, exec_price, closed_pnl, pnl_pct, closed_at, prior_tp1_price, trade["id"]))
             conn.commit()
             conn.close()
 
@@ -1493,7 +1502,8 @@ def _handle_execution_update(msg):
                         opened_at=str(trade.get("opened_at") or ""),
                         closed_at=closed_at,
                         tp1=float(trade["tp1"]) if trade.get("tp1") is not None else None,
-                        tp1_pct=float(trade["tp1_pct"]) if trade.get("tp1_pct") is not None else None
+                        tp1_pct=float(trade["tp1_pct"]) if trade.get("tp1_pct") is not None else None,
+                        exit_tp1_price=prior_tp1_price
                     )
             except Exception as gs_err:
                 log.warning(f"Sheets update failed: {gs_err}")
@@ -2570,7 +2580,8 @@ def sync_sheets():
                     opened_at=str(t.get("opened_at") or ""),
                     closed_at=str(t.get("closed_at") or ""),
                     tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
-                    tp1_pct=float(t["tp1_pct"]) if t.get("tp1_pct") is not None else None
+                    tp1_pct=float(t["tp1_pct"]) if t.get("tp1_pct") is not None else None,
+                    exit_tp1_price=float(t["exit_tp1_price"]) if t.get("exit_tp1_price") is not None else None
                 )
                 synced += 1
             except Exception as te:
@@ -7101,7 +7112,8 @@ def _trail_watcher():
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
             cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial FROM trades WHERE status='open' AND order_id IS NOT NULL")
+            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
+            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, exit_tp1_price FROM trades WHERE status='open' AND order_id IS NOT NULL")
             open_trades = cur.fetchall()
         conn.commit()
         conn.close()
@@ -7112,7 +7124,8 @@ def _trail_watcher():
                                 tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
                                 tp1_pct=float(t["tp1_pct"] or 0),
                                 partial_done=bool(t.get("partial_done", False)),
-                                partial_pnl=float(t["realized_pnl_partial"]) if t.get("realized_pnl_partial") is not None else None)
+                                partial_pnl=float(t["realized_pnl_partial"]) if t.get("realized_pnl_partial") is not None else None,
+                                exit_tp1_price=float(t["exit_tp1_price"]) if t.get("exit_tp1_price") is not None else None)
         if open_trades:
             log.info(f"Trail watcher: recovered {len(open_trades)} open trades from DB")
     except Exception as e:
@@ -7235,7 +7248,7 @@ def _trail_watcher():
         time.sleep(5)
 
 
-def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, partial_done=False, partial_pnl=None):
+def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, partial_done=False, partial_pnl=None, exit_tp1_price=None):
     if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0 and not tp1:
         return
     risk = abs(entry - sl)
@@ -7251,10 +7264,14 @@ def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, part
         seeded_pnl    = existing.get("partial_pnl", None)
         if seeded_pnl is None:
             seeded_pnl = partial_pnl
+        seeded_tp1_price = existing.get("exit_tp1_price", None)
+        if seeded_tp1_price is None:
+            seeded_tp1_price = exit_tp1_price
         _trail_state[order_id] = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
                                    "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl,
                                    "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r,
-                                   "partial_done": already_done, "partial_pnl": seeded_pnl}
+                                   "partial_done": already_done, "partial_pnl": seeded_pnl,
+                                   "exit_tp1_price": seeded_tp1_price}
     log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}" +
              (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else "") +
              (f" [partial already done, PnL so far={seeded_pnl}]" if already_done else ""))
