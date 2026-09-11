@@ -48,9 +48,10 @@ COL_STRATEGY     = 16  # P
 COL_EXIT_DT      = 28  # AB
 COL_EXIT_QTY     = 29  # AC
 COL_EXIT_PRICE   = 30  # AD
-COL_TP1          = 31  # AE — partial exit (TP1) price, blank if no two-stage exit
+COL_TP1          = 31  # AE — planned partial exit (TP1) target price, blank if no two-stage exit
 COL_TP1_PCT      = 32  # AF — % of position closed at TP1
 COL_OUTCOME      = 33  # AG — tp / sl / tp1_tp2 / tp1_sl
+COL_EXIT_TP1_PRICE = 34  # AH — actual fill price where the TP1 partial executed
 
 # Column used to detect the "next empty row". Must be a column that EVERY
 # write path (push_trade_opened AND push_closed_trade) actually populates.
@@ -225,16 +226,19 @@ def push_closed_trade(symbol: str, side: str, qty: float, entry: float,
                       sl: float, tp: float, exit_price: float, pnl: float,
                       outcome: str, source: str, timeframe: str,
                       leverage: int, opened_at: str, closed_at: str,
-                      tp1: float = None, tp1_pct: float = None) -> int:
+                      tp1: float = None, tp1_pct: float = None,
+                      exit_tp1_price: float = None) -> int:
     """Push a complete closed trade as a new row to Google Sheets.
-    tp1/tp1_pct are optional — only set for trades that used the two-stage
-    partial exit; left blank in the sheet otherwise."""
+    tp1/tp1_pct are the planned partial-exit target — optional, only set for
+    two-stage trades. exit_tp1_price is the actual fill price where that
+    partial executed, separate from tp1 (the plan) and exit_price (the final
+    leg's actual fill) — left blank in the sheet if there was no partial."""
     service = _get_service()
     if not service:
         return -1
     try:
         row      = _next_row(service)
-        row_data = [""] * COL_OUTCOME
+        row_data = [""] * COL_EXIT_TP1_PRICE
 
         row_data[COL_PAIR      - 1] = symbol
         row_data[COL_SIDE      - 1] = "Long" if side == "Buy" else "Short"
@@ -253,6 +257,8 @@ def push_closed_trade(symbol: str, side: str, qty: float, entry: float,
             row_data[COL_TP1     - 1] = tp1
             row_data[COL_TP1_PCT - 1] = tp1_pct or ""
         row_data[COL_OUTCOME   - 1] = outcome or ""
+        if exit_tp1_price is not None:
+            row_data[COL_EXIT_TP1_PRICE - 1] = exit_tp1_price
 
         service.spreadsheets().values().update(
             spreadsheetId    = SHEET_ID,
