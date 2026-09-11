@@ -1452,6 +1452,17 @@ def _handle_execution_update(msg):
 
             if live_size > 0:
                 # Position still open — this was a partial exit, not the full close.
+                if prior_tp1_price is not None:
+                    # A partial leg has already been recorded for this trade.
+                    # Bybit appears to periodically re-report the same fill under
+                    # a new execId (roughly every ~2 minutes), which the execId
+                    # dedup alone doesn't catch since each report has a genuinely
+                    # different ID. A trade only ever has ONE partial exit by
+                    # design, so treat any further "still open, partial" report
+                    # as a duplicate rather than accumulating it again.
+                    log.info(f"WS {symbol}: partial leg already recorded (tp1 fill={prior_tp1_price}) — ignoring likely duplicate report (PnL would have been {closed_pnl:.4f})")
+                    conn.close()
+                    continue
                 # Accumulate its PnL so the eventual full-close record is correct;
                 # do NOT mark closed, do NOT deregister from the trail watcher (the
                 # remaining size still needs BE/trail management).
