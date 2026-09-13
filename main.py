@@ -3923,6 +3923,35 @@ ANALYSIS_HTML = """
   wCtx.fillStyle = 'rgba(255,167,38,0.6)'; wCtx.font = '9px sans-serif'; wCtx.textAlign = 'left';
   wCtx.fillText('break-even ~28%', pad.left + 4, beY - 3);
 
+  // Variant-change markers — vertical line + label wherever the indicator
+  // variant label changed between consecutive trades. Skips the very first
+  // trade (nothing to compare against) and any blank variant (older trades
+  // that predate this field).
+  var lastVariant = null;
+  tl.forEach(function(d, i) {
+    var v = d.variant || '';
+    if (v && lastVariant !== null && v !== lastVariant) {
+      var vx = wrX(i);
+      wCtx.strokeStyle = 'rgba(171,71,188,0.5)';
+      wCtx.lineWidth = 1;
+      wCtx.setLineDash([2, 3]);
+      wCtx.beginPath();
+      wCtx.moveTo(vx, pad.top);
+      wCtx.lineTo(vx, H - pad.bottom);
+      wCtx.stroke();
+      wCtx.setLineDash([]);
+      wCtx.save();
+      wCtx.translate(vx + 3, pad.top + 2);
+      wCtx.rotate(Math.PI / 2);
+      wCtx.fillStyle = 'rgba(171,71,188,0.9)';
+      wCtx.font = '9px sans-serif';
+      wCtx.textAlign = 'left';
+      wCtx.fillText('\u2192 v' + v, 0, 0);
+      wCtx.restore();
+    }
+    if (v) lastVariant = v;
+  });
+
   // Cumulative WR line
   wCtx.strokeStyle = 'rgba(255,255,255,0.2)';
   wCtx.lineWidth = 1;
@@ -3966,7 +3995,8 @@ ANALYSIS_HTML = """
     var d = data[idx];
     if (!d) return;
     tooltip.innerHTML = '<strong>#' + d.i + ' — ' + d.date + '</strong><br>'
-      + d.symbol + ' ' + d.side + ' <span style="color:' + (d.outcome==='tp'?'#4caf50':'#ef5350') + '">' + (d.outcome==='tp'?'WIN':'LOSS') + '</span><br>'
+      + d.symbol + ' ' + d.side + ' <span style="color:' + (d.outcome==='tp'?'#4caf50':'#ef5350') + '">' + (d.outcome==='tp'?'WIN':'LOSS') + '</span>'
+      + (d.variant ? ' &nbsp; <span style="color:#ab47bc">v' + d.variant + '</span>' : '') + '<br>'
       + 'Roll WR: <strong>' + d.roll_wr + '%</strong> &nbsp; Cum WR: ' + d.cum_wr + '%<br>'
       + 'PnL: <span style="color:' + (d.pnl_r>=0?'#4caf50':'#ef5350') + '">' + (d.pnl_r>=0?'+':'') + d.pnl_r + '</span>'
       + ' &nbsp; Cum: <span style="color:' + (d.cum_pnl>=0?'#4caf50':'#ef5350') + '">' + (d.cum_pnl>=0?'+':'') + d.cum_pnl + '</span>';
@@ -4670,6 +4700,7 @@ def _analyse_trades(trades):
             "cum_wr": cum_wr, "roll_wr": roll_wr,
             "pnl_r": round(float(t.get("pnl") or 0), 2),
             "cum_pnl": cum_pnl,
+            "variant": t.get("variant") or "",
         })
 
     return {
