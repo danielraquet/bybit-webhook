@@ -1421,20 +1421,31 @@ def _handle_execution_update(msg):
             prior_tp1_price   = mem_tp1_price if mem_tp1_price is not None else (float(trade["exit_tp1_price"]) if trade.get("exit_tp1_price") is not None else None)
 
             def _persist_partial_pnl(new_total, fill_price):
-                # Best-effort backup only — in-memory trail state above is the
-                # real source of truth and is updated regardless of whether this
-                # succeeds.
-                try:
-                    aconn = get_db()
-                    with aconn.cursor() as acur:
-                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-                        acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
-                        acur.execute("UPDATE trades SET realized_pnl_partial=%s, exit_tp1_price=%s WHERE id=%s AND status='open'",
-                                    (new_total, fill_price, trade["id"]))
-                    aconn.commit()
-                    aconn.close()
-                except Exception as acc_err:
-                    log.warning(f"WS {symbol}: DB backup write for partial PnL failed (non-critical, in-memory value still correct): {acc_err}")
+                # In-memory trail state is still the real source of truth for
+                # the running trade — but unlike other backup writes, losing
+                # THIS one silently drops PnL and mislabels the trade's outcome
+                # if a server restart happens before the trade fully closes
+                # (confirmed happening in practice). Worth retrying before
+                # giving up, since the one attempt in the log for a real
+                # incident hit a transient-looking timeout and was never
+                # retried at all.
+                for attempt in range(3):
+                    try:
+                        aconn = get_db()
+                        with aconn.cursor() as acur:
+                            acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
+                            acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
+                            acur.execute("UPDATE trades SET realized_pnl_partial=%s, exit_tp1_price=%s WHERE id=%s AND status='open'",
+                                        (new_total, fill_price, trade["id"]))
+                        aconn.commit()
+                        aconn.close()
+                        return
+                    except Exception as acc_err:
+                        if attempt < 2:
+                            log.warning(f"WS {symbol}: partial PnL backup write attempt {attempt+1} failed, retrying: {acc_err}")
+                            time.sleep(1.5)
+                        else:
+                            log.error(f"WS {symbol}: partial PnL backup write failed after 3 attempts — in-memory value ({new_total}) is correct but WILL BE LOST if the server restarts before this trade closes: {acc_err}")
 
             if live_size < 0:
                 # Position-size lookup failed — don't guess whether this is the
