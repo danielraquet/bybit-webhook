@@ -226,7 +226,7 @@ var SHOW_SKIPPED   = false;
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit TP1','Exit TP','SL','TP',
-  'PnL','PnL%','R','Outcome','Source','Variant','OB Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','R','Outcome','Source','Variant','Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -387,12 +387,17 @@ function renderTrades(trades){
     var notesObj = {};
     try{ notesObj = JSON.parse(t.notes||'{}'); }catch(e){}
     var obSizeAtr      = notesObj.obSizeAtr;
+    var zoneSizePct    = notesObj.zoneSizePct;
     var impulseActual  = notesObj.impulseRatioActual;
     var structureOk    = notesObj.structureOk;
     var klNear         = notesObj.klNear;
     var klDistAtr      = notesObj.klDistAtr;
     var emaOk          = notesObj.emaOk;
-    var obSizeStr   = (obSizeAtr    != null && !isNaN(obSizeAtr))    ? parseFloat(obSizeAtr).toFixed(2)+'x'    : '—';
+    // Size column is shared: OB indicator sends obSizeAtr (x ATR), S&D indicator sends zoneSizePct (% of price).
+    var sizeParts = [];
+    if (obSizeAtr   != null && !isNaN(obSizeAtr))   sizeParts.push(parseFloat(obSizeAtr).toFixed(2)+'x');
+    if (zoneSizePct != null && !isNaN(zoneSizePct)) sizeParts.push(parseFloat(zoneSizePct).toFixed(2)+'%');
+    var obSizeStr   = sizeParts.length ? sizeParts.join(' · ') : '—';
     var impulseStr  = (impulseActual!= null && !isNaN(impulseActual))? parseFloat(impulseActual).toFixed(2)+'x': '—';
     var klDistStr   = (klDistAtr    != null && !isNaN(klDistAtr))    ? parseFloat(klDistAtr).toFixed(2)+'x'    : '—';
     var structHtml  = structureOk===true ? '<span style="color:var(--green)">✓</span>' : structureOk===false ? '<span style="color:var(--red)">✗</span>' : '—';
@@ -2025,6 +2030,7 @@ def webhook():
                 "minImpulse":        data.get("minImpulse"),
                 "entryOffset":       data.get("entryOffset"),
                 "obSizeAtr":         data.get("obSizeAtr"),
+                "zoneSizePct":       data.get("zoneSizePct"),
                 "impulseRatioActual":data.get("impulseRatioActual"),
                 "structureOk":       data.get("structureOk"),
                 "klNear":            data.get("klNear"),
@@ -2147,6 +2153,7 @@ def webhook():
             "minImpulse":        data.get("minImpulse"),
             "entryOffset":       data.get("entryOffset"),
             "obSizeAtr":         data.get("obSizeAtr"),
+            "zoneSizePct":       data.get("zoneSizePct"),
             "impulseRatioActual":data.get("impulseRatioActual"),
             "structureOk":       data.get("structureOk"),
             "klNear":            data.get("klNear"),
@@ -2328,6 +2335,7 @@ def webhook():
                                      "minImpulse":        data.get("minImpulse"),
                                      "entryOffset":       data.get("entryOffset"),
                                      "obSizeAtr":         data.get("obSizeAtr"),
+                                     "zoneSizePct":       data.get("zoneSizePct"),
                                      "impulseRatioActual":data.get("impulseRatioActual"),
                                      "structureOk":       data.get("structureOk"),
                                      "klNear":            data.get("klNear"),
