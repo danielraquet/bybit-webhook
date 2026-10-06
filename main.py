@@ -732,6 +732,14 @@ EXTEND_BEYOND_TP    = os.getenv("EXTEND_BEYOND_TP",    "false").lower() == "true
 TP_EXTEND_TRIGGER_R = float(os.getenv("TP_EXTEND_TRIGGER_R", "2.75") or "2.75")
 TRAIL_STEP_R        = float(os.getenv("TRAIL_STEP_R",        "1.0")  or "1.0")
 BE_TRIGGER_R        = float(os.getenv("BE_TRIGGER_R",        "0")    or "0")
+# Where the stop lands when the BE trigger fires, in R beyond entry (0 = exactly at entry,
+# the original behaviour). 0.2 locks in +0.2R (long: above entry, short: below entry), e.g. to
+# cover fees. Must be lower than BE_TRIGGER_R or the stop would sit at/through the current
+# price and Bybit would reject it — an invalid value is ignored (treated as 0) with a warning.
+BE_OFFSET_R_RAW     = float(os.getenv("BE_OFFSET_R",         "0")    or "0")
+BE_OFFSET_R         = BE_OFFSET_R_RAW if 0 <= BE_OFFSET_R_RAW < BE_TRIGGER_R else 0.0
+if BE_OFFSET_R != BE_OFFSET_R_RAW:
+    log.warning(f"BE_OFFSET_R={BE_OFFSET_R_RAW} ignored — must be >= 0 and < BE_TRIGGER_R ({BE_TRIGGER_R}); using 0 (SL exactly at entry)")
 
 # Restricted trading times — e.g. "Fri 22:00-Mon 02:00" (local time, multiple separated by |)
 RESTRICTED_TIMES  = os.getenv("RESTRICTED_TIMES",  "")
@@ -2410,6 +2418,7 @@ def status():
                 "tp_extend_trigger_r": TP_EXTEND_TRIGGER_R,
                 "trail_step_r":        TRAIL_STEP_R,
                 "be_trigger_r":        BE_TRIGGER_R,
+                "be_offset_r":         BE_OFFSET_R,
                 "tracked_trades":      len(_trail_state),
             },
             "filters": {
@@ -2574,6 +2583,7 @@ def debug_trail():
         "tp_extend_trigger_r": TP_EXTEND_TRIGGER_R,
         "trail_step_r":        TRAIL_STEP_R,
         "be_trigger_r":        BE_TRIGGER_R,
+        "be_offset_r":         BE_OFFSET_R,
         "tracked_trades":      len(state),
         "trades":              result,
     })
@@ -7207,7 +7217,7 @@ def _restricted_time_watcher():
 
 
 def _trail_watcher():
-    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R (partial-exit driven per-trade via tp1)")
+    log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R (SL +{BE_OFFSET_R}R beyond entry) trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R (partial-exit driven per-trade via tp1)")
 
     # On startup, register any already-open trades from DB
     try:
@@ -7313,11 +7323,20 @@ def _trail_watcher():
                     # BE trigger (optional)
                     if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
                         try:
+                            if BE_OFFSET_R > 0:
+                                # Stop sits BE_OFFSET_R beyond entry in the profit direction,
+                                # formatted to the symbol's price precision like the entry SL.
+                                be_price   = entry + BE_OFFSET_R * risk if is_long else entry - BE_OFFSET_R * risk
+                                be_scale   = min(get_instrument_info(symbol)["price_scale"], 8)
+                                be_sl_str  = f"{be_price:.{be_scale}f}"
+                            else:
+                                be_price   = entry
+                                be_sl_str  = str(round(entry, 8))
                             _api_call(session.set_trading_stop, category="linear",
-                                      symbol=symbol, stopLoss=str(round(entry, 8)), positionIdx=0)
+                                      symbol=symbol, stopLoss=be_sl_str, positionIdx=0)
                             state["be_done"] = True
                             with _trail_lock: _trail_state[order_id] = state
-                            log.info(f"Trail: {symbol} BE triggered at {current_r:.2f}R → SL moved to entry {entry}")
+                            log.info(f"Trail: {symbol} BE triggered at {current_r:.2f}R → SL moved to {be_sl_str} (entry {entry}, offset {BE_OFFSET_R}R)")
                         except Exception as e:
                             log.warning(f"Trail BE failed {symbol}: {e}")
 
