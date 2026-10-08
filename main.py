@@ -422,7 +422,7 @@ function renderTrades(trades){
         })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
       + '<td class="dim editable" data-id="'+t.id+'" data-type="timeframe" data-val="'+esc(t.timeframe||'')+'">'+esc(t.timeframe||'—')+'</td>'
-      + '<td>'+badge(t.status||'', t.status||'—')+'</td>'
+      + '<td' + (t.status==='open' ? ' class="editable" data-id="'+t.id+'" data-type="close" title="Click to mark this trade closed (set its outcome first)"' : '') + '>'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
       + '<td class="dim">'+esc(t.exit_tp1_price||'—')+'</td>'
@@ -567,6 +567,14 @@ document.addEventListener('click', function(e){
     var next=opts[(opts.indexOf(val)+1)%opts.length];
     if(!confirm('Change outcome to: '+(labels[next]||'Clear')+'?')) return;
     fetch('/journal/set-outcome',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id),outcome:next})})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='close'){
+    var xp = prompt('Mark this trade as CLOSED in the journal (Bybit must already have closed it). Exit price - leave blank to use the TP/SL level from its outcome:','');
+    if(xp===null) return;
+    var cbody = {id:parseInt(id)};
+    if(xp.trim()!==''){ var xn=parseFloat(xp); if(isNaN(xn)){alert('Invalid number');return;} cbody.exit_price=xn; }
+    fetch('/journal/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cbody)})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
   if(type==='media'){
@@ -1160,9 +1168,9 @@ def _handle_order_update(msg):
                     import psycopg2.extras as _pge2
                     conn = get_db()
                     with conn.cursor(cursor_factory=_pge2.RealDictCursor) as cur:
-                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
-                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-                        cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
+                        # (No runtime ALTER TABLE here — see the note on _trail_watcher's startup
+                        # block: ADD COLUMN IF NOT EXISTS still takes an ACCESS EXCLUSIVE lock and
+                        # blocks behind any other session's open transaction on `trades`.)
                         cur.execute(
                             "SELECT entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, exit_tp1_price FROM trades WHERE order_id=%s LIMIT 1",
                             (order_id,)
@@ -1446,8 +1454,11 @@ def _handle_execution_update(msg):
                     try:
                         aconn = get_db()
                         with aconn.cursor() as acur:
-                            acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-                            acur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
+                            # Fail in 3s instead of waiting out statement_timeout (~2 min) if anything
+                            # ever holds a conflicting lock again. No ALTER TABLE here: it needs an
+                            # ACCESS EXCLUSIVE lock, which blocks behind any open transaction on
+                            # `trades` — including this handler's own `conn` (see the call sites).
+                            acur.execute("SET lock_timeout = '3s'")
                             acur.execute("UPDATE trades SET realized_pnl_partial=%s, exit_tp1_price=%s WHERE id=%s AND status='open'",
                                         (new_total, fill_price, trade["id"]))
                         aconn.commit()
@@ -1470,8 +1481,10 @@ def _handle_execution_update(msg):
                         _trail_state[trail_key]["partial_pnl"] = new_total
                         _trail_state[trail_key]["exit_tp1_price"] = exec_price
                 log.warning(f"WS {symbol}: could not confirm live position size — recording leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) but leaving trade open, will reconcile on next execution")
-                _persist_partial_pnl(new_total, exec_price)
+                # Release this handler's own connection (and the read transaction its SELECT
+                # opened) BEFORE the backup write, which opens a second connection.
                 conn.close()
+                _persist_partial_pnl(new_total, exec_price)
                 continue
 
             if live_size > 0:
@@ -1496,8 +1509,10 @@ def _handle_execution_update(msg):
                         _trail_state[trail_key]["partial_pnl"] = new_total
                         _trail_state[trail_key]["exit_tp1_price"] = exec_price
                 log.info(f"WS {symbol}: partial close leg PnL={closed_pnl:.4f} (running total {new_total:.4f}) — {live_size} still open, trade stays open")
-                _persist_partial_pnl(new_total, exec_price)
+                # Release this handler's own connection (and the read transaction its SELECT
+                # opened) BEFORE the backup write, which opens a second connection.
                 conn.close()
+                _persist_partial_pnl(new_total, exec_price)
                 continue
 
             # live_size == 0 — position is actually flat now. This execution is the
@@ -1536,7 +1551,6 @@ def _handle_execution_update(msg):
                 log.warning(f"WS: could not fetch fill time: {ft_err}")
 
             with conn.cursor() as cur:
-                cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
                 if fill_time:
                     cur.execute("""
                         UPDATE trades SET status='closed', outcome=%s, exit_price=%s,
@@ -2351,8 +2365,7 @@ def webhook():
                     try:
                         tconn = get_db()
                         with tconn.cursor() as tcur:
-                            tcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
-                            tcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
+                            tcur.execute("SET lock_timeout = '3s'")
                             tcur.execute("UPDATE trades SET tp1=%s, tp1_pct=%s WHERE order_id=%s",
                                         (float(tp1_raw), float(tp1_pct_raw or 0), order_id))
                         tconn.commit()
@@ -2863,6 +2876,74 @@ def set_timeframe():
         conn.close()
         log.info(f"Manual timeframe set: trade {trade_id} → {timeframe or 'NULL'}")
         return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/close-trade", methods=["POST"])
+def close_trade_manually():
+    """Mark a journal row that is still 'open' as closed — for trades Bybit has already closed but
+    whose closing execution never reached the journal (e.g. a missed WebSocket event).
+
+    /journal/set-pnl and /journal/set-outcome only edit those two fields and never touch `status`,
+    so on their own they cannot close a trade. This does, and it also drops the trade from the trail
+    watcher so a stale entry can't keep managing (or mis-managing) a live position on the symbol.
+    An outcome must be set first; the exit price defaults to the TP/SL level that outcome implies."""
+    try:
+        body     = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+        raw_exit = body.get("exit_price")
+
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        import psycopg2.extras as _pgx
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgx.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM trades WHERE id=%s", (trade_id,))
+                t = cur.fetchone()
+            if not t:
+                return jsonify({"status": "error", "message": f"trade {trade_id} not found"}), 404
+            if t.get("status") != "open":
+                return jsonify({"status": "error", "message": f"trade {trade_id} is already '{t.get('status')}'"}), 400
+            outcome = (t.get("outcome") or "").strip().lower()
+            if outcome not in ("tp", "sl", "tp1_tp2", "tp1_sl"):
+                return jsonify({"status": "error", "message": "set an outcome (TP/SL) on this trade first"}), 400
+
+            exit_price = _num(raw_exit) if raw_exit not in (None, "") else None
+            if not exit_price:
+                exit_price = _num(t.get("exit_price"))
+            if not exit_price:
+                level = t.get("tp") if outcome in ("tp", "tp1_tp2") else (t.get("sl") if outcome == "sl" else None)
+                exit_price = _num(level) or None
+
+            pnl   = _num(t.get("pnl"))
+            entry = _num(t.get("entry")) or 0.0
+            qty   = _num(t.get("qty")) or 0.0
+            pnl_pct = round(pnl / (entry * qty) * 100, 2) if pnl is not None and entry > 0 and qty > 0 else None
+            closed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE trades SET status='closed', closed_at=COALESCE(closed_at, %s), "
+                    "exit_price=COALESCE(%s, exit_price), pnl_pct=COALESCE(%s, pnl_pct) "
+                    "WHERE id=%s AND status='open'",
+                    (closed_at, exit_price, pnl_pct, trade_id))
+                updated = cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+
+        if not updated:
+            return jsonify({"status": "error", "message": f"trade {trade_id} was not open any more"}), 409
+        _trail_deregister(str(t.get("order_id") or ""))
+        log.info(f"Manual close: trade {trade_id} {t.get('symbol')} {t.get('side')} -> closed "
+                 f"(outcome={outcome}, exit={exit_price}, pnl={pnl}, closed_at={closed_at} = time of this click, not the real close)")
+        return jsonify({"status": "ok", "message": f"trade {trade_id} marked closed"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -7227,7 +7308,12 @@ def _restricted_time_watcher():
 def _trail_watcher():
     log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R (SL +{BE_OFFSET_R}R beyond entry) trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R (partial-exit driven per-trade via tp1)")
 
-    # On startup, register any already-open trades from DB
+    # On startup, register any already-open trades from DB.
+    # This block is the ONE place the partial-exit columns are created. They are not re-ensured on
+    # hot paths any more: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an ACCESS EXCLUSIVE lock
+    # even when the column already exists, so it blocks behind any other session's open transaction
+    # on `trades` (reproduced: a bare SELECT in an uncommitted transaction is enough) and then waits
+    # out statement_timeout.
     try:
         import psycopg2.extras as _pge2s
         conn = get_db()
@@ -7313,7 +7399,9 @@ def _trail_watcher():
                                         try:
                                             pdconn = get_db()
                                             with pdconn.cursor() as pdcur:
-                                                pdcur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
+                                                # lock_timeout keeps a lock conflict from freezing the
+                                                # (single, shared) trail watcher thread for ~2 minutes.
+                                                pdcur.execute("SET lock_timeout = '3s'")
                                                 pdcur.execute("UPDATE trades SET partial_done=TRUE WHERE order_id=%s", (order_id,))
                                             pdconn.commit()
                                             pdconn.close()
