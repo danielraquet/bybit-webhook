@@ -422,7 +422,7 @@ function renderTrades(trades){
         })() + '</strong></td>'
       + '<td>'+esc(t.side||'—')+'</td>'
       + '<td class="dim editable" data-id="'+t.id+'" data-type="timeframe" data-val="'+esc(t.timeframe||'')+'">'+esc(t.timeframe||'—')+'</td>'
-      + '<td' + (t.status==='open' ? ' class="editable" data-id="'+t.id+'" data-type="close" title="Click to mark this trade closed (set its outcome first)"' : '') + '>'+badge(t.status||'', t.status||'—')+'</td>'
+      + '<td' + (t.status==='open' ? ' class="editable" data-id="'+t.id+'" data-type="close" title="Click to mark this trade closed (set its outcome first)"' : (t.status==='closed' ? ' style="cursor:pointer" data-id="'+t.id+'" data-type="reopen" title="Click to reopen - only works if Bybit still shows this order pending or a live position"' : '')) + '>'+badge(t.status||'', t.status||'—')+'</td>'
       + '<td class="dim">'+esc(t.qty||'—')+'</td>'
       + '<td>'+esc(t.entry||'—')+'</td>'
       + '<td class="dim">'+esc(t.exit_tp1_price||'—')+'</td>'
@@ -575,6 +575,11 @@ document.addEventListener('click', function(e){
     var cbody = {id:parseInt(id)};
     if(xp.trim()!==''){ var xn=parseFloat(xp); if(isNaN(xn)){alert('Invalid number');return;} cbody.exit_price=xn; }
     fetch('/journal/close-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cbody)})
+      .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
+  }
+  if(type==='reopen'){
+    if(!confirm('Reopen this trade? Only works if Bybit still shows its order pending or a live position. Outcome, exit price, PnL and close time will be cleared.')) return;
+    fetch('/journal/reopen-trade',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:parseInt(id)})})
       .then(function(r){return r.json();}).then(function(d){if(d.status==='ok')loadTrades();else alert(d.message);});
   }
   if(type==='media'){
@@ -2944,6 +2949,102 @@ def close_trade_manually():
         log.info(f"Manual close: trade {trade_id} {t.get('symbol')} {t.get('side')} -> closed "
                  f"(outcome={outcome}, exit={exit_price}, pnl={pnl}, closed_at={closed_at} = time of this click, not the real close)")
         return jsonify({"status": "ok", "message": f"trade {trade_id} marked closed"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/reopen-trade", methods=["POST"])
+def reopen_trade_manually():
+    """Undo a wrong close: put a 'closed' journal row back to 'open'.
+
+    Guarded against Bybit so it cannot resurrect a trade that is really finished: the row's order must
+    still be PENDING on Bybit, or (order gone, so it filled) there must be a live position on the symbol
+    and the row must have been closed in the last 24h. Clears what a close writes (outcome, exit price,
+    close time, PnL, PnL%) so the real close later fills them in; partial-exit columns are left alone.
+
+    Why it matters while a limit order is live: the restricted-window cancel, the WS 'Cancelled' handler,
+    the auto-cancel journal update and the WS close handler all look rows up by status='open', so a
+    wrongly 'closed' row is skipped by every one of them."""
+    try:
+        body     = request.get_json(force=True)
+        trade_id = int(body.get("id", 0))
+
+        import psycopg2.extras as _pgx
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgx.RealDictCursor) as cur:
+                cur.execute("SELECT * FROM trades WHERE id=%s", (trade_id,))
+                t = cur.fetchone()
+            if not t:
+                return jsonify({"status": "error", "message": f"trade {trade_id} not found"}), 404
+            if t.get("status") != "closed":
+                return jsonify({"status": "error", "message": f"trade {trade_id} is '{t.get('status')}', not closed"}), 400
+            order_id = t.get("order_id") or ""
+            symbol   = t.get("symbol") or ""
+            if not order_id or not symbol:
+                return jsonify({"status": "error", "message": "this row has no order_id/symbol, cannot verify it on Bybit"}), 400
+
+            # --- verify against Bybit (errors must not be mistaken for 'not pending') ---
+            resp = _api_call(session.get_open_orders, category="linear", symbol=symbol)
+            if resp.get("retCode", 0) != 0:
+                return jsonify({"status": "error", "message": f"Bybit open-orders lookup failed: {resp.get('retMsg')}"}), 502
+            pending = any(o.get("orderId") == order_id for o in resp.get("result", {}).get("list", []))
+            live    = get_live_position_size(symbol)
+            if live < 0:
+                return jsonify({"status": "error", "message": "could not read the live position from Bybit, try again"}), 502
+
+            if not pending:
+                if live <= 0:
+                    return jsonify({"status": "error", "message":
+                        f"Bybit shows no pending order {order_id} and no live {symbol} position, so this trade really is finished. Not reopened."}), 409
+                ca = t.get("closed_at")
+                try:
+                    ca_dt = ca if isinstance(ca, datetime) else datetime.strptime(str(ca)[:19], "%Y-%m-%d %H:%M:%S")
+                    age_h = (datetime.utcnow() - ca_dt).total_seconds() / 3600
+                except Exception:
+                    age_h = None
+                if age_h is None or age_h > 24:
+                    return jsonify({"status": "error", "message":
+                        f"The order is gone from Bybit and the row was closed more than 24h ago (or its close time is unreadable); a live {symbol} position could belong to a different trade. Not reopened."}), 409
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE trades SET status='open', closed_at=NULL, exit_price=NULL, outcome=NULL, pnl_pct=NULL "
+                    "WHERE id=%s AND status='closed'", (trade_id,))
+                updated = cur.rowcount
+                if updated:
+                    # pnl may be NOT NULL in some schemas: try NULL, fall back to 0 (the journal shows 0 as a dash)
+                    cur.execute("SAVEPOINT clr_pnl")
+                    try:
+                        cur.execute("UPDATE trades SET pnl=NULL WHERE id=%s", (trade_id,))
+                        cur.execute("RELEASE SAVEPOINT clr_pnl")
+                    except Exception:
+                        cur.execute("ROLLBACK TO SAVEPOINT clr_pnl")
+                        cur.execute("UPDATE trades SET pnl=0 WHERE id=%s", (trade_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        if not updated:
+            return jsonify({"status": "error", "message": f"trade {trade_id} was not closed any more"}), 409
+
+        # Close deregistered it from the trail watcher. If the order has since filled (not pending, live
+        # position), hand it back; if it is still pending the WS fill event registers it as usual. Not
+        # registered while pending: a live position on the symbol could be another trade's.
+        if not pending and live > 0:
+            try:
+                _trail_register(order_id, symbol, t.get("side"),
+                                float(t.get("entry") or 0), float(t.get("sl") or 0),
+                                tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
+                                tp1_pct=float(t.get("tp1_pct") or 0),
+                                partial_done=bool(t.get("partial_done", False)),
+                                partial_pnl=float(t["realized_pnl_partial"]) if t.get("realized_pnl_partial") is not None else None,
+                                exit_tp1_price=float(t["exit_tp1_price"]) if t.get("exit_tp1_price") is not None else None)
+            except Exception as reg_err:
+                log.warning(f"Reopen: trail re-register failed for {symbol} {order_id}: {reg_err}")
+        state_txt = "order still pending on Bybit" if pending else "live position found, re-registered with the trail watcher"
+        log.info(f"Manual reopen: trade {trade_id} {symbol} {t.get('side')} -> open ({state_txt})")
+        return jsonify({"status": "ok", "message": f"trade {trade_id} reopened ({state_txt})"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
