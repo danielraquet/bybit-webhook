@@ -83,6 +83,8 @@ app = Flask(__name__)
 
 # ─── TRADE LOCK ───────────────────────────────────────────────────────────────
 trade_lock = threading.Lock()
+_poll_lock = threading.Lock()      # used by the (disabled) REST reconciler and /poll — was never defined
+_ws_connected = False              # set by poll_closed_trades(), read by /poll
 
 # ─── JOURNAL DASHBOARD HTML ───────────────────────────────────────────────────
 JOURNAL_HTML = """
@@ -759,6 +761,29 @@ BE_OFFSET_R         = BE_OFFSET_R_RAW if 0 <= BE_OFFSET_R_RAW < BE_TRIGGER_R els
 if BE_OFFSET_R != BE_OFFSET_R_RAW:
     log.warning(f"BE_OFFSET_R={BE_OFFSET_R_RAW} ignored — must be >= 0 and < BE_TRIGGER_R ({BE_TRIGGER_R}); using 0 (SL exactly at entry)")
 
+# 2-stage exit (partial take-profit at TP1). Only active for a trade whose alert carried a usable tp1/tp1Pct —
+# an indicator with the partial exit switched off omits both fields and the trade runs as a plain single-TP trade.
+#   TP1_RESTING_ORDER: place the partial as a reduce-only LIMIT order resting at the TP1 price as soon as the entry
+#     has filled, so a wick that only touches TP1 still fills it (the old way — a 5s mark-price poll that sends a
+#     market order — cannot catch a wick). Set to "false" to go back to the polling-only behaviour.
+#   BE_ON_TP1: when the TP1 partial fills, move the stop to entry (+ BE_OFFSET_R, see below) immediately.
+TP1_RESTING_ORDER   = os.getenv("TP1_RESTING_ORDER", "true").lower() == "true"
+BE_ON_TP1           = os.getenv("BE_ON_TP1",         "true").lower() == "true"
+# Server-side partial-exit override. PARTIAL_R unset/blank → use the alert's tp1/tp1Pct (indicator is the source).
+# PARTIAL_R=0 → partial exit forced OFF for every new trade. PARTIAL_R>0 → tp1 = entry ± PARTIAL_R × risk, ignoring the alert.
+# PARTIAL_PCT (1-99) = share of the position closed at tp1; blank → the alert's tp1Pct, else 75.
+def _env_float(name):
+    v = (os.getenv(name, "") or "").strip()
+    if not v:
+        return None
+    try:
+        f = float(v)
+        return f if f == f and abs(f) != float("inf") else None
+    except ValueError:
+        return None
+PARTIAL_R_ENV   = _env_float("PARTIAL_R")
+PARTIAL_PCT_ENV = _env_float("PARTIAL_PCT")
+
 # Restricted trading times — e.g. "Fri 22:00-Mon 02:00" (local time, multiple separated by |)
 RESTRICTED_TIMES  = os.getenv("RESTRICTED_TIMES",  "")
 TIMEZONE_OFFSET   = int(os.getenv("TIMEZONE_OFFSET", "2") or "2")  # UTC+X
@@ -868,6 +893,59 @@ def get_open_orders(symbol: str) -> list:
     except Exception as e:
         log.error(f"Error fetching open orders for {symbol}: {e}")
         return []
+
+
+def _is_entry_order(o: dict) -> bool:
+    """True for a pending ENTRY order. The resting TP1 order and any TP/SL order are reduce-only/close-on-trigger
+    and must never be swept up by 'cancel the pending entries' logic."""
+    return not (o.get("reduceOnly") or o.get("closeOnTrigger"))
+
+
+def get_pending_entry_orders(symbol: str) -> list:
+    return [o for o in get_open_orders(symbol) if _is_entry_order(o)]
+
+
+def _cancel_pending_entries(symbol: str) -> list:
+    """Cancel only the pending ENTRY orders of a symbol (never reduce-only orders such as the resting TP1 order).
+    Replaces cancel_all_orders(symbol), which also wipes reduce-only orders on a running position.
+    Returns the cancelled order ids; raises if a cancel failed for a reason other than 'order already gone'."""
+    cancelled, errors = [], []
+    for o in get_pending_entry_orders(symbol):
+        oid = o.get("orderId")
+        try:
+            session.cancel_order(category="linear", symbol=symbol, orderId=oid)
+            cancelled.append(oid)
+        except Exception as e:
+            msg = str(e)
+            if "110001" in msg or "not exist" in msg.lower():
+                cancelled.append(oid)           # already filled/cancelled — nothing left to cancel
+            else:
+                errors.append(f"{oid}: {msg}")
+    if errors:
+        raise RuntimeError("cancel failed: " + "; ".join(errors))
+    return cancelled
+
+
+def _validate_tp1(side: str, entry: float, tp: float, tp1_raw, tp1_pct_raw):
+    """Decide whether an alert's partial-exit fields are usable.
+    Returns (tp1, pct, note). tp1 is None when the partial exit is OFF for this trade — either the indicator
+    omitted the fields (switch off) or they are unusable (NaN, pct outside 0-100, tp1 not between entry and tp)."""
+    import math
+    if tp1_raw is None or tp1_raw == "":
+        return None, 0.0, "no tp1 in alert — partial exit off"
+    try:
+        tp1 = float(tp1_raw)
+        pct = float(tp1_pct_raw) if tp1_pct_raw not in (None, "") else 0.0
+    except (TypeError, ValueError):
+        return None, 0.0, f"tp1/tp1Pct not numeric ({tp1_raw!r}/{tp1_pct_raw!r}) — partial exit off"
+    if not (math.isfinite(tp1) and math.isfinite(pct)) or tp1 <= 0:
+        return None, 0.0, f"tp1/tp1Pct not usable ({tp1_raw!r}/{tp1_pct_raw!r}) — partial exit off"
+    if not (0 < pct < 100):
+        return None, 0.0, f"tp1Pct={pct} must be between 0 and 100 exclusive — partial exit off"
+    between = (entry < tp1 < tp) if side == "Buy" else (tp < tp1 < entry)
+    if not between:
+        return None, 0.0, f"tp1={tp1} is not between entry={entry} and tp={tp} — partial exit off"
+    return tp1, pct, "ok"
 
 
 _last_known_balance = float(os.environ.get("FALLBACK_BALANCE", "1040.0"))
@@ -1108,6 +1186,7 @@ def poll_closed_trades():
     Background thread — tries WebSocket first, falls back to REST polling.
     WebSocket is preferred as it avoids IP rate limits on REST endpoints.
     """
+    global _ws_connected
     # WebSocket with auto-reconnect on ping/pong timeout
     ws_started = False
     while True:
@@ -1156,6 +1235,11 @@ def _handle_order_update(msg):
             side       = o.get("side", "")
             reduce_only = o.get("reduceOnly", False)
             log.info(f"WS order: {symbol} {order_id} status={status} reduceOnly={reduce_only}")
+            if order_id in _tp1_order_ids:
+                # Resting TP1 order: book the partial when it has filled (done off the WS thread — it calls Bybit)
+                if status in ("Filled", "PartiallyFilled", "Cancelled", "Deactivated", "Rejected"):
+                    threading.Thread(target=_tp1_finalize_by_order_id, args=(order_id,), daemon=True).start()
+                continue
             if status in ("Cancelled", "Rejected", "Deactivated"):
                 conn = get_db()
                 with conn.cursor() as cur:
@@ -1192,7 +1276,10 @@ def _handle_order_update(msg):
                                         tp1_pct=float(row["tp1_pct"] or 0),
                                         partial_done=bool(row.get("partial_done", False)),
                                         partial_pnl=float(row["realized_pnl_partial"]) if row.get("realized_pnl_partial") is not None else None,
-                                        exit_tp1_price=float(row["exit_tp1_price"]) if row.get("exit_tp1_price") is not None else None)
+                                        exit_tp1_price=float(row["exit_tp1_price"]) if row.get("exit_tp1_price") is not None else None,
+                                        # the resting TP1 order is only sized once the entry is FULLY filled
+                                        entry_filled=(status == "Filled"),
+                                        opened_ms=int(o.get("createdTime") or 0) or None)
                     else:
                         log.warning(f"Trail: no DB row found for order_id={order_id}")
                 except Exception as tr_err:
@@ -1225,6 +1312,13 @@ def _handle_execution_update(msg):
             side       = e.get("side", "")
 
             if exec_type not in ("TakeProfit", "StopLoss", "Trade") or exec_price <= 0:
+                continue
+
+            if order_id and order_id in _tp1_order_ids:
+                # A fill (or chunk of one) of the resting TP1 order. Its PnL is booked at order level by
+                # _tp1_finalize, not per execution — chunked fills would otherwise be dropped as "duplicates".
+                log.info(f"WS execution: {symbol} TP1 order {order_id} fill @ {exec_price} — handled by TP1 finalize")
+                threading.Thread(target=_tp1_finalize_by_order_id, args=(order_id,), daemon=True).start()
                 continue
 
             log.info(f"WS execution: {symbol} {exec_type} @ {exec_price} PnL={closed_pnl}")
@@ -1436,6 +1530,15 @@ def _handle_execution_update(msg):
             live_size    = get_live_position_size(symbol)
             trail_key    = str(trade.get("order_id", ""))
 
+            # If this trade has a resting TP1 order that executed but is not booked yet, book it NOW so its PnL is
+            # part of prior_partial_pnl below (this can race the finalize thread when price hits TP1 then stop).
+            _tr_state = _st(trail_key)
+            if _tr_state and _tr_state.get("tp1_order_id") and not _tr_state.get("partial_done"):
+                try:
+                    _tp1_finalize(trail_key)
+                except Exception as _fin_err:
+                    log.warning(f"WS {symbol}: TP1 finalize before close failed: {_fin_err}")
+
             # Prefer in-memory trail state — it's alive for the trade's whole
             # lifetime and isn't subject to the DB write failing partway through.
             # Fall back to the DB column only if trail state doesn't have this
@@ -1533,7 +1636,7 @@ def _handle_execution_update(msg):
             # (reversed and hit stop). A trade with no partial keeps the plain tp/sl
             # label, same as before.
             journal_outcome = outcome
-            if prior_partial_pnl != 0:
+            if prior_partial_pnl != 0 or prior_tp1_price is not None:
                 journal_outcome = "tp1_tp2" if outcome == "tp" else "tp1_sl"
 
             closed_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -2215,9 +2318,10 @@ def webhook():
                 else:
                     # Opposite direction — cancel any pending limit orders and skip
                     # Let the running trade complete at TP or SL
-                    open_orders = get_open_orders(symbol)
+                    open_orders = get_pending_entry_orders(symbol)
                     if open_orders:
-                        session.cancel_all_orders(category="linear", symbol=symbol)
+                        # entries only — the running position's resting TP1 order must survive this
+                        _cancel_pending_entries(symbol)
                         log.info(f"Cancelled {len(open_orders)} pending {side} limit(s) for {symbol} — opposite {pos_side} position running, letting it complete")
                     msg = f"Opposite position running for {symbol} ({pos_side}) — cancelled pending limit, skipping new {side} order"
                     log.warning(msg)
@@ -2230,7 +2334,7 @@ def webhook():
                 _log_skip(msg)
                 return jsonify({"status": "skipped", "message": msg}), 200
 
-        open_orders = get_open_orders(symbol)
+        open_orders = get_pending_entry_orders(symbol)
         if open_orders:
             # Check direction of existing pending order
             existing_side = open_orders[0].get("side", "") if open_orders else ""
@@ -2240,7 +2344,7 @@ def webhook():
                 # Opposite direction pending — cancel it and place new one
                 log.info(f"Cancelling opposite {existing_side} pending order for {symbol} — placing new {side} order")
                 try:
-                    session.cancel_all_orders(category="linear", symbol=symbol)
+                    _cancel_pending_entries(symbol)
                     with get_db() as conn:
                         with conn.cursor() as cur:
                             cur.execute("UPDATE trades SET status = 'skipped', notes = 'Cancelled — opposite direction signal' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
@@ -2251,7 +2355,7 @@ def webhook():
                 # New OB detected — cancel existing pending limit and replace with new one
                 log.info(f"New OB for {symbol} — cancelling {len(open_orders)} existing order(s) and replacing")
                 try:
-                    session.cancel_all_orders(category="linear", symbol=symbol)
+                    _cancel_pending_entries(symbol)
                     with get_db() as conn:
                         with conn.cursor() as cur:
                             cur.execute("UPDATE trades SET status = 'skipped', notes = 'Replaced by new OB limit order' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
@@ -2265,7 +2369,7 @@ def webhook():
                 # then place market order to ensure we get in
                 log.info(f"OB zone entered for {symbol} — cancelling pending limit, placing market order")
                 try:
-                    session.cancel_all_orders(category="linear", symbol=symbol)
+                    _cancel_pending_entries(symbol)
                     with get_db() as conn:
                         with conn.cursor() as cur:
                             cur.execute("UPDATE trades SET status = 'skipped', notes = 'Cancelled — market order placed on zone entry' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
@@ -2364,20 +2468,40 @@ def webhook():
                 # Persist tp1/tp1Pct (partial-exit level) if this alert included one —
                 # read back at fill time so the trail watcher can register the partial
                 # exit, and survives server restarts via the recovery query below.
-                tp1_raw     = data.get("tp1")
-                tp1_pct_raw = data.get("tp1Pct")
-                if tp1_raw is not None:
-                    try:
-                        tconn = get_db()
-                        with tconn.cursor() as tcur:
-                            tcur.execute("SET lock_timeout = '3s'")
-                            tcur.execute("UPDATE trades SET tp1=%s, tp1_pct=%s WHERE order_id=%s",
-                                        (float(tp1_raw), float(tp1_pct_raw or 0), order_id))
-                        tconn.commit()
-                        tconn.close()
-                        log.info(f"Partial exit stored: {symbol} tp1={tp1_raw} ({tp1_pct_raw}%)")
-                    except Exception as _tp1_err:
-                        log.warning(f"Could not persist tp1/tp1Pct for {order_id}: {_tp1_err}")
+                # An indicator with the partial exit switched off sends neither field → tp1_val is None, nothing
+                # is stored, and the trade runs as a plain single-TP trade (no resting order, no partial).
+                _tp1_raw, _tp1_pct_raw = data.get("tp1"), data.get("tp1Pct")
+                if PARTIAL_R_ENV is not None:
+                    _risk = abs(entry - sl)
+                    if PARTIAL_R_ENV <= 0 or _risk <= 0:
+                        _tp1_raw = None
+                    else:
+                        _tp1_raw = entry + PARTIAL_R_ENV * _risk if side == "Buy" else entry - PARTIAL_R_ENV * _risk
+                        _tp1_pct_raw = PARTIAL_PCT_ENV if PARTIAL_PCT_ENV is not None else (_tp1_pct_raw or 75)
+                elif PARTIAL_PCT_ENV is not None and _tp1_raw not in (None, ""):
+                    _tp1_pct_raw = PARTIAL_PCT_ENV
+                tp1_val, tp1_pct_val, tp1_note = _validate_tp1(side, entry, tp, _tp1_raw, _tp1_pct_raw)
+                if PARTIAL_R_ENV is not None:
+                    tp1_note = f"env PARTIAL_R={PARTIAL_R_ENV}: {tp1_note}"
+                if tp1_val is not None:
+                    stored = False
+                    for _try in range(3):
+                        try:
+                            tconn = get_db()
+                            with tconn.cursor() as tcur:
+                                tcur.execute("SET lock_timeout = '3s'")
+                                tcur.execute("UPDATE trades SET tp1=%s, tp1_pct=%s WHERE order_id=%s",
+                                            (tp1_val, tp1_pct_val, order_id))
+                            tconn.commit()
+                            tconn.close()
+                            stored = True
+                            break
+                        except Exception as _tp1_err:
+                            log.warning(f"Could not persist tp1/tp1Pct for {order_id} (attempt {_try+1}/3): {_tp1_err}")
+                            time.sleep(1.0)
+                    log.info(f"Partial exit {'stored' if stored else 'NOT STORED — this trade will run without a partial exit'}: {symbol} tp1={tp1_val} ({tp1_pct_val}%)")
+                else:
+                    log.info(f"Partial exit OFF for {symbol} {order_id}: {tp1_note}" if (data.get("tp1") is not None or PARTIAL_R_ENV is not None) else f"Partial exit OFF for {symbol} {order_id} (alert carries no tp1)")
                 # Note: Google Sheets push happens when trade CLOSES via WebSocket
                 # This avoids cluttering the sheet with trades that never fill
                 # Schedule auto-cancel for limit orders only
@@ -2445,6 +2569,10 @@ def status():
                 "trail_step_r":        TRAIL_STEP_R,
                 "be_trigger_r":        BE_TRIGGER_R,
                 "be_offset_r":         BE_OFFSET_R,
+                "tp1_resting_order":   TP1_RESTING_ORDER,
+                "partial_r_env":       PARTIAL_R_ENV,
+                "partial_pct_env":     PARTIAL_PCT_ENV,
+                "be_on_tp1":           BE_ON_TP1,
                 "tracked_trades":      len(_trail_state),
             },
             "filters": {
@@ -2485,13 +2613,9 @@ def manual_poll():
         if _ws_connected:
             msg = f"WebSocket active — {open_count} open trades updating in real-time"
         else:
-            # WebSocket not connected — try REST
-            if _poll_lock.acquire(blocking=False):
-                try:
-                    _check_closed_trades()
-                finally:
-                    _poll_lock.release()
-            msg = f"Poll complete — found {open_count} open trades"
+            # The REST reconciler (_check_closed_trades) is deliberately NOT run from here: its "most recent
+            # same-side close" fallback can close the wrong trade. Report only.
+            msg = f"WebSocket not connected right now — {open_count} open trade(s); nothing was changed"
 
         return jsonify({
             "status":       "ok",
@@ -2601,6 +2725,12 @@ def debug_trail():
             "risk":        s["risk"],
             "tp_removed":  s["tp_removed"],
             "be_done":     s["be_done"],
+            "tp1":         s.get("tp1"),
+            "tp1_pct":     s.get("tp1_pct"),
+            "partial_done": s.get("partial_done"),
+            "entry_filled": s.get("entry_filled"),
+            "tp1_order_id": s.get("tp1_order_id"),
+            "tp1_fallback": s.get("tp1_fallback", False),
             "mark_price":  mark,
             "current_r":   round(current_r, 3),
         })
@@ -2610,6 +2740,10 @@ def debug_trail():
         "trail_step_r":        TRAIL_STEP_R,
         "be_trigger_r":        BE_TRIGGER_R,
         "be_offset_r":         BE_OFFSET_R,
+        "tp1_resting_order":   TP1_RESTING_ORDER,
+        "partial_r_env":       PARTIAL_R_ENV,
+        "partial_pct_env":     PARTIAL_PCT_ENV,
+        "be_on_tp1":           BE_ON_TP1,
         "tracked_trades":      len(state),
         "trades":              result,
     })
@@ -2779,12 +2913,11 @@ def set_user_notes():
         body     = request.get_json(force=True)
         trade_id = int(body.get("id", 0))
         notes    = body.get("user_notes", "").strip()
+        if not _trades_cols_ok:
+            _ensure_trades_columns()      # creates user_notes only if missing; an unconditional ALTER here
+                                          # needs an ACCESS EXCLUSIVE lock and can stall the whole app
         conn = get_db()
         with conn.cursor() as cur:
-            # Add column if it doesn't exist yet
-            cur.execute("""
-                ALTER TABLE trades ADD COLUMN IF NOT EXISTS user_notes TEXT
-            """)
             cur.execute("UPDATE trades SET user_notes=%s WHERE id=%s", (notes or None, trade_id))
         conn.commit()
         conn.close()
@@ -3283,17 +3416,16 @@ def cancel_orders(symbol):
     """Cancel all pending orders for a symbol — useful when rotating assets."""
     symbol = symbol.upper()
     try:
-        resp = session.cancel_all_orders(category="linear", symbol=symbol)
-        ret_code = resp.get("retCode", -1)
-        if ret_code == 0:
-            log.info(f"Cancelled all orders for {symbol}")
+        # Pending ENTRY orders only: a running position's resting TP1 order stays, and only the journal
+        # rows of the orders actually cancelled are flipped to 'skipped' (a running trade's row is left alone).
+        cancelled_ids = _cancel_pending_entries(symbol)
+        log.info(f"Cancelled {len(cancelled_ids)} pending entry order(s) for {symbol}")
+        if cancelled_ids:
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Manually cancelled' WHERE symbol = " + ph() + " AND status = 'open'", (symbol,))
+                    cur.execute("UPDATE trades SET status = 'skipped', notes = 'Manually cancelled' WHERE symbol = %s AND status = 'open' AND order_id = ANY(%s)", (symbol, list(cancelled_ids)))
                 conn.commit()
-            return jsonify({"status": "ok", "cancelled": symbol}), 200
-        else:
-            return jsonify({"status": "error", "message": resp.get("retMsg")}), 400
+        return jsonify({"status": "ok", "cancelled": symbol, "orders": len(cancelled_ids)}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -3337,6 +3469,8 @@ def auto_cancel_opposite(symbol: str, new_side: str):
         opposite = "Sell" if new_side == "Buy" else "Buy"
 
         for order in orders:
+            if not _is_entry_order(order):
+                continue            # never cancel a running position's reduce-only orders (TP1 / TP / SL)
             if order.get("side") == opposite:
                 order_id = order.get("orderId")
                 session.cancel_order(
@@ -7406,41 +7540,538 @@ def _restricted_time_watcher():
         time.sleep(60)
 
 
+# ─── TP1 RESTING ORDER · BE-ON-TP1 · RESYNC ───────────────────────────────────
+# How the 2-stage exit works now (when the alert carried a usable tp1/tp1Pct):
+#   1. Entry fills -> the trade is registered with the trail watcher (WS fill event, or the resync below).
+#   2. _tp1_maintain() places a reduce-only LIMIT order for tp1Pct% of the position at the TP1 price. It rests in
+#      Bybit's book, so a wick that only touches TP1 still fills it.
+#   3. When that order has filled, _tp1_finalize() books the leg (PnL from Bybit's closed-PnL record for that exact
+#      order, falling back to an estimate after 90s), persists partial_done, and moves the stop to BE (+BE_OFFSET_R).
+#   4. If the resting order cannot be used (cannot be sized, rejected 3x, cancelled externally 3x) the old 5s polling
+#      market-order partial takes over ("tp1_fallback").
+# With the partial exit switched off in the indicator no tp1 reaches the server, so none of this runs for that trade.
+_tp1_order_ids: set = set()
+_tp1_order_ids_order: 'deque' = deque()
+_tp1_order_ids_lock = threading.Lock()
+_TP1_ORDER_IDS_MAX  = 1000
+_TP1_TAG            = BOT_ORDER_TAG + "tp1_"
+_trades_cols_ok     = False
+_resync_flat: dict  = {}      # tracker key -> consecutive resync cycles with no matching live position
+_resync_warned: dict = {}     # journal row id -> last time we warned about it
+
+
+def _tp1_ids_add(oid):
+    with _tp1_order_ids_lock:
+        if oid in _tp1_order_ids:
+            return
+        _tp1_order_ids.add(oid)
+        _tp1_order_ids_order.append(oid)
+        while len(_tp1_order_ids_order) > _TP1_ORDER_IDS_MAX:
+            _tp1_order_ids.discard(_tp1_order_ids_order.popleft())
+
+
+def _bot_ids_add(oid):
+    with _bot_order_ids_lock:
+        _bot_order_ids.add(oid)
+        _bot_order_ids_order.append(oid)
+        while len(_bot_order_ids_order) > _BOT_ORDER_IDS_MAX:
+            _bot_order_ids.discard(_bot_order_ids_order.popleft())
+
+
+def _st(order_id):
+    with _trail_lock:
+        return _trail_state.get(order_id)
+
+
+def _set(order_id, **kw):
+    """Update fields on the LIVE tracker (no-op if it has been deregistered meanwhile)."""
+    with _trail_lock:
+        st = _trail_state.get(order_id)
+        if st is not None:
+            st.update(kw)
+
+
+_TRADES_EXTRA_COLUMNS = {
+    "tp1":                  "DOUBLE PRECISION",
+    "tp1_pct":              "DOUBLE PRECISION",
+    "partial_done":         "BOOLEAN DEFAULT FALSE",
+    "realized_pnl_partial": "DOUBLE PRECISION DEFAULT 0",
+    "exit_tp1_price":       "DOUBLE PRECISION",
+    "user_notes":           "TEXT",
+}
+
+
+def _ensure_trades_columns():
+    """Create the optional `trades` columns — but ONLY the ones that are missing.
+    `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an ACCESS EXCLUSIVE lock even when the column exists, so
+    running it unconditionally (as startup used to) can block behind any open transaction and abort the whole
+    startup recovery. Checking information_schema first needs no lock at all in the normal case."""
+    global _trades_cols_ok
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='trades'")
+                have = {r[0] for r in cur.fetchall()}
+            conn.commit()                      # end the read transaction before any DDL
+            missing = [c for c in _TRADES_EXTRA_COLUMNS if c not in have]
+            ok = True
+            for col in missing:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SET lock_timeout = '5s'")
+                        cur.execute(f"ALTER TABLE trades ADD COLUMN IF NOT EXISTS {col} {_TRADES_EXTRA_COLUMNS[col]}")
+                    conn.commit()
+                    log.info(f"trades: added missing column {col}")
+                except Exception as e:
+                    conn.rollback()
+                    ok = False
+                    log.warning(f"trades: could not add column {col}: {e}")
+        finally:
+            conn.close()
+        _trades_cols_ok = ok
+    except Exception as e:
+        log.warning(f"_ensure_trades_columns failed: {e}")
+
+
+def _open_orders_or_none(symbol):
+    """Open orders for a symbol, or None if the lookup failed (a failure must never be read as 'no orders')."""
+    try:
+        resp = _api_call(session.get_open_orders, category="linear", symbol=symbol)
+        if resp.get("retCode", 0) != 0:
+            return None
+        return resp.get("result", {}).get("list", [])
+    except Exception as e:
+        log.warning(f"open-orders lookup failed for {symbol}: {e}")
+        return None
+
+
+def _order_history_or_none(symbol, order_id=None, limit=50):
+    try:
+        kw = dict(category="linear", symbol=symbol, limit=limit)
+        if order_id:
+            kw["orderId"] = order_id
+        resp = _api_call(session.get_order_history, **kw)
+        if resp.get("retCode", 0) != 0:
+            return None
+        return resp.get("result", {}).get("list", [])
+    except Exception as e:
+        log.warning(f"order-history lookup failed for {symbol}: {e}")
+        return None
+
+
+def _get_position(symbol):
+    """The live position dict for a symbol; {} if flat; None if the lookup failed."""
+    try:
+        resp = _api_call(session.get_positions, category="linear", symbol=symbol)
+        if resp.get("retCode", 0) != 0:
+            return None
+        for p in resp.get("result", {}).get("list", []):
+            if float(p.get("size", 0) or 0) > 0:
+                return p
+        return {}
+    except Exception as e:
+        log.warning(f"position lookup failed for {symbol}: {e}")
+        return None
+
+
+def _cancel_order_quiet(symbol, oid):
+    try:
+        session.cancel_order(category="linear", symbol=symbol, orderId=oid)
+        log.info(f"Trail: cancelled leftover TP1 order {oid} on {symbol}")
+    except Exception as e:
+        log.info(f"Trail: TP1 order {oid} on {symbol} not cancelled (already gone?): {e}")
+
+
+def _move_sl_to_be(order_id, reason):
+    """Move the position's stop to entry (+offset R). Idempotent, and never loosens a stop that is already at or
+    better than the BE level (e.g. one a trailing stop has since raised). Returns True when the stop is at/better
+    than BE afterwards."""
+    st = _st(order_id)
+    if not st:
+        return False
+    symbol, side, entry, risk = st["symbol"], st["side"], st["entry"], st["risk"]
+    is_long = side == "Buy"
+    if reason == "tp1":
+        pr     = st.get("partial_r") or 0
+        offset = BE_OFFSET_R_RAW if 0 <= BE_OFFSET_R_RAW < pr else 0.0
+    else:
+        offset = BE_OFFSET_R
+    be_price = entry + offset * risk if is_long else entry - offset * risk
+    scale    = min(get_instrument_info(symbol)["price_scale"], 8)
+    be_str   = f"{be_price:.{scale}f}"
+    be_val   = float(be_str)
+
+    pos = _get_position(symbol)
+    if pos is None:
+        _set(order_id, be_attempts=st.get("be_attempts", 0) + 1)
+        return False
+    if not pos or pos.get("side") != side:
+        return False                      # flat, or a different trade's position — not ours to touch
+    cur_sl = float(pos.get("stopLoss") or 0)
+    if (cur_sl >= be_val) if is_long else (cur_sl > 0 and cur_sl <= be_val):
+        _set(order_id, be_done=True)
+        log.info(f"Trail: {symbol} stop already at {cur_sl} (BE level {be_str}) — nothing to move [{reason}]")
+        return True
+    try:
+        resp = _api_call(session.set_trading_stop, category="linear", symbol=symbol,
+                         stopLoss=be_str, slTriggerBy="LastPrice", positionIdx=0)
+        rc = resp.get("retCode", 0) if isinstance(resp, dict) else 0
+        if rc not in (0, 34040):          # 34040 = "not modified" (already there)
+            raise RuntimeError(f"retCode {rc}: {resp.get('retMsg')}")
+        _set(order_id, be_done=True)
+        log.info(f"Trail: {symbol} BE [{reason}] → SL moved {cur_sl or 'none'} → {be_str} (entry {entry}, offset {offset}R)")
+        return True
+    except Exception as e:
+        _set(order_id, be_attempts=st.get("be_attempts", 0) + 1)
+        log.warning(f"Trail BE [{reason}] failed {symbol}: {e}")
+        return False
+
+
+def _tp1_persist_done(row_order_id, total_pnl, exit_px):
+    conn = None
+    for attempt in range(3):
+        try:
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '3s'")
+                cur.execute("UPDATE trades SET partial_done=TRUE, realized_pnl_partial=%s, exit_tp1_price=%s "
+                            "WHERE order_id=%s AND status='open'", (total_pnl, exit_px, row_order_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            log.warning(f"TP1: persist attempt {attempt+1}/3 failed for {row_order_id}: {e}")
+            time.sleep(1.5)
+    log.error(f"TP1: FAILED to persist partial_done for {row_order_id} — a restart before this trade closes could "
+              f"place a SECOND partial; in-memory state is correct until then")
+    return False
+
+
+def _tp1_place(order_id):
+    """Place (or adopt) the reduce-only TP1 limit order for one tracked trade."""
+    st = _st(order_id)
+    if not st:
+        return
+    symbol, side = st["symbol"], st["side"]
+    close_side = "Sell" if side == "Buy" else "Buy"
+    _set(order_id, tp1_last_attempt=time.time())
+
+    open_orders = _open_orders_or_none(symbol)
+    if open_orders is None:
+        return
+    # Adopt an existing TP1 order (restart / second process) instead of placing a duplicate.
+    for o in open_orders:
+        if o.get("reduceOnly") and (o.get("orderLinkId") or "").startswith(_TP1_TAG) and o.get("side") == close_side:
+            oid = o.get("orderId")
+            _tp1_ids_add(oid); _bot_ids_add(oid)
+            _set(order_id, tp1_order_id=oid)
+            log.info(f"Trail: {symbol} adopted existing TP1 order {oid} (qty {o.get('qty')} @ {o.get('price')})")
+            return
+    # Once per tracker: did an earlier TP1 order already execute (lost state, DB write missed)? Never place a second one.
+    if not st.get("tp1_probed"):
+        hist = _order_history_or_none(symbol, limit=50)
+        if hist is None:
+            return
+        _set(order_id, tp1_probed=True)
+        since = (st.get("opened_ms") or 0) - 60_000
+        for o in hist:
+            if ((o.get("orderLinkId") or "").startswith(_TP1_TAG) and o.get("side") == close_side
+                    and int(o.get("createdTime") or 0) >= since and float(o.get("cumExecQty") or 0) > 0):
+                oid = o.get("orderId")
+                _tp1_ids_add(oid); _bot_ids_add(oid)
+                _set(order_id, tp1_order_id=oid)
+                log.info(f"Trail: {symbol} found an already-executed TP1 order {oid} — booking it instead of placing another")
+                _tp1_finalize(order_id)
+                return
+
+    pos = _get_position(symbol)
+    if pos is None:
+        return
+    if not pos:
+        log.info(f"Trail: {symbol} no live position yet — TP1 order not placed")
+        return
+    if pos.get("side") != side:
+        log.warning(f"Trail: {symbol} live position is {pos.get('side')} but tracker is {side} — TP1 order not placed")
+        return
+    live_size = float(pos["size"])
+    info      = get_instrument_info(symbol)
+    close_qty = round_to_step(live_size * st["tp1_pct"] / 100.0, info["qty_step"])
+    if not (info["min_qty"] <= close_qty < live_size):
+        _set(order_id, tp1_fallback=True)
+        log.warning(f"Trail: {symbol} cannot size a TP1 order (live={live_size} pct={st['tp1_pct']} → {close_qty}, min {info['min_qty']}) — using polling fallback")
+        return
+    scale = min(info["price_scale"], 8)
+    px    = f"{st['tp1']:.{scale}f}"
+    try:
+        resp = _api_call(session.place_order, category="linear", symbol=symbol, side=close_side,
+                         orderType="Limit", qty=str(close_qty), price=px, reduceOnly=True,
+                         timeInForce="GTC", positionIdx=0,
+                         orderLinkId=f"{_TP1_TAG}{uuid.uuid4().hex[:20]}")
+        if resp.get("retCode", -1) != 0:
+            raise RuntimeError(f"retCode {resp.get('retCode')}: {resp.get('retMsg')}")
+        oid = resp.get("result", {}).get("orderId", "")
+        _tp1_ids_add(oid); _bot_ids_add(oid)
+        _set(order_id, tp1_order_id=oid, tp1_order_qty=close_qty, tp1_hist_miss=0)
+        log.info(f"Trail: {symbol} TP1 order resting — {close_side} {close_qty} ({st['tp1_pct']}%) @ {px}, reduce-only (order {oid})")
+    except Exception as e:
+        n = st.get("tp1_attempts", 0) + 1
+        _set(order_id, tp1_attempts=n)
+        log.warning(f"Trail: {symbol} TP1 order placement failed ({n}/3): {e}")
+        if n >= 3:
+            _set(order_id, tp1_fallback=True)
+            log.warning(f"Trail: {symbol} giving up on a resting TP1 order — polling fallback active")
+
+
+def _tp1_finalize(order_id):
+    """If the resting TP1 order has executed, book the partial leg and move the stop. Returns a status string."""
+    with _trail_lock:
+        st = _trail_state.get(order_id)
+        if not st or st.get("partial_done") or not st.get("tp1_order_id") or st.get("tp1_finalizing"):
+            return "skip"
+        st["tp1_finalizing"] = True
+        tp1_oid, symbol, side, entry = st["tp1_order_id"], st["symbol"], st["side"], st["entry"]
+        opened_ms = st.get("opened_ms") or 0
+    try:
+        hist = _order_history_or_none(symbol, order_id=tp1_oid)
+        if hist is None:
+            return "wait"
+        if not hist:
+            miss = (_st(order_id) or {}).get("tp1_hist_miss", 0) + 1
+            _set(order_id, tp1_hist_miss=miss)
+            if miss >= 4:
+                _set(order_id, tp1_order_id=None, tp1_hist_miss=0)
+                log.warning(f"Trail: {symbol} TP1 order {tp1_oid} not found in history — will re-place")
+                return "cleared"
+            return "wait"
+        o      = hist[0]
+        status = o.get("orderStatus", "")
+        cum    = float(o.get("cumExecQty") or 0)
+        avg    = float(o.get("avgPrice") or 0)
+        if status in ("New", "Created", "Untriggered", "PartiallyFilled"):
+            return "wait"                                    # still working
+        if not (status == "Filled" or cum > 0):
+            n = ((_st(order_id) or {}).get("tp1_replaced", 0)) + 1
+            _set(order_id, tp1_order_id=None, tp1_replaced=n, tp1_hist_miss=0)
+            log.warning(f"Trail: {symbol} TP1 order {tp1_oid} ended as {status} without a fill ({n}/3) — will re-place")
+            if n >= 3:
+                _set(order_id, tp1_fallback=True)
+                log.warning(f"Trail: {symbol} TP1 order keeps getting cancelled — polling fallback active")
+            return "cleared"
+
+        # The order executed. PnL of exactly this order from Bybit's closed-PnL records.
+        pnl = None
+        try:
+            kw = dict(category="linear", symbol=symbol, limit=50)
+            if opened_ms:
+                kw["startTime"] = max(opened_ms - 300_000, 0)
+            recs = _api_call(session.get_closed_pnl, **kw).get("result", {}).get("list", [])
+            mine = [r for r in recs if r.get("orderId") == tp1_oid]
+            if mine:
+                pnl = sum(float(r.get("closedPnl") or 0) for r in mine)
+        except Exception as e:
+            log.warning(f"Trail: {symbol} closed-PnL lookup for TP1 order failed: {e}")
+        if pnl is None:
+            since = (_st(order_id) or {}).get("tp1_pnl_wait_since") or time.time()
+            _set(order_id, tp1_pnl_wait_since=since)
+            if time.time() - since < 90:
+                return "wait"                                # Bybit's closed-PnL record can lag the fill
+            pnl = (avg - entry) * cum if side == "Buy" else (entry - avg) * cum
+            log.warning(f"Trail: {symbol} no closed-PnL record after 90s — TP1 leg PnL ESTIMATED at {pnl:.4f} (fees not included)")
+
+        cur   = _st(order_id)
+        if not cur:
+            return "gone"
+        total   = float(cur.get("partial_pnl") or 0.0) + pnl
+        exit_px = avg if avg > 0 else cur.get("tp1")
+        _set(order_id, partial_done=True, partial_pnl=total, exit_tp1_price=exit_px, tp1_pnl_wait_since=None)
+        log.info(f"Trail: {symbol} TP1 FILLED — {cum} @ {exit_px}, leg PnL {pnl:.4f} (running total {total:.4f})")
+        _tp1_persist_done(order_id, total, exit_px)
+        if BE_ON_TP1:
+            _move_sl_to_be(order_id, "tp1")
+        return "filled"
+    finally:
+        _set(order_id, tp1_finalizing=False)
+
+
+def _tp1_finalize_by_order_id(tp1_oid):
+    """Called (in a thread) when the WS reports an event on a TP1 order."""
+    with _trail_lock:
+        key = next((k for k, v in _trail_state.items() if v.get("tp1_order_id") == tp1_oid), None)
+    if key:
+        try:
+            _tp1_finalize(key)
+        except Exception as e:
+            log.warning(f"TP1 finalize (event) failed for {tp1_oid}: {e}")
+
+
+def _tp1_maintain(order_id):
+    """Per-cycle upkeep for one tracked trade's 2-stage exit. Never raises."""
+    try:
+        st = _st(order_id)
+        if not st or not st.get("tp1"):
+            return
+        now = time.time()
+        if st.get("partial_done"):
+            # TP1 is done (resting order or fallback). Make sure the stop sits at BE — also after a restart,
+            # when be_done was lost. _move_sl_to_be never loosens a better stop.
+            if BE_ON_TP1 and not st.get("be_done") and st.get("be_attempts", 0) < 4 and not st.get("tp_removed"):
+                _move_sl_to_be(order_id, "tp1")
+            return
+        if not TP1_RESTING_ORDER or st.get("tp1_fallback"):
+            return                                           # the polling path handles it
+        if st.get("tp1_order_id"):
+            if now - st.get("tp1_last_check", 0) < 15:
+                return
+            _set(order_id, tp1_last_check=now)
+            orders = _open_orders_or_none(st["symbol"])
+            if orders is None or any(o.get("orderId") == st["tp1_order_id"] for o in orders):
+                return                                       # lookup failed, or still resting
+            _tp1_finalize(order_id)
+            return
+        if not st.get("entry_filled"):
+            return
+        if st.get("tp1_attempts", 0) >= 3 or now - st.get("tp1_last_attempt", 0) < 10:
+            return
+        _tp1_place(order_id)
+    except Exception as e:
+        log.warning(f"TP1 maintain failed for {order_id}: {e}")
+
+
+def _trail_resync():
+    """Self-healing: (1) register journal rows that are open, whose entry order has FILLED, and which the trail
+    watcher is not tracking (missed WS fill event, startup recovery failure, ...); (2) mark trackers whose entry has
+    completed; (3) drop trackers whose position no longer exists on Bybit. Never touches journal rows."""
+    if get_config().get("journal_only"):
+        return
+    import psycopg2.extras as _pgr
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+                cur.execute("SELECT id, order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, "
+                            "exit_tp1_price, source FROM trades WHERE status='open' AND order_id IS NOT NULL ORDER BY id DESC")
+                rows = [dict(r) for r in cur.fetchall()]
+            conn.commit()                 # no transaction is held open during the Bybit calls below
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"Trail resync: could not read open rows: {e}")
+        return
+
+    def _eligible(r):
+        oid = str(r.get("order_id") or "")
+        if r.get("source") == "manual" or oid.startswith(("bybit_native_", "manual_")):
+            return False
+        try:
+            return float(r.get("entry") or 0) > 0 and float(r.get("sl") or 0) > 0 and float(r["entry"]) != float(r["sl"])
+        except (TypeError, ValueError):
+            return False
+
+    with _trail_lock:
+        tracked = {k: dict(v) for k, v in _trail_state.items()}
+    cands_all = [r for r in rows if _eligible(r) and r["order_id"] not in tracked]
+    symbols   = sorted({r["symbol"] for r in cands_all} | {v["symbol"] for v in tracked.values()})
+    now       = time.time()
+    registered = 0
+
+    for sym in symbols:
+        time.sleep(0.15)
+        pend = _open_orders_or_none(sym)
+        pos  = _get_position(sym)
+        if pend is None or pos is None:
+            continue
+        pending_ids = {o.get("orderId") for o in pend}
+
+        # (2)+(3) existing trackers on this symbol
+        for key, st in tracked.items():
+            if st["symbol"] != sym or key in pending_ids:
+                continue
+            if not st.get("entry_filled"):
+                _set(key, entry_filled=True)
+                log.info(f"Trail resync: {sym} entry order no longer pending — marked fully filled")
+            if now - st.get("registered_at", now) < 60:
+                continue
+            stale = (not pos) or pos.get("side") != st["side"]
+            if stale:
+                _resync_flat[key] = _resync_flat.get(key, 0) + 1
+                if _resync_flat[key] >= 2:
+                    _trail_deregister(key)
+                    _resync_flat.pop(key, None)
+                    log.warning(f"Trail resync: dropped stale tracker {sym} {key} — no matching live position on Bybit. "
+                                f"If its journal row is still 'open', the close event was missed: close it from the journal.")
+            else:
+                _resync_flat.pop(key, None)
+
+        # (1) open, untracked rows whose entry has filled
+        cands = [r for r in cands_all if r["symbol"] == sym and r["order_id"] not in pending_ids]
+        if not cands:
+            continue
+        if not pos:
+            for r in cands:
+                if now - _resync_warned.get(r["id"], 0) > 3600:
+                    _resync_warned[r["id"]] = now
+                    log.warning(f"Trail resync: journal row {r['id']} ({sym} {r['side']}) is 'open' but Bybit shows no pending "
+                                f"order and no position — likely closed with the event missed; close it from the journal")
+            continue
+        filled = []
+        for r in cands:
+            if r["side"] != pos.get("side"):
+                continue
+            h = _order_history_or_none(sym, order_id=r["order_id"])
+            if not h:
+                continue
+            o = h[0]
+            status, cum = o.get("orderStatus", ""), float(o.get("cumExecQty") or 0)
+            if status == "Filled" or (cum > 0 and status in ("Cancelled", "PartiallyFilledCanceled", "Deactivated")):
+                filled.append((int(o.get("updatedTime") or 0), int(o.get("createdTime") or 0), r))
+        if not filled:
+            continue
+        filled.sort(key=lambda x: x[0], reverse=True)
+        _, created_ms, r = filled[0]
+        if len(filled) > 1:
+            log.warning(f"Trail resync: {sym} has {len(filled)} open journal rows with a filled entry — tracking only the newest "
+                        f"(row {r['id']}); the others are duplicates: {[x[2]['id'] for x in filled[1:]]}")
+        _trail_register(r["order_id"], sym, r["side"], float(r["entry"]), float(r["sl"]),
+                        tp1=float(r["tp1"]) if r.get("tp1") is not None else None,
+                        tp1_pct=float(r["tp1_pct"] or 0),
+                        partial_done=bool(r.get("partial_done", False)),
+                        partial_pnl=float(r["realized_pnl_partial"]) if r.get("realized_pnl_partial") is not None else None,
+                        exit_tp1_price=float(r["exit_tp1_price"]) if r.get("exit_tp1_price") is not None else None,
+                        entry_filled=True, opened_ms=created_ms or None)
+        registered += 1
+        log.info(f"Trail resync: registered untracked filled trade {sym} {r['side']} (journal row {r['id']}, order {r['order_id']})")
+    if registered:
+        log.info(f"Trail resync: registered {registered} trade(s) the watcher had lost")
+
+
+def _trail_resync_loop():
+    time.sleep(25)
+    log.info("Trail resync thread started (every 30s)")
+    while True:
+        try:
+            _trail_resync()
+        except Exception as e:
+            log.warning(f"Trail resync error: {e}")
+        time.sleep(30)
+
+
 def _trail_watcher():
     log.info(f"Trail watcher started — BE={BE_TRIGGER_R}R (SL +{BE_OFFSET_R}R beyond entry) trigger={TP_EXTEND_TRIGGER_R}R trail={TRAIL_STEP_R}R (partial-exit driven per-trade via tp1)")
 
-    # On startup, register any already-open trades from DB.
-    # This block is the ONE place the partial-exit columns are created. They are not re-ensured on
-    # hot paths any more: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` takes an ACCESS EXCLUSIVE lock
-    # even when the column already exists, so it blocks behind any other session's open transaction
-    # on `trades` (reproduced: a bare SELECT in an uncommitted transaction is enough) and then waits
-    # out statement_timeout.
+    # Startup: make sure the optional columns exist (only ALTERs the missing ones — see _ensure_trades_columns),
+    # then run the same resync the background thread runs every 30s. That registers every open journal row whose
+    # entry order has actually filled, so trades survive a restart; anything missed here is picked up 30s later.
+    _ensure_trades_columns()
     try:
-        import psycopg2.extras as _pge2s
-        conn = get_db()
-        with conn.cursor(cursor_factory=_pge2s.RealDictCursor) as cur:
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION")
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp1_pct DOUBLE PRECISION")
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS partial_done BOOLEAN DEFAULT FALSE")
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS realized_pnl_partial DOUBLE PRECISION DEFAULT 0")
-            cur.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_tp1_price DOUBLE PRECISION")
-            cur.execute("SELECT order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, exit_tp1_price FROM trades WHERE status='open' AND order_id IS NOT NULL")
-            open_trades = cur.fetchall()
-        conn.commit()
-        conn.close()
-        for t in open_trades:
-            if t["order_id"] and t["entry"] and t["sl"]:
-                _trail_register(t["order_id"], t["symbol"], t["side"],
-                                float(t["entry"] or 0), float(t["sl"] or 0),
-                                tp1=float(t["tp1"]) if t.get("tp1") is not None else None,
-                                tp1_pct=float(t["tp1_pct"] or 0),
-                                partial_done=bool(t.get("partial_done", False)),
-                                partial_pnl=float(t["realized_pnl_partial"]) if t.get("realized_pnl_partial") is not None else None,
-                                exit_tp1_price=float(t["exit_tp1_price"]) if t.get("exit_tp1_price") is not None else None)
-        if open_trades:
-            log.info(f"Trail watcher: recovered {len(open_trades)} open trades from DB")
+        _trail_resync()
+        log.info(f"Trail watcher: startup recovery done — tracking {len(_trail_state)} trade(s)")
     except Exception as e:
-        log.warning(f"Trail watcher startup recovery failed: {e}")
+        log.warning(f"Trail watcher startup recovery failed (the resync thread will retry every 30s): {e}")
 
     while True:
         try:
@@ -7453,6 +8084,12 @@ def _trail_watcher():
                     is_long = side == "Buy"
                     if risk <= 0: continue
 
+                    # Resting TP1 order upkeep (place / verify / book the fill) and BE-on-TP1. Runs before the
+                    # tp_removed skip below so it keeps working after the trailing stop has taken over.
+                    _tp1_maintain(order_id)
+                    state = _st(order_id)
+                    if not state: continue          # deregistered meanwhile
+
                     # Only need to poll until TP is removed — after that Bybit handles trail natively
                     if state.get("tp_removed"):
                         continue
@@ -7461,14 +8098,22 @@ def _trail_watcher():
                     tickers = resp.get("result", {}).get("list", [])
                     if not tickers: continue
                     mark    = float(tickers[0].get("markPrice", 0))
+                    last    = float(tickers[0].get("lastPrice", 0) or 0)
                     if mark <= 0: continue
                     current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
+                    # BE trigger and the polling-fallback partial use the more favourable of mark/last price: the
+                    # stops trigger on last price, and a wick often shows on last well before mark follows.
+                    fav       = (max(mark, last) if is_long else min(mark, last)) if last > 0 else mark
+                    fav_r     = (fav - entry) / risk if is_long else (entry - fav) / risk
 
                     # Partial exit — close tp1_pct% of the position at partial_r.
                     # SL is left completely untouched; Bybit's native full-position TP
                     # (already set to the runner target at order placement) auto-tracks
                     # the reduced position size for the remainder.
-                    if state.get("tp1") and not state.get("partial_done") and state.get("partial_r") and current_r >= state["partial_r"]:
+                    # Polling fallback only: with the resting TP1 order enabled this path stays idle unless that
+                    # order could not be used (tp1_fallback) — otherwise both could fire and take the partial twice.
+                    if (state.get("tp1") and not state.get("partial_done") and state.get("partial_r") and fav_r >= state["partial_r"]
+                            and (not TP1_RESTING_ORDER or state.get("tp1_fallback"))):
                         try:
                             live_size = get_live_position_size(symbol)
                             if live_size > 0:
@@ -7488,9 +8133,8 @@ def _trail_watcher():
                                                 _bot_order_ids_order.append(p_order_id)
                                                 while len(_bot_order_ids_order) > _BOT_ORDER_IDS_MAX:
                                                     _bot_order_ids.discard(_bot_order_ids_order.popleft())
-                                        state["partial_done"] = True
-                                        with _trail_lock: _trail_state[order_id] = state
-                                        log.info(f"Trail: {symbol} partial exit — closed {close_qty} ({state['tp1_pct']}%) at {current_r:.2f}R, SL unchanged")
+                                        _set(order_id, partial_done=True)
+                                        log.info(f"Trail: {symbol} partial exit (polling fallback) — closed {close_qty} ({state['tp1_pct']}%) at {fav_r:.2f}R")
                                         # Small, independent write — deliberately separate from the
                                         # PnL-accumulator backup write below, which has repeatedly hit
                                         # statement timeouts. This one matters more: without it, a
@@ -7517,31 +8161,19 @@ def _trail_watcher():
                         except Exception as e:
                             log.warning(f"Trail partial exit failed {symbol}: {e}")
 
-                    # BE trigger (optional)
-                    if BE_TRIGGER_R > 0 and not state.get("be_done") and current_r >= BE_TRIGGER_R:
-                        try:
-                            if BE_OFFSET_R > 0:
-                                # Stop sits BE_OFFSET_R beyond entry in the profit direction,
-                                # formatted to the symbol's price precision like the entry SL.
-                                be_price   = entry + BE_OFFSET_R * risk if is_long else entry - BE_OFFSET_R * risk
-                                be_scale   = min(get_instrument_info(symbol)["price_scale"], 8)
-                                be_sl_str  = f"{be_price:.{be_scale}f}"
-                            else:
-                                be_price   = entry
-                                be_sl_str  = str(round(entry, 8))
-                            _api_call(session.set_trading_stop, category="linear",
-                                      symbol=symbol, stopLoss=be_sl_str, positionIdx=0)
-                            state["be_done"] = True
-                            with _trail_lock: _trail_state[order_id] = state
-                            log.info(f"Trail: {symbol} BE triggered at {current_r:.2f}R → SL moved to {be_sl_str} (entry {entry}, offset {BE_OFFSET_R}R)")
-                        except Exception as e:
-                            log.warning(f"Trail BE failed {symbol}: {e}")
+                    # BE trigger (optional, env BE_TRIGGER_R). With a partial exit the stop already moves when TP1 fills
+                    # (BE_ON_TP1); this stays as the trigger for trades WITHOUT a partial exit.
+                    if (BE_TRIGGER_R > 0 and not state.get("be_done") and fav_r >= BE_TRIGGER_R
+                            and state.get("be_attempts", 0) < 6):
+                        _move_sl_to_be(order_id, "trigger")
 
                     # TP extension trigger — cancel TP and activate Bybit native trailing stop
                     if EXTEND_BEYOND_TP and current_r >= TP_EXTEND_TRIGGER_R:
                         # Cancel the TP order
                         try:
                             for o in get_open_orders(symbol):
+                                if o.get("orderId") in _tp1_order_ids:
+                                    continue                # never cancel the resting TP1 order here — it is not the TP
                                 if o.get("reduceOnly") or o.get("orderId") == state.get("tp_order_id"):
                                     _api_call(session.cancel_order, category="linear",
                                               symbol=symbol, orderId=o["orderId"])
@@ -7557,8 +8189,7 @@ def _trail_watcher():
                                       symbol=symbol,
                                       trailingStop=str(trail_distance),
                                       positionIdx=0)
-                            state["tp_removed"] = True
-                            with _trail_lock: _trail_state[order_id] = state
+                            _set(order_id, tp_removed=True)
                             log.info(f"Trail: {symbol} native trailing stop set — distance={trail_distance} ({TRAIL_STEP_R}R) at {current_r:.2f}R")
                         except Exception as e:
                             log.warning(f"Trail set_trading_stop failed {symbol}: {e}")
@@ -7570,17 +8201,33 @@ def _trail_watcher():
         time.sleep(5)
 
 
-def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, partial_done=False, partial_pnl=None, exit_tp1_price=None):
+_TRAIL_CARRY_KEYS = ("be_done", "be_attempts", "tp_removed", "tp_order_id", "tp1_order_id", "tp1_order_qty",
+                     "tp1_attempts", "tp1_last_attempt", "tp1_last_check", "tp1_probed", "tp1_fallback",
+                     "tp1_replaced", "tp1_hist_miss", "tp1_pnl_wait_since", "tp1_finalizing", "registered_at")
+
+
+def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, partial_done=False, partial_pnl=None,
+                    exit_tp1_price=None, entry_filled=True, opened_ms=None):
+    import math
+    # Normalise the partial-exit inputs: anything unusable means "no partial exit for this trade".
+    try:
+        tp1 = float(tp1) if tp1 is not None else None
+        tp1_pct = float(tp1_pct or 0)
+    except (TypeError, ValueError):
+        tp1, tp1_pct = None, 0.0
+    if tp1 is not None:
+        sign = 1 if side == "Buy" else -1
+        if not math.isfinite(tp1) or tp1 <= 0 or not math.isfinite(tp1_pct) or not (0 < tp1_pct < 100) or (tp1 - entry) * sign <= 0:
+            log.warning(f"Trail: {symbol} ignoring unusable partial exit (tp1={tp1}, pct={tp1_pct}, entry={entry}) — trade runs without one")
+            tp1, tp1_pct = None, 0.0
     if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0 and not tp1:
         return
     risk = abs(entry - sl)
     if risk <= 0: return
     partial_r = (abs(tp1 - entry) / risk) if tp1 else None
     with _trail_lock:
-        # If this trade already had a live in-memory trail state (e.g. a
-        # duplicate registration call on the same fill event), don't clobber
-        # a partial_done that's already True there — only widen it, never
-        # reset it back to False.
+        # A repeat registration for the same trade (duplicate WS event, resync) must never reset runtime state:
+        # partial_done only widens, and the BE / TP1-order / trailing flags are carried over.
         existing = _trail_state.get(order_id, {})
         already_done = existing.get("partial_done", False) or partial_done
         seeded_pnl    = existing.get("partial_pnl", None)
@@ -7589,18 +8236,31 @@ def _trail_register(order_id, symbol, side, entry, sl, tp1=None, tp1_pct=0, part
         seeded_tp1_price = existing.get("exit_tp1_price", None)
         if seeded_tp1_price is None:
             seeded_tp1_price = exit_tp1_price
-        _trail_state[order_id] = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
-                                   "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl,
-                                   "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r,
-                                   "partial_done": already_done, "partial_pnl": seeded_pnl,
-                                   "exit_tp1_price": seeded_tp1_price}
+        new_state = {"symbol": symbol, "side": side, "entry": entry, "sl": sl,
+                     "risk": risk, "tp_removed": False, "be_done": False, "trail_sl": sl,
+                     "tp1": tp1, "tp1_pct": tp1_pct, "partial_r": partial_r,
+                     "partial_done": already_done, "partial_pnl": seeded_pnl,
+                     "exit_tp1_price": seeded_tp1_price,
+                     "entry_filled": bool(existing.get("entry_filled")) or bool(entry_filled),
+                     "opened_ms": existing.get("opened_ms") or opened_ms or int(time.time() * 1000),
+                     "registered_at": time.time()}
+        for k in _TRAIL_CARRY_KEYS:
+            if k in existing:
+                new_state[k] = existing[k]
+        _trail_state[order_id] = new_state
     log.info(f"Trail: registered {symbol} {side} entry={entry} sl={sl}" +
-             (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else "") +
-             (f" [partial already done, PnL so far={seeded_pnl}]" if already_done else ""))
+             (f" partial={tp1_pct}% at {partial_r:.2f}R (tp1={tp1})" if tp1 else " [no partial exit]") +
+             (f" [partial already done, PnL so far={seeded_pnl}]" if already_done else "") +
+             ("" if new_state["entry_filled"] else " [entry only partially filled]"))
 
 
 def _trail_deregister(order_id):
-    with _trail_lock: _trail_state.pop(order_id, None)
+    with _trail_lock:
+        st = _trail_state.pop(order_id, None)
+    # A resting TP1 order that never filled must not outlive its trade (Bybit normally drops reduce-only orders
+    # when the position closes; this makes sure of it and also covers a manual close from the journal).
+    if st and st.get("tp1_order_id") and not st.get("partial_done"):
+        threading.Thread(target=_cancel_order_quiet, args=(st["symbol"], st["tp1_order_id"]), daemon=True).start()
 
 
 import os as _os_guard
@@ -7610,3 +8270,4 @@ if not _os_guard.environ.get("_MAIN_STARTED"):
     threading.Thread(target=_delayed_startup, daemon=True).start()
     threading.Thread(target=_restricted_time_watcher, daemon=True).start()
     threading.Thread(target=_trail_watcher, daemon=True).start()
+    threading.Thread(target=_trail_resync_loop, daemon=True).start()
