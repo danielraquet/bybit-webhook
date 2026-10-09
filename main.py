@@ -177,6 +177,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="stat"><div class="stat-label">Wins</div><div class="stat-value green" id="s-wins">—</div></div>
   <div class="stat"><div class="stat-label">Losses</div><div class="stat-value red" id="s-losses">—</div></div>
   <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" id="s-pnl">—</div></div>
+  <div class="stat"><div class="stat-label">Total R</div><div class="stat-value" id="s-r">—</div></div>
   <div class="stat"><div class="stat-label">Open</div><div class="stat-value amber" id="s-open">—</div></div>
 </div>
 
@@ -375,15 +376,12 @@ function renderTrades(trades){
     var pnlStr = pnl ? (pnl>0?'+':'')+pnl.toFixed(4) : '—';
     var pnlPct = parseFloat(t.pnl_pct)||0;
     var pnlPctStr = pnlPct ? (pnlPct>0?'+':'')+pnlPct.toFixed(2)+'%' : '—';
-    // R multiple
+    // R multiple (realised result in units of the initial risk — includes the partial-exit leg, see tradeR)
     var rStr = '—'; var rCol = '';
-    if(t.exit_price && t.entry && t.sl){
-      var risk = Math.abs(parseFloat(t.entry) - parseFloat(t.sl));
-      if(risk > 0){
-        var rVal = t.side==='Buy' ? (parseFloat(t.exit_price)-parseFloat(t.entry))/risk : (parseFloat(t.entry)-parseFloat(t.exit_price))/risk;
-        rCol = rVal>=0 ? 'color:var(--green)' : 'color:var(--red)';
-        rStr = (rVal>=0?'+':'')+rVal.toFixed(2)+'R';
-      }
+    var rVal = tradeR(t);
+    if(rVal !== null){
+      rCol = rVal>=0 ? 'color:var(--green)' : 'color:var(--red)';
+      rStr = (rVal>=0?'+':'')+rVal.toFixed(2)+'R';
     }
     // Condition fields from notes JSON
     var notesObj = {};
@@ -458,6 +456,29 @@ function renderTrades(trades){
   tbody.innerHTML = rows;
 }
 
+// R multiple of one closed trade = realised PnL / initial risk in USDT (|entry - SL| x qty). Using PnL (not just the
+// final exit price) means a trade that took a partial profit and was then stopped at breakeven counts both legs, and
+// the R figures add up consistently with the PnL figures. Falls back to the exit-price formula when qty is missing.
+function tradeR(t){
+  if(!t || t.status!=='closed') return null;
+  var entry=parseFloat(t.entry), sl=parseFloat(t.sl), qty=parseFloat(t.qty), pnl=parseFloat(t.pnl);
+  var risk = Math.abs(entry - sl);
+  if(!(risk>0)) return null;
+  if(qty>0 && !isNaN(pnl)) return pnl/(risk*qty);
+  var ex = parseFloat(t.exit_price);
+  if(!(ex>0)) return null;
+  return t.side==='Buy' ? (ex-entry)/risk : (entry-ex)/risk;
+}
+function fmtR(v){ var x=Math.round(v*100)/100; return (x>=0?'+':'')+x.toFixed(2)+'R'; }
+function sumR(trades){
+  var sum=0, n=0, missing=0;
+  trades.forEach(function(t){
+    if(t.status!=='closed') return;
+    var r=tradeR(t);
+    if(r===null||isNaN(r)){ missing++; } else { sum+=r; n++; }
+  });
+  return {sum:sum, n:n, missing:missing};
+}
 function updateStats(trades){
   var total=0,wins=0,losses=0,pnlSum=0,open=0;
   trades.forEach(function(t){
@@ -474,6 +495,13 @@ function updateStats(trades){
   document.getElementById('s-pnl').textContent = (pnlSum>=0?'+':'')+pnlSum.toFixed(2)+' USDT';
   document.getElementById('s-pnl').className = 'stat-value '+(pnlSum>=0?'green':'red');
   document.getElementById('s-open').textContent = open;
+  var rs = sumR(trades);
+  var rEl = document.getElementById('s-r');
+  if(rEl){
+    rEl.textContent = rs.n ? fmtR(rs.sum) : '—';
+    rEl.className = 'stat-value '+(rs.n ? (rs.sum>=0?'green':'red') : '');
+    rEl.title = rs.n ? ('avg '+fmtR(rs.sum/rs.n)+' per trade over '+rs.n+' trades'+(rs.missing?(' ('+rs.missing+' closed trades without usable entry/SL not counted)'):'')) : '';
+  }
 }
 
 var _allTrades = [];
@@ -524,6 +552,12 @@ function calcRange(){
     pnl += p;
     if(p>0){ wins++; } else { losses++; }
   });
+  var rs = sumR(filtered);
+  var rCol = rs.sum>=0?'var(--green)':'var(--red)';
+  var rHtml = rs.n
+    ? ' &nbsp;|&nbsp; R: <span style="color:'+rCol+';font-weight:500" title="avg '+fmtR(rs.sum/rs.n)+' per trade'+(rs.missing?(', '+rs.missing+' trades without entry/SL not counted'):'')+'">'+fmtR(rs.sum)+'</span>'
+      + ' <span style="color:var(--dim);font-size:11px">(avg '+fmtR(rs.sum/rs.n)+')</span>'
+    : '';
   var total = wins+losses;
   var wr    = total>0 ? Math.round(wins/total*100) : 0;
   var wrCol = wr>=50?'var(--green)':wr>=35?'var(--amber)':'var(--red)';
@@ -532,7 +566,7 @@ function calcRange(){
     filtered.length + ' trades &nbsp;|&nbsp; ' +
     '<span style="color:'+wrCol+';font-weight:500">WR: '+wr+'%</span>' +
     ' &nbsp;|&nbsp; ' + wins + 'W / ' + losses + 'L' +
-    ' &nbsp;|&nbsp; PnL: <span style="color:'+pnlCol+';font-weight:500">'+(pnl>=0?'+':'')+pnl.toFixed(2)+' USDT</span>';
+    ' &nbsp;|&nbsp; PnL: <span style="color:'+pnlCol+';font-weight:500">'+(pnl>=0?'+':'')+pnl.toFixed(2)+' USDT</span>' + rHtml;
 }
 
 function clearRange(){
