@@ -178,6 +178,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <div class="stat"><div class="stat-label">Losses</div><div class="stat-value red" id="s-losses">—</div></div>
   <div class="stat"><div class="stat-label">Total PnL</div><div class="stat-value" id="s-pnl">—</div></div>
   <div class="stat"><div class="stat-label">Total R</div><div class="stat-value" id="s-r">—</div></div>
+  <div class="stat"><div class="stat-label">Avg 1R (USDT)</div><div class="stat-value" id="s-avg1r">—</div></div>
   <div class="stat"><div class="stat-label">Open</div><div class="stat-value amber" id="s-open">—</div></div>
 </div>
 
@@ -469,6 +470,18 @@ function tradeR(t){
   if(!(ex>0)) return null;
   return t.side==='Buy' ? (ex-entry)/risk : (entry-ex)/risk;
 }
+// Dollar value of 1R for one trade = initial risk in USDT = |entry - SL| x qty.
+function tradeRiskUsd(t){
+  if(!t) return null;
+  var entry=parseFloat(t.entry), sl=parseFloat(t.sl), qty=parseFloat(t.qty);
+  var risk=Math.abs(entry-sl)*qty;
+  return (risk>0 && isFinite(risk)) ? risk : null;
+}
+function avgRiskUsd(list){
+  var sum=0,n=0;
+  list.forEach(function(t){ var r=tradeRiskUsd(t); if(r!==null){ sum+=r; n++; } });
+  return n ? {avg:sum/n, n:n} : null;
+}
 function fmtR(v){ var x=Math.round(v*100)/100; return (x>=0?'+':'')+x.toFixed(2)+'R'; }
 function sumR(trades){
   var sum=0, n=0, missing=0;
@@ -495,6 +508,19 @@ function updateStats(trades){
   document.getElementById('s-pnl').textContent = (pnlSum>=0?'+':'')+pnlSum.toFixed(2)+' USDT';
   document.getElementById('s-pnl').className = 'stat-value '+(pnlSum>=0?'green':'red');
   document.getElementById('s-open').textContent = open;
+  var closedT = trades.filter(function(t){ return t.status==='closed'; });
+  var openT   = trades.filter(function(t){ return t.status==='open'; });
+  var a1 = avgRiskUsd(closedT), aOpen = avgRiskUsd(openT);
+  var a10 = avgRiskUsd(closedT.slice().sort(function(x,y){ return String(y.opened_at||'').localeCompare(String(x.opened_at||'')); }).slice(0,10));
+  var aEl = document.getElementById('s-avg1r');
+  if(aEl){
+    aEl.textContent = a1 ? ('$'+a1.avg.toFixed(2)) : '—';
+    var tip = [];
+    if(a1)    tip.push('all closed trades: $'+a1.avg.toFixed(2)+' ('+a1.n+' trades)');
+    if(a10)   tip.push('last '+a10.n+' closed: $'+a10.avg.toFixed(2));
+    if(aOpen) tip.push('open now: $'+aOpen.avg.toFixed(2)+' ('+aOpen.n+' trades)');
+    aEl.title = tip.join('\\n');
+  }
   var rs = sumR(trades);
   var rEl = document.getElementById('s-r');
   if(rEl){
