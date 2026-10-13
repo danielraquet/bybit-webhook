@@ -7601,7 +7601,11 @@ function run(rerun){
   if(!confirm('Review '+n+' trade'+(n===1?'':'s')+' with '+(CFG.model||'the model')+'?\\n\\nEstimated cost: about $'+(n*CFG.cost_per_trade).toFixed(2)+'.'+(rerun?'\\n\\nCached reviews will be analysed again.':''))) return;
   el('btn-run').disabled=true; el('btn-rerun').disabled=true; el('msg').textContent='Starting…';
   post('/journal/review/run',{ids:list, rerun:!!rerun}).then(function(j){
-    if(j.status!=='ok'){ el('msg').innerHTML='<span class="red">'+esc(j.message||'failed')+'</span>'; el('btn-run').disabled=false; el('btn-rerun').disabled=false; return; }
+    if(j.status!=='ok'){
+      el('msg').innerHTML='<span class="red">'+esc(j.message||'failed')+'</span>'
+        + (j.auth_failed?' <span class="muted">\u2014 REVIEW_TOKEN is set on the server: type it in the Token box above, or remove that Railway variable to run without one.</span>':'');
+      el('btn-run').disabled=false; el('btn-rerun').disabled=false; return;
+    }
     var bits=[];
     if(j.queued.length) bits.push(j.queued.length+' queued');
     if(j.cached) bits.push(j.cached+' already reviewed');
@@ -7612,10 +7616,23 @@ function run(rerun){
     poll();
   }).catch(function(e){ el('msg').innerHTML='<span class="red">'+esc(e)+'</span>'; el('btn-run').disabled=false; el('btn-rerun').disabled=false; });
 }
+function showToken(focus){
+  el('token-wrap').style.display='';
+  if(focus){ try{ el('token').focus(); }catch(e){} }
+}
+function saveToken(){
+  try{ localStorage.setItem('review_token', el('token').value||''); }catch(e){}
+}
 function post(url, body){
   var h={'Content-Type':'application/json'};
   if(el('token').value) h['X-Review-Token']=el('token').value;
-  return fetch(url,{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){ return r.json(); });
+  return fetch(url,{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){
+    return r.json().catch(function(){ return {status:'error', message:'HTTP '+r.status}; }).then(function(j){
+      // A rejected token must always leave the box on screen, whatever the page thought the config was.
+      if(r.status===403){ j.auth_failed=true; showToken(true); }
+      return j;
+    });
+  });
 }
 function poll(){
   clearInterval(POLL);
@@ -7623,7 +7640,7 @@ function poll(){
     var list=ids(); if(!list.length) return;
     post('/journal/review/progress',{ids:list}).then(function(j){
       if(j.status!=='ok') return;
-      if(j.config){ CFG=j.config; el('token-wrap').style.display=j.config.token_required?'':'none'; }
+      if(j.config) applyConfig(j.config);
       ROWS=j.rows||{};
       var done=list.filter(function(i){ return ROWS[i]; }).length;
       el('bar').firstChild.style.width=(list.length?done/list.length*100:0)+'%';
@@ -7644,7 +7661,11 @@ function summarise(){
   el('summary').innerHTML='<div class="panel muted">Summarising…</div>';
   post('/journal/review/summary',{ids:list}).then(function(j){
     el('btn-sum').disabled=false;
-    if(j.status!=='ok'){ el('summary').innerHTML='<div class="panel"><span class="red">'+esc(j.message||'failed')+'</span></div>'; return; }
+    if(j.status!=='ok'){
+      el('summary').innerHTML='<div class="panel"><span class="red">'+esc(j.message||'failed')+'</span>'
+        + (j.auth_failed?' <span class="muted">\u2014 type the REVIEW_TOKEN value in the Token box above, or remove that Railway variable.</span>':'')+'</div>';
+      return;
+    }
     var h='<div class="panel"><h3 style="font-size:13px;margin-bottom:8px">Summary \\u2014 '+j.n_used+' of '+j.n_requested+' trades had a usable review</h3>';
     if(j.truncated) h+='<div class="muted" style="margin-bottom:8px">'+j.truncated+' further selected trades were left out of this summary (limit '+(CFG.summary_max||300)+').</div>';
     if(j.stats){
@@ -7713,9 +7734,17 @@ el('btn-rerun').addEventListener('click', function(){ run(true); });
 el('btn-sum').addEventListener('click', summarise);
 el('days').addEventListener('change', load);
 ['from','to','dfrom','dto','variant','symbol','outcome'].forEach(function(id){ el(id).addEventListener('change', apply); });
+function applyConfig(c){
+  CFG=c;
+  if(c.token_required) showToken(false);
+}
+el('token').addEventListener('change', saveToken);
+try{ el('token').value=localStorage.getItem('review_token')||''; }catch(e){}
 post('/journal/review/progress',{ids:[]}).then(function(j){
-  if(j && j.config){ CFG=j.config; el('token-wrap').style.display=j.config.token_required?'':'none'; }
-}).catch(function(){}).then(load);
+  if(j && j.config) applyConfig(j.config);
+  // If the server could not be reached for its config, show the box anyway rather than leaving no way to type a token.
+  else showToken(false);
+}).catch(function(){ showToken(false); }).then(load);
 </script>
 </body>
 </html>
