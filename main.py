@@ -133,6 +133,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <div style="display:flex;gap:12px;margin-bottom:12px;font-size:12px">
   <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
+  <a href="/journal/review" style="color:var(--dim);text-decoration:none">Review</a>
   <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
   <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
   <a href="/backtest/configs" style="color:var(--dim);text-decoration:none">Backtest</a>
@@ -4249,7 +4250,7 @@ ANALYSIS_HTML = """
 </style>
 </head>
 <body>
-<div class="nav"><a href="/journal">← Journal</a><a href="/status">Status</a></div>
+<div class="nav"><a href="/journal">← Journal</a><a href="/journal/review">Screenshot Review</a><a href="/status">Status</a></div>
 <h1>// Trade Analysis</h1>
 <p class="subtitle">{{ total_closed }} closed trades ({{ total_known }} with indicator data{% if total_imported > 0 %}, {{ total_imported }} imported{% endif %}) · {{ total_open }} open · updated just now</p>
 
@@ -7454,6 +7455,839 @@ def recommendations_data():
         trades = get_all_trades(500)
         return jsonify(_build_recommendations(trades))
     except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
+
+REVIEW_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screenshot Review</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--dim:#6b7280;--blue:#60a5fa;--green:#4ade80;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:16px}
+h1{font-size:18px;font-weight:500;margin-bottom:2px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px}
+a{color:var(--blue);text-decoration:none}
+.nav{display:flex;gap:12px;margin-bottom:12px;font-size:12px}
+.nav a{color:var(--dim)}
+.panel{background:var(--card);border:0.5px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.lbl{font-size:11px;color:var(--dim)}
+input,select{background:#0f1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit}
+input[type=number]{width:72px}
+button{background:#232735;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit}
+button:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+button:disabled{opacity:0.4;cursor:default}
+button.primary{border-color:var(--blue);color:var(--blue)}
+.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;background:rgba(96,165,250,0.12);color:var(--blue);margin:1px 3px 1px 0;white-space:nowrap}
+.pill.bad{background:rgba(248,113,113,0.12);color:var(--red)}
+.pill.good{background:rgba(74,222,128,0.12);color:var(--green)}
+.card{background:var(--card);border:0.5px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px}
+.card h3{font-size:13px;font-weight:500;margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.muted{color:var(--dim);font-size:11px}
+.scores{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0;font-size:11px}
+.sc b{font-weight:500}
+.notes{font-size:12px;line-height:1.55;margin-top:4px}
+.notes div{margin-bottom:3px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;color:var(--dim);font-weight:400;padding:4px 8px 4px 0;border-bottom:1px solid var(--border)}
+td{padding:3px 8px 3px 0;border-bottom:1px solid rgba(42,45,58,0.5)}
+.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.dim{color:var(--dim)}
+pre.summary{white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:1.6}
+.thumb{max-height:120px;border-radius:4px;border:1px solid var(--border);margin-top:6px;cursor:zoom-in}
+.bar{height:4px;background:#232735;border-radius:2px;overflow:hidden;margin-top:8px}
+.bar>div{height:100%;background:var(--blue);width:0;transition:width 0.3s}
+#lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:99;align-items:center;justify-content:center;cursor:zoom-out}
+#lightbox img{max-width:96vw;max-height:94vh}
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="/journal">Journal</a><a href="/analysis">Analysis</a><a href="/recommendations">Recommendations</a><a href="/status">Status</a>
+</div>
+<h1>Screenshot Review</h1>
+<div class="sub">Reads the chart screenshots linked in the journal's Links column against each trade's record, then summarises what the selection has in common. Costs money per trade &mdash; see the estimate before running.</div>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:8px">
+    <span class="lbl">Load</span>
+    <select id="days"><option value="30">last 30 days</option><option value="90">last 90 days</option><option value="180">last 180 days</option><option value="">all</option></select>
+    <span class="lbl">Trades #</span>
+    <input type="number" id="from" min="1" placeholder="from"><span class="lbl">to</span><input type="number" id="to" min="1" placeholder="to">
+    <span class="lbl" id="hint"></span>
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <span class="lbl">or dates</span><input type="date" id="dfrom"><span class="lbl">to</span><input type="date" id="dto">
+    <span class="lbl">Variant</span><select id="variant"><option value="">All</option></select>
+    <span class="lbl">Symbol</span><select id="symbol"><option value="">All</option></select>
+    <span class="lbl">Outcome</span><select id="outcome"><option value="">All</option><option value="win">Winners</option><option value="loss">Losers</option></select>
+  </div>
+  <div class="row">
+    <button class="primary" id="btn-run">Review selection</button>
+    <button id="btn-sum">Summarise</button>
+    <button id="btn-rerun" title="Ignore cached reviews and analyse these trades again (costs again)">Re-run</button>
+    <span class="lbl" id="token-wrap" style="display:none">Token <input type="password" id="token" style="width:120px"></span>
+    <span id="est" class="lbl"></span>
+  </div>
+  <div class="bar" id="bar" style="display:none"><div></div></div>
+  <div id="msg" class="muted" style="margin-top:8px"></div>
+</div>
+
+<div id="summary"></div>
+<div id="cards"></div>
+<div id="lightbox" onclick="this.style.display='none'"><img id="lightbox-img" src="" alt=""></div>
+
+<script>
+var ALL=[], SEL=[], CFG={cost_per_trade:0.02,max_trades:40,model:''}, POLL=null, ROWS={};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function el(id){ return document.getElementById(id); }
+function urlsIn(s){ return (String(s||'').match(/https?:\\/\\/[^\\s|,;<>"']+/g)||[]); }
+function tradeR(t){
+  var e=parseFloat(t.entry), s=parseFloat(t.sl), q=parseFloat(t.qty), p=parseFloat(t.pnl), risk=Math.abs(e-s);
+  if(!(risk>0)) return null;
+  if(q>0 && !isNaN(p)) return p/(risk*q);
+  var x=parseFloat(t.exit_price); if(!(x>0)) return null;
+  return t.side==='Buy' ? (x-e)/risk : (e-x)/risk;
+}
+function fmtR(v){ var x=Math.round(v*100)/100; return (x>=0?'+':'')+x.toFixed(2)+'R'; }
+
+function load(){
+  var d=el('days').value;
+  el('msg').textContent='Loading trades…';
+  fetch('/journal/data'+(d?('?days='+d):'')).then(function(r){return r.json();}).then(function(j){
+    ALL=(j.trades||[]).filter(function(t){ return t.status==='closed' && t.outcome; });
+    ALL.sort(function(a,b){ return String(a.opened_at||'').localeCompare(String(b.opened_at||'')); });
+    var vs={}, ss={};
+    ALL.forEach(function(t){ if(t.variant) vs[t.variant]=1; if(t.symbol) ss[t.symbol]=1; });
+    fill('variant', Object.keys(vs).sort()); fill('symbol', Object.keys(ss).sort());
+    el('hint').textContent = ALL.length ? ('1 \\u2013 '+ALL.length+' closed') : 'no closed trades';
+    apply();
+  }).catch(function(e){ el('msg').textContent='Could not load trades: '+e; });
+}
+function fill(id, vals){
+  var s=el(id), cur=s.value; s.innerHTML='<option value="">All</option>';
+  vals.forEach(function(v){ var o=document.createElement('option'); o.value=v; o.textContent=v; s.appendChild(o); });
+  s.value=cur;
+}
+function apply(){
+  var f=parseInt(el('from').value), t=parseInt(el('to').value);
+  var df=el('dfrom').value, dt=el('dto').value, v=el('variant').value, sy=el('symbol').value, oc=el('outcome').value;
+  var list=ALL.slice();
+  if(!isNaN(f)||!isNaN(t)){ list=list.slice((isNaN(f)?1:Math.max(1,f))-1, isNaN(t)?list.length:t); }
+  if(df||dt) list=list.filter(function(x){ var d=(x.opened_at||'').slice(0,10); return (!df||d>=df)&&(!dt||d<=dt); });
+  if(v)  list=list.filter(function(x){ return x.variant===v; });
+  if(sy) list=list.filter(function(x){ return x.symbol===sy; });
+  if(oc) list=list.filter(function(x){ var p=parseFloat(x.pnl)||0; return oc==='win' ? p>0 : p<=0; });
+  SEL=list;
+  var withImg=list.filter(function(x){ return urlsIn(x.media).length; });
+  var over = withImg.length>CFG.max_trades;
+  el('est').innerHTML = list.length+' trades selected, <b>'+withImg.length+'</b> with screenshots'
+    + (withImg.length?(' \\u2014 about $'+(Math.min(withImg.length,CFG.max_trades)*CFG.cost_per_trade).toFixed(2)+' to review'):'')
+    + (over?(' <span class="red">(capped at '+CFG.max_trades+')</span>'):'');
+  el('btn-run').disabled = !withImg.length;
+  render();
+}
+function ids(){ return SEL.filter(function(t){ return urlsIn(t.media).length; }).map(function(t){ return t.id; }); }
+
+function run(rerun){
+  var list=ids();
+  if(!list.length) return;
+  var n=Math.min(list.length, CFG.max_trades);
+  if(!confirm('Review '+n+' trade'+(n===1?'':'s')+' with '+(CFG.model||'the model')+'?\\n\\nEstimated cost: about $'+(n*CFG.cost_per_trade).toFixed(2)+'.'+(rerun?'\\n\\nCached reviews will be analysed again.':''))) return;
+  el('btn-run').disabled=true; el('btn-rerun').disabled=true; el('msg').textContent='Starting…';
+  post('/journal/review/run',{ids:list, rerun:!!rerun}).then(function(j){
+    if(j.status!=='ok'){ el('msg').innerHTML='<span class="red">'+esc(j.message||'failed')+'</span>'; el('btn-run').disabled=false; el('btn-rerun').disabled=false; return; }
+    var bits=[];
+    if(j.queued.length) bits.push(j.queued.length+' queued');
+    if(j.cached) bits.push(j.cached+' already reviewed');
+    if(j.already_running) bits.push(j.already_running+' already running');
+    if(j.no_links) bits.push(j.no_links+' without links');
+    el('msg').textContent=bits.join(' \\u00b7 ');
+    el('bar').style.display=j.queued.length?'block':'none';
+    poll();
+  }).catch(function(e){ el('msg').innerHTML='<span class="red">'+esc(e)+'</span>'; el('btn-run').disabled=false; el('btn-rerun').disabled=false; });
+}
+function post(url, body){
+  var h={'Content-Type':'application/json'};
+  if(el('token').value) h['X-Review-Token']=el('token').value;
+  return fetch(url,{method:'POST',headers:h,body:JSON.stringify(body)}).then(function(r){ return r.json(); });
+}
+function poll(){
+  clearInterval(POLL);
+  var tick=function(){
+    var list=ids(); if(!list.length) return;
+    post('/journal/review/progress',{ids:list}).then(function(j){
+      if(j.status!=='ok') return;
+      if(j.config){ CFG=j.config; el('token-wrap').style.display=j.config.token_required?'':'none'; }
+      ROWS=j.rows||{};
+      var done=list.filter(function(i){ return ROWS[i]; }).length;
+      el('bar').firstChild.style.width=(list.length?done/list.length*100:0)+'%';
+      render();
+      if(!(j.running_here||[]).length){
+        clearInterval(POLL); POLL=null;
+        el('btn-run').disabled=false; el('btn-rerun').disabled=false;
+        setTimeout(function(){ el('bar').style.display='none'; }, 1200);
+        el('msg').textContent=done+' of '+list.length+' reviewed';
+      }
+    }).catch(function(){});
+  };
+  tick(); POLL=setInterval(tick, 3000);
+}
+function summarise(){
+  var list=ids(); if(!list.length) return;
+  el('btn-sum').disabled=true;
+  el('summary').innerHTML='<div class="panel muted">Summarising…</div>';
+  post('/journal/review/summary',{ids:list}).then(function(j){
+    el('btn-sum').disabled=false;
+    if(j.status!=='ok'){ el('summary').innerHTML='<div class="panel"><span class="red">'+esc(j.message||'failed')+'</span></div>'; return; }
+    var h='<div class="panel"><h3 style="font-size:13px;margin-bottom:8px">Summary \\u2014 '+j.n_used+' of '+j.n_requested+' trades had a usable review</h3>';
+    if(j.truncated) h+='<div class="muted" style="margin-bottom:8px">'+j.truncated+' further selected trades were left out of this summary (limit '+(CFG.summary_max||300)+').</div>';
+    if(j.stats){
+      var o=j.stats.overall;
+      h+='<div class="muted" style="margin-bottom:10px">'+o.n+' trades \\u00b7 '+o.wins+'W / '+(o.n-o.wins)+'L \\u00b7 WR '+(o.win_rate==null?'\\u2014':o.win_rate+'%')+' \\u00b7 total '+(o.total_r==null?'\\u2014':fmtR(o.total_r))+' \\u00b7 avg '+(o.avg_r==null?'\\u2014':fmtR(o.avg_r))+'</div>';
+      var w=j.stats.avg_scores.winners, l=j.stats.avg_scores.losers, keys=['zone_quality','entry_quality','stop_placement','target_realism'];
+      h+='<table style="margin-bottom:12px"><tr><th>Avg score (1\\u20135)</th><th>Winners</th><th>Losers</th></tr>';
+      keys.forEach(function(k){ h+='<tr><td>'+k.replace(/_/g,' ')+'</td><td>'+(w[k]==null?'\\u2014':w[k])+'</td><td>'+(l[k]==null?'\\u2014':l[k])+'</td></tr>'; });
+      h+='</table>';
+      if(j.stats.tags.length){
+        h+='<table><tr><th>Tag</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
+        j.stats.tags.forEach(function(t){
+          h+='<tr><td>'+esc(t.tag.replace(/_/g,' '))+'</td><td>'+t.n+(t.n<5?' <span class="dim">(small)</span>':'')+'</td><td>'+(t.win_rate==null?'\\u2014':t.win_rate+'%')+'</td><td class="'+(t.total_r>=0?'green':'red')+'">'+(t.total_r==null?'\\u2014':fmtR(t.total_r))+'</td><td>'+(t.avg_r==null?'\\u2014':fmtR(t.avg_r))+'</td></tr>';
+        });
+        h+='</table>';
+      }
+    }
+    if(j.text) h+='<pre class="summary" style="margin-top:12px">'+esc(j.text)+'</pre>';
+    h+='</div>';
+    el('summary').innerHTML=h;
+  }).catch(function(e){ el('btn-sum').disabled=false; el('summary').innerHTML='<div class="panel"><span class="red">'+esc(e)+'</span></div>'; });
+}
+function sc(v){ return v==null ? '<span class="dim">\\u2014</span>' : '<b class="'+(v>=4?'green':v<=2?'red':'amber')+'">'+v+'</b>/5'; }
+function render(){
+  var h='';
+  SEL.forEach(function(t){
+    var r=ROWS[t.id], links=urlsIn(t.media), rv=parseFloat(tradeR(t));
+    var pnl=parseFloat(t.pnl)||0;
+    h+='<div class="card"><h3>'
+      + '<span>#'+t.id+' '+esc(t.symbol)+' <span class="'+(t.side==='Buy'?'green':'red')+'">'+(t.side==='Buy'?'LONG':'SHORT')+'</span></span>'
+      + '<span class="'+(pnl>0?'green':'red')+'">'+(isNaN(rv)||rv===null?'':fmtR(rv))+'</span>'
+      + '<span class="muted">'+esc((t.opened_at||'').slice(0,16))+' \\u00b7 '+esc(t.outcome||'')+(t.variant?(' \\u00b7 '+esc(t.variant)):'')+'</span>';
+    if(!links.length) h+='<span class="pill bad">no screenshot</span>';
+    h+='</h3>';
+    if(!r){ h+='<div class="muted">'+(links.length?'not reviewed yet':'')+'</div>'; }
+    else if(r.status==='no_image'){ h+='<div class="muted">Could not load the screenshot \\u2014 '+esc(r.error||'')+'</div>'; }
+    else if(r.status==='error'){ h+='<div class="red" style="font-size:11px">Failed: '+esc(r.error||'')+'</div>'; }
+    else if(r.review){
+      var v=r.review;
+      if(!v.image_usable) h+='<div class="muted">The model could not read this screenshot: '+esc(v.one_line||'')+'</div>';
+      else{
+        h+='<div style="font-size:12px;margin-bottom:4px">'+esc(v.one_line)+'</div>';
+        h+='<div class="scores">'
+          +'<span class="sc">zone '+sc(v.zone_quality.score)+'</span><span class="sc">entry '+sc(v.entry_quality.score)+'</span>'
+          +'<span class="sc">stop '+sc(v.stop_placement.score)+'</span><span class="sc">target '+sc(v.target_realism.score)+'</span>'
+          +'<span class="muted">'+esc(v.trend_context.replace(/_/g,' '))+' \\u00b7 screenshot '+esc(v.screenshot_timing.replace(/_/g,' '))+' \\u00b7 confidence '+esc(v.confidence)+'</span></div>';
+        h+='<div class="notes">';
+        [['zone',v.zone_quality.notes],['entry',v.entry_quality.notes],['stop',v.stop_placement.notes],['target',v.target_realism.notes]].forEach(function(p){
+          if(p[1]) h+='<div><span class="muted">'+p[0]+':</span> '+esc(p[1])+'</div>';
+        });
+        if(v.outcome_driver) h+='<div><span class="muted">what decided it:</span> '+esc(v.outcome_driver)+'</div>';
+        h+='</div>';
+        if(v.mistakes.length) h+='<div style="margin-top:5px">'+v.mistakes.map(function(m){ return '<span class="pill bad">'+esc(m)+'</span>'; }).join('')+'</div>';
+        if(v.tags.length) h+='<div style="margin-top:4px">'+v.tags.map(function(x){ return '<span class="pill">'+esc(x.replace(/_/g,' '))+'</span>'; }).join('')+'</div>';
+      }
+      if(!r.current) h+='<div class="muted" style="margin-top:4px">reviewed with an older prompt \\u2014 re-run to refresh</div>';
+      (r.image_urls||[]).forEach(function(u){ h+='<img class="thumb" src="'+esc(u)+'" onclick="zoom(this.src)" onerror="this.style.display=\\'none\\'">'; });
+    }
+    h+='</div>';
+  });
+  el('cards').innerHTML=h || '<div class="panel muted">No trades in this selection.</div>';
+}
+function zoom(src){ el('lightbox-img').src=src; el('lightbox').style.display='flex'; }
+el('btn-run').addEventListener('click', function(){ run(false); });
+el('btn-rerun').addEventListener('click', function(){ run(true); });
+el('btn-sum').addEventListener('click', summarise);
+el('days').addEventListener('change', load);
+['from','to','dfrom','dto','variant','symbol','outcome'].forEach(function(id){ el(id).addEventListener('change', apply); });
+post('/journal/review/progress',{ids:[]}).then(function(j){
+  if(j && j.config){ CFG=j.config; el('token-wrap').style.display=j.config.token_required?'':'none'; }
+}).catch(function(){}).then(load);
+</script>
+</body>
+</html>
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCREENSHOT REVIEW — pulls the chart screenshots linked to journal trades (the Links column), has Claude read each
+# one against its trade record, and summarises what the selected range has in common.
+#   /journal/review                 the page
+#   POST /journal/review/run        queue reviews for a list of trade ids (background threads)
+#   POST /journal/review/progress   cached reviews for a list of ids (the page polls this — state lives in Postgres, so
+#                                   it works however many gunicorn workers there are)
+#   POST /journal/review/summary    tag/score statistics (computed here, not by the model) + a written summary
+# Spend guards: per-run trade cap, daily cap, optional REVIEW_TOKEN, only trade ids that exist, and the server only
+# fetches images from REVIEW_ALLOWED_HOSTS (default tradingview.com) — the media links are user-editable text.
+# ═══════════════════════════════════════════════════════════════════════════════
+def _env_num(name, default, cast=int):
+    try:
+        v = (os.getenv(name, "") or "").strip()
+        return cast(v) if v else default
+    except (TypeError, ValueError):
+        return default
+
+REVIEW_MODEL          = os.getenv("REVIEW_MODEL", "claude-sonnet-4-6") or "claude-sonnet-4-6"
+REVIEW_PROMPT_VERSION = "r1"
+REVIEW_MAX_TRADES     = max(1, _env_num("REVIEW_MAX_TRADES", 40))
+REVIEW_MAX_IMAGES     = max(1, _env_num("REVIEW_MAX_IMAGES", 3))
+REVIEW_DAILY_CAP      = max(1, _env_num("REVIEW_DAILY_CAP", 200))
+REVIEW_CONCURRENCY    = max(1, min(6, _env_num("REVIEW_CONCURRENCY", 3)))
+REVIEW_COST_PER_TRADE = _env_num("REVIEW_COST_PER_TRADE", 0.02, float)
+REVIEW_SUMMARY_MAX    = max(10, _env_num("REVIEW_SUMMARY_MAX", 300))
+REVIEW_TOKEN          = os.getenv("REVIEW_TOKEN", "")
+REVIEW_HOSTS          = tuple(h.strip().lower() for h in (os.getenv("REVIEW_ALLOWED_HOSTS", "tradingview.com") or "").split(",") if h.strip())
+
+REVIEW_TAGS = [
+    "with_trend", "counter_trend", "ranging_market", "strong_impulse", "weak_impulse", "fresh_zone", "zone_already_tested",
+    "zone_too_wide", "zone_too_narrow", "sl_too_tight", "sl_ok", "entry_early", "entry_late", "entry_ok",
+    "near_key_level", "into_opposing_zone", "news_wick_or_spike", "clean_structure", "choppy_structure",
+    "tp_unrealistic", "tp_reasonable", "stopped_then_reversed", "ran_beyond_tp",
+    "premium_discount_aligned", "premium_discount_misaligned",
+]
+
+REVIEW_SYSTEM = """You review ONE crypto-futures trade taken by an automated supply & demand zone strategy, using the chart screenshot(s) and the trade record.
+
+How the strategy works: a zone is a 'base' of 1-3 candles (always the swing candle, plus up to two directly preceding candles of the opposite colour to the impulse) that sits before an impulsive move of at least ~1.5 ATR. Demand zones are bases before a rally; supply zones are bases before a drop. A zone counts as validated when price moves >= ~2% away within ~5 bars. The entry is a limit order at the zone's near border (plus an offset) when price returns to retest it; the stop sits beyond the zone's far edge (plus a buffer); the take-profit is a fixed R multiple (typically 4R), optionally with a 75% partial at 2.5R and the stop moved to breakeven afterwards.
+
+Rules for reading the chart:
+- Candle colours differ between screenshots (some charts use black for up and white for down). Decide direction from the price axis and the trade record, never from assumed colours.
+- The screenshot may have been taken before entry, at entry, mid-trade or after the close. Say which you can infer. Do not judge the outcome from a screenshot taken before it happened.
+- Judge only what is visible. Do not invent levels, indicators or candles you cannot see. If the screenshot does not show the trade or zone, set image_usable to false, leave scores null, and keep the rest minimal.
+- Be specific and sceptical. No flattery, no generic trading advice. One screenshot is weak evidence: use confidence "low" whenever you are guessing.
+
+Reply with ONE JSON object and nothing else, exactly this shape:
+{"image_usable": true|false,
+ "screenshot_timing": "before_entry"|"at_entry"|"after_close"|"unclear",
+ "trend_context": "with_trend"|"counter_trend"|"ranging"|"unclear",
+ "zone_quality": {"score": 1-5 or null, "notes": "..."},
+ "entry_quality": {"score": 1-5 or null, "notes": "..."},
+ "stop_placement": {"score": 1-5 or null, "notes": "..."},
+ "target_realism": {"score": 1-5 or null, "notes": "..."},
+ "outcome_driver": "what actually decided the result, max 2 sentences",
+ "mistakes": ["short, specific; empty list if none"],
+ "tags": [only from: """ + ", ".join(REVIEW_TAGS) + """],
+ "confidence": "low"|"medium"|"high",
+ "one_line": "max 20 words"}"""
+
+_review_table_ok = False
+_review_table_lock = threading.Lock()
+_review_inflight = set()
+_review_inflight_lock = threading.Lock()
+
+
+def _review_ensure_table():
+    global _review_table_ok
+    if _review_table_ok:
+        return
+    with _review_table_lock:
+        if _review_table_ok:
+            return
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '3s'")
+                cur.execute("""CREATE TABLE IF NOT EXISTS trade_reviews (
+                    trade_id INTEGER PRIMARY KEY, status TEXT NOT NULL, review TEXT, error TEXT, image_urls TEXT,
+                    model TEXT, prompt_version TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+            conn.commit()
+        finally:
+            conn.close()
+        _review_table_ok = True
+
+
+def _review_auth_ok():
+    if not REVIEW_TOKEN:
+        return True
+    import hmac
+    return hmac.compare_digest(request.headers.get("X-Review-Token", ""), REVIEW_TOKEN)
+
+
+def _trade_r(t):
+    """Realised result in R: PnL / initial risk in USDT (|entry-SL| x qty) — same definition the journal uses."""
+    try:
+        entry, sl = float(t.get("entry") or 0), float(t.get("sl") or 0)
+        qty, pnl = float(t.get("qty") or 0), t.get("pnl")
+        risk = abs(entry - sl)
+        if risk <= 0:
+            return None
+        if qty > 0 and pnl is not None:
+            return float(pnl) / (risk * qty)
+        ex = float(t.get("exit_price") or 0)
+        if ex > 0:
+            return ((ex - entry) if t.get("side") == "Buy" else (entry - ex)) / risk
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+# ── image fetching ─────────────────────────────────────────────────────────────
+_REVIEW_URL_RE = re.compile(r'https?://[^\s|,;<>"\']+')
+
+def _review_host_ok(url):
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+    except Exception:
+        return False
+    if p.scheme not in ("http", "https") or not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in REVIEW_HOSTS)
+
+
+def _review_sniff_image(data):
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return None
+
+
+def _review_http_get(url, max_bytes=6_000_000, timeout=20):
+    """GET with an allow-listed host, re-checked on every redirect. Returns (bytes, content_type)."""
+    import urllib.request as ur
+    if not _review_host_ok(url):
+        raise ValueError("host not allowed (REVIEW_ALLOWED_HOSTS)")
+
+    class _Redirect(ur.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not _review_host_ok(newurl):
+                raise ValueError("redirected to a host that is not allowed")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    req = ur.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; journal-review)", "Accept": "image/*,text/html;q=0.8,*/*;q=0.5"})
+    with ur.build_opener(_Redirect).open(req, timeout=timeout) as r:
+        data = r.read(max_bytes + 1)
+        ctype = r.headers.get("Content-Type", "") or ""
+    if len(data) > max_bytes:
+        raise ValueError("image larger than 6 MB")
+    return data, ctype
+
+
+def _review_fetch_image(link):
+    """Resolve one journal link to an image. Tries, in order: the link itself (works if it serves the image, as the
+    journal's hover preview assumes), TradingView's snapshot image path, then the page's og:image tag.
+    Returns (resolved_url, bytes, media_type)."""
+    errors = []
+    candidates = [link]
+    m = re.match(r'https?://(?:www\.)?tradingview\.com/x/([A-Za-z0-9]+)', link)
+    if m:
+        sid = m.group(1)
+        candidates.append(f"https://s3.tradingview.com/{sid[0].lower()}/{sid}.png")
+    page_html = None
+    for u in candidates:
+        try:
+            data, ctype = _review_http_get(u)
+        except Exception as e:
+            errors.append(f"{u[:70]}: {e}")
+            continue
+        mt = _review_sniff_image(data)
+        if mt:
+            return u, data, mt
+        if page_html is None and (b"<html" in data[:4000].lower() or "html" in ctype.lower()):
+            page_html = data.decode("utf-8", "ignore")
+    if page_html:
+        og = re.search(r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*content=["\']([^"\']+)', page_html, re.I) \
+             or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*(?:property|name)=["\'](?:og:image|twitter:image)["\']', page_html, re.I)
+        if og:
+            u = og.group(1).replace("&amp;", "&")
+            try:
+                data, _ = _review_http_get(u)
+                mt = _review_sniff_image(data)
+                if mt:
+                    return u, data, mt
+                errors.append(f"og:image {u[:70]} is not an image")
+            except Exception as e:
+                errors.append(f"og:image {u[:70]}: {e}")
+        else:
+            errors.append("page has no og:image")
+    raise ValueError("; ".join(errors) or "no image found")
+
+
+# ── prompt + API ───────────────────────────────────────────────────────────────
+def _review_trade_text(t):
+    try:
+        notes = json.loads(t.get("notes") or "{}")
+        if not isinstance(notes, dict):
+            notes = {}
+    except (ValueError, TypeError):
+        notes = {}
+    r = _trade_r(t)
+    def f(v):
+        return "n/a" if v is None or v == "" else str(v)
+    lines = [
+        "TRADE RECORD",
+        f"symbol: {f(t.get('symbol'))}   direction: {'LONG' if t.get('side') == 'Buy' else 'SHORT'}   timeframe: {f(t.get('timeframe'))}   variant: {f(t.get('variant'))}",
+        f"entry: {f(t.get('entry'))}   stop-loss: {f(t.get('sl'))}   take-profit: {f(t.get('tp'))}",
+    ]
+    if t.get("tp1") is not None:
+        lines.append(f"partial exit: {f(t.get('tp1_pct'))}% at {f(t.get('tp1'))}")
+    lines.append(f"result: outcome={f(t.get('outcome'))}   pnl={f(t.get('pnl'))} USDT   R={'n/a' if r is None else f'{r:+.2f}'}   exit price={f(t.get('exit_price'))}")
+    lines.append(f"opened (UTC): {f(t.get('opened_at'))}   closed (UTC): {f(t.get('closed_at'))}")
+    ind = {k: notes.get(k) for k in ("zoneSizePct", "obSizeAtr", "impulseRatioActual", "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
+    if ind:
+        lines.append("indicator readings at signal time: " + ", ".join(f"{k}={v}" for k, v in ind.items()))
+    if t.get("user_notes"):
+        lines.append("trader's own notes: " + str(t["user_notes"])[:500])
+    return "\n".join(lines)
+
+
+def _review_api(system, content, max_tokens):
+    """One Messages API call with retries on rate limits / overload. Returns the text."""
+    import urllib.request as ur, urllib.error as ue
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    payload = json.dumps({"model": REVIEW_MODEL, "max_tokens": max_tokens, "system": system,
+                          "messages": [{"role": "user", "content": content}]}).encode()
+    for attempt in range(4):
+        try:
+            req = ur.Request("https://api.anthropic.com/v1/messages", data=payload,
+                             headers={"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"})
+            with ur.urlopen(req, timeout=90) as r:
+                data = json.loads(r.read())
+            return "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        except ue.HTTPError as e:
+            body = ""
+            try:
+                body = e.read()[:300].decode("utf-8", "ignore")
+            except Exception:
+                pass
+            if e.code in (429, 500, 502, 503, 529) and attempt < 3:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise RuntimeError(f"Anthropic API HTTP {e.code}: {body}")
+        except Exception as e:
+            if attempt < 3:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise RuntimeError(f"Anthropic API call failed: {e}")
+
+
+def _review_parse_json(txt):
+    s, e = txt.find("{"), txt.rfind("}")
+    if s < 0 or e <= s:
+        raise ValueError("model reply contained no JSON object")
+    return json.loads(txt[s:e + 1])
+
+
+def _review_clean(o):
+    """Coerce the model's reply into the expected shape (bad types / unknown tags are dropped, never trusted)."""
+    if not isinstance(o, dict):
+        raise ValueError("review is not an object")
+    def txt(v, n):
+        return str(v).strip()[:n] if v is not None else ""
+    def part(k):
+        v = o.get(k) if isinstance(o.get(k), dict) else {}
+        sc = v.get("score")
+        try:
+            sc = int(sc)
+            sc = sc if 1 <= sc <= 5 else None
+        except (TypeError, ValueError):
+            sc = None
+        return {"score": sc, "notes": txt(v.get("notes"), 400)}
+    def pick(v, allowed, default):
+        return v if v in allowed else default
+    tags = [t for t in (o.get("tags") or []) if isinstance(t, str) and t in REVIEW_TAGS] if isinstance(o.get("tags"), list) else []
+    mistakes = [txt(m, 200) for m in (o.get("mistakes") or []) if m] if isinstance(o.get("mistakes"), list) else []
+    return {
+        "image_usable": bool(o.get("image_usable", True)),
+        "screenshot_timing": pick(o.get("screenshot_timing"), ("before_entry", "at_entry", "after_close", "unclear"), "unclear"),
+        "trend_context": pick(o.get("trend_context"), ("with_trend", "counter_trend", "ranging", "unclear"), "unclear"),
+        "zone_quality": part("zone_quality"), "entry_quality": part("entry_quality"),
+        "stop_placement": part("stop_placement"), "target_realism": part("target_realism"),
+        "outcome_driver": txt(o.get("outcome_driver"), 500),
+        "mistakes": mistakes[:5], "tags": list(dict.fromkeys(tags)),
+        "confidence": pick(o.get("confidence"), ("low", "medium", "high"), "low"),
+        "one_line": txt(o.get("one_line"), 200),
+    }
+
+
+def _review_store(tid, status, review=None, error=None, image_urls=None):
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '3s'")
+                cur.execute("""INSERT INTO trade_reviews (trade_id, status, review, error, image_urls, model, prompt_version, created_at)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+                               ON CONFLICT (trade_id) DO UPDATE SET status=EXCLUDED.status, review=EXCLUDED.review, error=EXCLUDED.error,
+                                   image_urls=EXCLUDED.image_urls, model=EXCLUDED.model, prompt_version=EXCLUDED.prompt_version, created_at=NOW()""",
+                            (tid, status, json.dumps(review) if review is not None else None, (error or None) and str(error)[:500],
+                             json.dumps(image_urls or []), REVIEW_MODEL, REVIEW_PROMPT_VERSION))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning(f"Review: could not store result for trade {tid}: {e}")
+
+
+def _review_one(tid, t):
+    """Fetch the trade's screenshots, ask the model, store the outcome. Never raises."""
+    import base64
+    try:
+        links = list(dict.fromkeys(_REVIEW_URL_RE.findall(t.get("media") or "")))
+        if not links:
+            _review_store(tid, "no_image", error="no links on this trade")
+            return
+        images, urls, errs = [], [], []
+        for link in links:
+            if len(images) >= REVIEW_MAX_IMAGES:
+                break
+            try:
+                u, data, mt = _review_fetch_image(link)
+                images.append((data, mt)); urls.append(u)
+            except Exception as e:
+                errs.append(f"{link[:80]}: {e}")
+        if not images:
+            _review_store(tid, "no_image", error="; ".join(errs) or "no usable image")
+            return
+        content = []
+        for i, (data, mt) in enumerate(images):
+            content.append({"type": "text", "text": f"Screenshot {i + 1} of {len(images)}:"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": mt, "data": base64.b64encode(data).decode()}})
+        content.append({"type": "text", "text": _review_trade_text(t) + "\n\nReturn the JSON object now."})
+        review = _review_clean(_review_parse_json(_review_api(REVIEW_SYSTEM, content, 1000)))
+        _review_store(tid, "ok", review=review, image_urls=urls)
+        log.info(f"Review: trade {tid} {t.get('symbol')} reviewed ({len(images)} image(s))")
+    except Exception as e:
+        log.warning(f"Review: trade {tid} failed: {e}")
+        _review_store(tid, "error", error=str(e))
+
+
+def _review_load_trades(ids):
+    import psycopg2.extras as _pgr
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM trades WHERE id = ANY(%s)", (list(ids),))
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        conn.close()
+    return {r["id"]: r for r in rows}
+
+
+def _review_load_reviews(ids):
+    import psycopg2.extras as _pgr
+    _review_ensure_table()
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+            cur.execute("SELECT trade_id, status, review, error, image_urls, model, prompt_version, created_at FROM trade_reviews WHERE trade_id = ANY(%s)", (list(ids),))
+            rows = [dict(r) for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        conn.close()
+    out = {}
+    for r in rows:
+        try:
+            rv = json.loads(r["review"]) if r.get("review") else None
+        except ValueError:
+            rv = None
+        try:
+            urls = json.loads(r["image_urls"]) if r.get("image_urls") else []
+        except ValueError:
+            urls = []
+        out[r["trade_id"]] = {"status": r["status"], "review": rv, "error": r.get("error"), "image_urls": urls,
+                              "current": r.get("prompt_version") == REVIEW_PROMPT_VERSION,
+                              "at": r["created_at"].isoformat() if r.get("created_at") else None}
+    return out
+
+
+def _review_ids(body):
+    ids = []
+    for v in (body.get("ids") or []):
+        try:
+            ids.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    return list(dict.fromkeys(ids))
+
+
+@app.route("/journal/review")
+def review_page():
+    from flask import Response
+    return Response(REVIEW_HTML, mimetype="text/html")
+
+
+@app.route("/journal/review/run", methods=["POST"])
+def review_run():
+    if not _review_auth_ok():
+        return jsonify({"status": "error", "message": "Access token required (REVIEW_TOKEN)"}), 403
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ids = _review_ids(body)
+        rerun = bool(body.get("rerun"))
+        if not ids:
+            return jsonify({"status": "error", "message": "No trades selected"}), 400
+        capped = len(ids) > REVIEW_MAX_TRADES
+        ids = ids[:REVIEW_MAX_TRADES]
+        trades = _review_load_trades(ids)
+        existing = _review_load_reviews(ids)
+        todo, cached, no_links, unknown = [], 0, 0, 0
+        for tid in ids:
+            t = trades.get(tid)
+            if not t:
+                unknown += 1
+                continue
+            if not _REVIEW_URL_RE.search(t.get("media") or ""):
+                no_links += 1
+                continue
+            ex = existing.get(tid)
+            if ex and ex["status"] == "ok" and ex["current"] and not rerun:
+                cached += 1
+                continue
+            todo.append(tid)
+        # Daily spend cap (re-runs count too: every review overwrites created_at)
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM trade_reviews WHERE created_at > NOW() - INTERVAL '24 hours'")
+                used = int(cur.fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+        if used + len(todo) > REVIEW_DAILY_CAP:
+            return jsonify({"status": "error", "message": f"Daily cap reached: {used} reviews in the last 24h, {len(todo)} requested, cap {REVIEW_DAILY_CAP} (REVIEW_DAILY_CAP)"}), 429
+        if todo and not os.environ.get("ANTHROPIC_API_KEY"):
+            return jsonify({"status": "error", "message": "ANTHROPIC_API_KEY is not set on the server"}), 500
+        with _review_inflight_lock:
+            fresh = [i for i in todo if i not in _review_inflight]
+            _review_inflight.update(fresh)
+        def _worker(tid):
+            try:
+                _review_one(tid, trades[tid])
+            finally:
+                with _review_inflight_lock:
+                    _review_inflight.discard(tid)
+        def _main():
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=REVIEW_CONCURRENCY) as ex:
+                list(ex.map(_worker, fresh))
+        if fresh:
+            threading.Thread(target=_main, daemon=True).start()
+        log.info(f"Review: queued {len(fresh)} trade(s) (cached {cached}, no links {no_links}, capped={capped})")
+        return jsonify({"status": "ok", "queued": fresh, "already_running": len(todo) - len(fresh), "cached": cached,
+                        "no_links": no_links, "unknown": unknown, "capped": capped, "max_trades": REVIEW_MAX_TRADES}), 200
+    except Exception as e:
+        log.error(f"Review run error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/review/progress", methods=["POST"])
+def review_progress():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ids = _review_ids(body)[:500]
+        rows = _review_load_reviews(ids) if ids else {}
+        with _review_inflight_lock:
+            running = [i for i in ids if i in _review_inflight]
+        return jsonify({"status": "ok", "rows": {str(k): v for k, v in rows.items()}, "running_here": running,
+                        "config": {"model": REVIEW_MODEL, "max_trades": REVIEW_MAX_TRADES, "max_images": REVIEW_MAX_IMAGES,
+                                   "cost_per_trade": REVIEW_COST_PER_TRADE, "token_required": bool(REVIEW_TOKEN), "summary_max": REVIEW_SUMMARY_MAX,
+                                   "daily_cap": REVIEW_DAILY_CAP, "hosts": list(REVIEW_HOSTS)}}), 200
+    except Exception as e:
+        log.error(f"Review progress error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+def _review_stats(records):
+    """Deterministic statistics over reviewed trades. records: dicts with pnl, r, review."""
+    def agg(rs):
+        n = len(rs)
+        wins = sum(1 for x in rs if (x["pnl"] or 0) > 0)
+        rr = [x["r"] for x in rs if x["r"] is not None]
+        return {"n": n, "wins": wins, "win_rate": round(wins / n * 100, 1) if n else None,
+                "total_r": round(sum(rr), 2) if rr else None, "avg_r": round(sum(rr) / len(rr), 2) if rr else None}
+    tags = {}
+    for x in records:
+        for tg in x["review"]["tags"]:
+            tags.setdefault(tg, []).append(x)
+    tag_rows = sorted(({"tag": k, **agg(v)} for k, v in tags.items()), key=lambda r: (-r["n"], r["tag"]))
+    trend_rows = []
+    for k in ("with_trend", "counter_trend", "ranging", "unclear"):
+        rs = [x for x in records if x["review"]["trend_context"] == k]
+        if rs:
+            trend_rows.append({"trend": k, **agg(rs)})
+    def avg_scores(rs):
+        out = {}
+        for key in ("zone_quality", "entry_quality", "stop_placement", "target_realism"):
+            v = [x["review"][key]["score"] for x in rs if x["review"][key]["score"] is not None]
+            out[key] = round(sum(v) / len(v), 2) if v else None
+        return out
+    wins = [x for x in records if (x["pnl"] or 0) > 0]
+    losses = [x for x in records if (x["pnl"] or 0) <= 0]
+    return {"overall": agg(records), "tags": tag_rows, "trend": trend_rows,
+            "avg_scores": {"winners": avg_scores(wins), "losers": avg_scores(losses)}}
+
+
+@app.route("/journal/review/summary", methods=["POST"])
+def review_summary():
+    if not _review_auth_ok():
+        return jsonify({"status": "error", "message": "Access token required (REVIEW_TOKEN)"}), 403
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        # REVIEW_MAX_TRADES is a per-run COST cap on image reviews; summarising is a single call whatever the
+        # trade count, so it has its own, far larger bound — otherwise the aggregate would silently drop trades.
+        all_ids = _review_ids(body)
+        ids = all_ids[:REVIEW_SUMMARY_MAX]
+        if not ids:
+            return jsonify({"status": "error", "message": "No trades selected"}), 400
+        trades = _review_load_trades(ids)
+        reviews = _review_load_reviews(ids)
+        records = []
+        for tid in ids:
+            t, rv = trades.get(tid), reviews.get(tid)
+            if not t or not rv or rv["status"] != "ok" or not rv["review"] or not rv["review"].get("image_usable", True):
+                continue
+            records.append({"id": tid, "symbol": t.get("symbol"), "side": t.get("side"), "variant": t.get("variant"),
+                            "outcome": t.get("outcome"), "pnl": float(t.get("pnl") or 0), "r": _trade_r(t), "review": rv["review"]})
+        stats = _review_stats(records) if records else None
+        out = {"status": "ok", "n_requested": len(ids), "n_used": len(records), "stats": stats, "text": "",
+               "truncated": len(all_ids) - len(ids)}
+        if len(records) < 3:
+            out["text"] = "Fewer than 3 usable reviews in this selection — no written summary generated."
+            return jsonify(out), 200
+        lines = []
+        for x in records:
+            rv = x["review"]
+            lines.append(json.dumps({
+                "id": x["id"], "symbol": x["symbol"], "dir": "long" if x["side"] == "Buy" else "short", "variant": x["variant"],
+                "outcome": x["outcome"], "R": None if x["r"] is None else round(x["r"], 2), "pnl": round(x["pnl"], 2),
+                "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"],
+                "scores": [rv["zone_quality"]["score"], rv["entry_quality"]["score"], rv["stop_placement"]["score"], rv["target_realism"]["score"]],
+                "tags": rv["tags"], "mistakes": rv["mistakes"], "driver": rv["outcome_driver"]}))
+        system = ("You analyse a set of per-trade chart reviews for an automated supply & demand zone strategy. Be blunt and specific. "
+                  "Every claim must cite counts from the statistics (for example '3 of 4'). Do not draw conclusions from buckets with fewer than 5 trades; "
+                  "say they are too small instead. The per-trade reviews were produced by a vision model from one screenshot each, so they are subjective, "
+                  "and screenshot timing varies (a pre-entry screenshot cannot explain an outcome). Do not flatter and do not give generic trading advice. "
+                  "Write plain text with exactly these four sections, each starting with its heading on its own line: "
+                  "WHAT SEPARATES WINNERS FROM LOSERS / RECURRING MISTAKES (cite trade ids) / WHAT TO TEST NEXT (concrete indicator settings or filters, each labelled as a hypothesis) / HOW MUCH TO TRUST THIS.")
+        user = ("STATISTICS (computed in code, not by a model):\n" + json.dumps(stats) +
+                "\n\nPER-TRADE REVIEWS (one JSON per line; R = realised result in units of initial risk):\n" + "\n".join(lines))
+        out["text"] = _review_api(system, [{"type": "text", "text": user}], 1800).strip()
+        return jsonify(out), 200
+    except Exception as e:
+        log.error(f"Review summary error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
