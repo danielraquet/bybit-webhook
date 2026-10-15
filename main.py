@@ -835,6 +835,10 @@ if BE_OFFSET_R != BE_OFFSET_R_RAW:
 #   BE_ON_TP1: when the TP1 partial fills, move the stop to entry (+ BE_OFFSET_R, see below) immediately.
 TP1_RESTING_ORDER   = os.getenv("TP1_RESTING_ORDER", "true").lower() == "true"
 BE_ON_TP1           = os.getenv("BE_ON_TP1",         "true").lower() == "true"
+# The resync is a repair job. It can be switched off, or slowed down, without affecting order management —
+# useful as an immediate brake if it is ever implicated in API trouble again.
+TRAIL_RESYNC_ENABLED  = os.getenv("TRAIL_RESYNC_ENABLED", "true").lower() == "true"
+TRAIL_RESYNC_INTERVAL = max(30.0, float(os.getenv("TRAIL_RESYNC_INTERVAL", "120") or "120"))
 # Server-side partial-exit override. PARTIAL_R unset/blank → use the alert's tp1/tp1Pct (indicator is the source).
 # PARTIAL_R=0 → partial exit forced OFF for every new trade. PARTIAL_R>0 → tp1 = entry ± PARTIAL_R × risk, ignoring the alert.
 # PARTIAL_PCT (1-99) = share of the position closed at tp1; blank → the alert's tp1Pct, else 75.
@@ -927,28 +931,136 @@ def get_live_position_size(symbol: str) -> float:
         return -1.0  # -1 = lookup failed, distinct from "confirmed flat" (0)
 
 
+# ── API health ────────────────────────────────────────────────────────────────
+# Every Bybit call goes through _api_call. Two things it must get right, learned the hard way:
+#   1. Tell a RATE LIMIT apart from a BLOCK. The old version matched the bare substring "403" and
+#      called everything it caught a "rate limit", so an IP-whitelist mismatch or a revoked key —
+#      which no amount of retrying will fix — was reported as a rate limit and retried forever,
+#      hiding the real error. Bybit uses HTTP 403 for BOTH an IP ban from excessive requests and a
+#      CloudFront/IP-whitelist rejection, so the message text has to be examined, and whatever is
+#      decided, the original error is now always logged.
+#   2. Stop hammering a dead API. When calls fail back to back, a circuit breaker opens and
+#      non-essential work (the trail resync) stands down until a call succeeds again, instead of
+#      every background thread retrying in a loop and flooding the log.
+_api_state = {"blocked_until": 0.0, "consecutive_fail": 0, "last_error": "", "last_error_at": 0.0,
+              "last_ok_at": 0.0, "last_kind": "", "logged_at": 0.0}
+_api_state_lock = threading.Lock()
+API_BLOCK_SECONDS = float(os.getenv("API_BLOCK_SECONDS", "60") or "60")
+
+
+# Order matters. Bybit's 403 reads "You have breached the ip rate limit or your ip is from the usa", which
+# contains the words "rate limit" but is NOT the per-key rate limit: it is an IP-level ban or a geo-block, and
+# neither is fixed by retrying. These patterns are therefore tested BEFORE the rate-limit ones.
+_API_BLOCK_PATTERNS = ("from the usa", "ip rate limit", "unmatched ip", "not in the whitelist", "cloudfront",
+                       "access denied", "permission denied", "forbidden", "invalid api", "api key is invalid",
+                       "expired", "unauthorized")
+_API_BLOCK_CODES = (10003, 10004, 10005, 10010, 33004)
+
+
+def _api_classify(err_text, ret_code=0):
+    """'rate_limit' (back off and retry), 'blocked' (retrying cannot help), or 'other'."""
+    e = (err_text or "").lower()
+    if ret_code in _API_BLOCK_CODES or any(p in e for p in _API_BLOCK_PATTERNS):
+        return "blocked"
+    # Bybit's IP ban and its geo-block both arrive as 403. Treated as blocked: an IP or region problem never
+    # clears by retrying, and hammering it only extends the ban. Matched only where 403/401 is clearly a
+    # status code, never as a bare substring — a price of 1.403 or an order id must not trip this.
+    if re.search(r"(errcode|err_code|errno|status|http|code)\D{0,4}(403|401)\b|\b(403|401)\s*(forbidden|unauthorized|client error)", e):
+        return "blocked"
+    if ret_code in (10006, 10018) or "too many visits" in e or "rate limit" in e or "10006" in e or "10018" in e:
+        return "rate_limit"
+    return "other"
+
+
+def _api_note_ok():
+    with _api_state_lock:
+        _api_state["consecutive_fail"] = 0
+        _api_state["blocked_until"] = 0.0
+        _api_state["last_ok_at"] = time.time()
+        _api_state["last_kind"] = ""
+
+
+def _api_note_fail(kind, err_text):
+    now = time.time()
+    with _api_state_lock:
+        _api_state["consecutive_fail"] += 1
+        n = _api_state["consecutive_fail"]
+        _api_state["last_error"] = str(err_text)[:300]
+        _api_state["last_error_at"] = now
+        _api_state["last_kind"] = kind
+        if n >= 3:
+            # Back off harder the longer it stays broken, to a ceiling of 10 minutes.
+            _api_state["blocked_until"] = now + min(API_BLOCK_SECONDS * (2 ** min(n - 3, 4)), 600)
+        say = now - _api_state["logged_at"] > 60
+        if say:
+            _api_state["logged_at"] = now
+    if say:
+        if kind == "blocked":
+            log.error(f"Bybit is REFUSING this server ({n} calls in a row). This is NOT the per-key rate limit and "
+                      f"retrying will not clear it. Most likely causes, in order: (1) this server's egress IP is in a "
+                      f"country Bybit blocks (the USA above all) — check /ip and the Railway region; (2) the IP is not "
+                      f"on the API key's whitelist; (3) an IP-level ban from too many requests; (4) the key is expired "
+                      f"or revoked. Last error: {str(err_text)[:200]}")
+        else:
+            log.warning(f"Bybit API failing ({kind}, {n} in a row). Last error: {str(err_text)[:200]}")
+
+
+def api_is_blocked():
+    """True while the circuit breaker is open — background work should stand down."""
+    with _api_state_lock:
+        return time.time() < _api_state["blocked_until"]
+
+
+def api_health():
+    with _api_state_lock:
+        st = dict(_api_state)
+    now = time.time()
+    return {"blocked": now < st["blocked_until"],
+            "blocked_for_s": max(0, int(st["blocked_until"] - now)),
+            "consecutive_failures": st["consecutive_fail"],
+            "last_error_kind": st["last_kind"] or None,
+            "last_error": st["last_error"] or None,
+            "seconds_since_last_error": int(now - st["last_error_at"]) if st["last_error_at"] else None,
+            "seconds_since_last_success": int(now - st["last_ok_at"]) if st["last_ok_at"] else None}
+
+
 def _api_call(fn, *args, **kwargs):
-    """Wrapper for Bybit API calls with retry on rate limit."""
+    """Bybit call with retries. Retries a rate limit; does NOT retry a block (whitelist/auth), since
+    retrying cannot fix it and only deepens an IP ban."""
+    last_err = None
     for attempt in range(3):
         try:
             result = fn(*args, **kwargs)
-            # Check for API-level errors in response
             ret_code = result.get("retCode", 0) if isinstance(result, dict) else 0
-            if ret_code == 10006:  # rate limit
-                wait = (attempt + 1) * 3
-                log.warning(f"Rate limit (retCode 10006) — waiting {wait}s before retry {attempt+1}/3")
-                time.sleep(wait)
-                continue
+            if ret_code != 0:
+                kind = _api_classify(result.get("retMsg", "") if isinstance(result, dict) else "", ret_code)
+                if kind == "rate_limit":
+                    wait = (attempt + 1) * 3
+                    log.warning(f"Bybit rate limit (retCode {ret_code}) — waiting {wait}s before retry {attempt+1}/3")
+                    time.sleep(wait)
+                    last_err = f"retCode {ret_code}: {result.get('retMsg', '')}"
+                    continue
+                if kind == "blocked":
+                    _api_note_fail("blocked", f"retCode {ret_code}: {result.get('retMsg', '')}")
+                    raise RuntimeError(f"Bybit refused the request (retCode {ret_code}): {result.get('retMsg', '')}")
+            _api_note_ok()
             return result
         except Exception as e:
             err = str(e)
-            if "403" in err or "rate limit" in err.lower() or "10006" in err:
+            last_err = err
+            kind = _api_classify(err)
+            if kind == "rate_limit":
                 wait = (attempt + 1) * 3
-                log.warning(f"Rate limit hit — waiting {wait}s before retry {attempt+1}/3")
+                log.warning(f"Bybit rate limit — waiting {wait}s before retry {attempt+1}/3 ({err[:120]})")
                 time.sleep(wait)
-            else:
+                continue
+            if kind == "blocked":
+                _api_note_fail("blocked", err)       # no retry: retrying a whitelist/auth refusal cannot help
                 raise
-    raise Exception(f"API call failed after 3 retries")
+            _api_note_fail("other", err)
+            raise
+    _api_note_fail("rate_limit", last_err or "rate limited")
+    raise Exception(f"API call failed after 3 retries (rate limited). Last error: {str(last_err)[:200]}")
 
 
 def get_open_orders(symbol: str) -> list:
@@ -2622,6 +2734,7 @@ def status():
         return jsonify({
             "status":          "running",
             "enabled":         cfg["enabled"],
+            "api_health":      api_health(),
             "testnet":         TESTNET,
             "open_positions":  positions,
             "position_count":  len(positions),
@@ -2637,6 +2750,8 @@ def status():
                 "be_trigger_r":        BE_TRIGGER_R,
                 "be_offset_r":         BE_OFFSET_R,
                 "tp1_resting_order":   TP1_RESTING_ORDER,
+                "resync_enabled":      TRAIL_RESYNC_ENABLED,
+                "resync_interval_s":   TRAIL_RESYNC_INTERVAL,
                 "partial_r_env":       PARTIAL_R_ENV,
                 "partial_pct_env":     PARTIAL_PCT_ENV,
                 "be_on_tp1":           BE_ON_TP1,
@@ -2699,7 +2814,9 @@ def manual_poll():
 
 @app.route("/debug/auth", methods=["GET"])
 def debug_auth():
-    """Test Bybit auth with a simple authenticated call."""
+    """Test Bybit auth with a simple authenticated call. On failure it says WHICH kind of failure, since the
+    raw Bybit 403 ('breached the ip rate limit or your ip is from the usa') reads like a rate limit but is
+    usually a geo-block or an IP-whitelist problem that no amount of waiting will fix."""
     try:
         resp = session.get_wallet_balance(accountType="UNIFIED", coin="USDT")
         bal  = resp.get("result", {}).get("list", [{}])[0].get("totalWalletBalance", "?")
@@ -2715,7 +2832,14 @@ def debug_auth():
             "open_orders_msg": resp3.get("retMsg"),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        kind = _api_classify(str(e))
+        out = {"error": str(e), "kind": kind, "api_health": api_health()}
+        if kind == "blocked":
+            out["likely_cause"] = ("Bybit is refusing this server outright. Check /ip: if that address is in the USA "
+                                   "(or another country Bybit blocks) move the Railway service to a non-US region and "
+                                   "redeploy. Otherwise check the IP against the API key's whitelist, and that the key "
+                                   "has not expired. Retrying will not help.")
+        return jsonify(out), 500
 
 
 @app.route("/ip", methods=["GET"])
@@ -2808,6 +2932,8 @@ def debug_trail():
         "be_trigger_r":        BE_TRIGGER_R,
         "be_offset_r":         BE_OFFSET_R,
         "tp1_resting_order":   TP1_RESTING_ORDER,
+        "resync_enabled":      TRAIL_RESYNC_ENABLED,
+        "resync_interval_s":   TRAIL_RESYNC_INTERVAL,
         "partial_r_env":       PARTIAL_R_ENV,
         "partial_pct_env":     PARTIAL_PCT_ENV,
         "be_on_tp1":           BE_ON_TP1,
@@ -8932,6 +9058,57 @@ def _open_orders_or_none(symbol):
         return None
 
 
+def _all_open_orders_or_none():
+    """Every open order on the account in ONE call, as {symbol: [orders]}. None if the lookup failed.
+    Replaces one get_open_orders per symbol in the resync — with a dozen symbols that was two dozen calls
+    every 30s, which is what got this server throttled (and then blocked) by Bybit."""
+    try:
+        out, cursor, pages = {}, None, 0
+        while pages < 10:
+            kw = dict(category="linear", settleCoin="USDT", limit=50)
+            if cursor:
+                kw["cursor"] = cursor
+            resp = _api_call(session.get_open_orders, **kw)
+            if resp.get("retCode", 0) != 0:
+                return None
+            res = resp.get("result", {}) or {}
+            for o in res.get("list", []) or []:
+                out.setdefault(o.get("symbol", ""), []).append(o)
+            cursor = res.get("nextPageCursor") or ""
+            pages += 1
+            if not cursor:
+                break
+        return out
+    except Exception as e:
+        log.warning(f"account open-orders lookup failed: {e}")
+        return None
+
+
+def _all_positions_or_none():
+    """Every live position on the account in ONE call, as {symbol: position}. None if the lookup failed."""
+    try:
+        out, cursor, pages = {}, None, 0
+        while pages < 10:
+            kw = dict(category="linear", settleCoin="USDT", limit=200)
+            if cursor:
+                kw["cursor"] = cursor
+            resp = _api_call(session.get_positions, **kw)
+            if resp.get("retCode", 0) != 0:
+                return None
+            res = resp.get("result", {}) or {}
+            for p in res.get("list", []) or []:
+                if float(p.get("size", 0) or 0) > 0:
+                    out[p.get("symbol", "")] = p
+            cursor = res.get("nextPageCursor") or ""
+            pages += 1
+            if not cursor:
+                break
+        return out
+    except Exception as e:
+        log.warning(f"account positions lookup failed: {e}")
+        return None
+
+
 def _order_history_or_none(symbol, order_id=None, limit=50):
     try:
         kw = dict(category="linear", symbol=symbol, limit=limit)
@@ -9234,6 +9411,12 @@ def _trail_resync():
     completed; (3) drop trackers whose position no longer exists on Bybit. Never touches journal rows."""
     if get_config().get("journal_only"):
         return
+    if not TRAIL_RESYNC_ENABLED:
+        return
+    if api_is_blocked():
+        # Bybit is refusing this server. Resync is a repair job, not a safety-critical one — standing down
+        # keeps the remaining budget for order management and stops the log flooding.
+        return
     import psycopg2.extras as _pgr
     try:
         conn = get_db()
@@ -9265,12 +9448,16 @@ def _trail_resync():
     now       = time.time()
     registered = 0
 
+    # ONE account-wide snapshot for the whole cycle (was two calls per symbol — see _all_open_orders_or_none).
+    all_orders = _all_open_orders_or_none()
+    all_pos    = _all_positions_or_none()
+    if all_orders is None or all_pos is None:
+        log.warning("Trail resync: skipped this cycle — could not read the account snapshot from Bybit")
+        return
+
     for sym in symbols:
-        time.sleep(0.15)
-        pend = _open_orders_or_none(sym)
-        pos  = _get_position(sym)
-        if pend is None or pos is None:
-            continue
+        pend = all_orders.get(sym, [])
+        pos  = all_pos.get(sym, {})
         pending_ids = {o.get("orderId") for o in pend}
 
         # (2)+(3) existing trackers on this symbol
@@ -9337,13 +9524,17 @@ def _trail_resync():
 
 def _trail_resync_loop():
     time.sleep(25)
-    log.info("Trail resync thread started (every 30s)")
+    if not TRAIL_RESYNC_ENABLED:
+        log.info("Trail resync is DISABLED (TRAIL_RESYNC_ENABLED=false) — open trades the watcher loses will stay lost")
+        return
+    log.info(f"Trail resync thread started (every {TRAIL_RESYNC_INTERVAL:.0f}s, 2 API calls per cycle)")
     while True:
         try:
             _trail_resync()
         except Exception as e:
             log.warning(f"Trail resync error: {e}")
-        time.sleep(30)
+        # While Bybit is refusing us, wait out the circuit breaker rather than spinning.
+        time.sleep(TRAIL_RESYNC_INTERVAL if not api_is_blocked() else max(TRAIL_RESYNC_INTERVAL, 60.0))
 
 
 def _trail_watcher():
