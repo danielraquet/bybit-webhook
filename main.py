@@ -945,6 +945,8 @@ def get_live_position_size(symbol: str) -> float:
 _api_state = {"blocked_until": 0.0, "consecutive_fail": 0, "last_error": "", "last_error_at": 0.0,
               "last_ok_at": 0.0, "last_kind": "", "logged_at": 0.0}
 _api_state_lock = threading.Lock()
+# Open-orders snapshot shared across one watcher cycle (see _trail_watcher).
+_watch_cache = {"orders": None, "orders_at": 0.0}
 API_BLOCK_SECONDS = float(os.getenv("API_BLOCK_SECONDS", "60") or "60")
 
 
@@ -9109,6 +9111,27 @@ def _all_positions_or_none():
         return None
 
 
+def _all_tickers_or_none():
+    """Every linear ticker in ONE call, as {symbol: {"mark": float, "last": float}}. None if it failed.
+    Bybit rate-limits by REQUEST COUNT, not payload size, so one large response beats one request per
+    tracked trade every 5s — which, on a shared cloud egress IP, is what gets the whole IP throttled."""
+    try:
+        resp = _api_call(session.get_tickers, category="linear")
+        if resp.get("retCode", 0) != 0:
+            return None
+        out = {}
+        for t in resp.get("result", {}).get("list", []) or []:
+            try:
+                out[t.get("symbol", "")] = {"mark": float(t.get("markPrice", 0) or 0),
+                                            "last": float(t.get("lastPrice", 0) or 0)}
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception as e:
+        log.warning(f"ticker snapshot failed: {e}")
+        return None
+
+
 def _order_history_or_none(symbol, order_id=None, limit=50):
     try:
         kw = dict(category="linear", symbol=symbol, limit=limit)
@@ -9372,8 +9395,10 @@ def _tp1_finalize_by_order_id(tp1_oid):
             log.warning(f"TP1 finalize (event) failed for {tp1_oid}: {e}")
 
 
-def _tp1_maintain(order_id):
-    """Per-cycle upkeep for one tracked trade's 2-stage exit. Never raises."""
+def _tp1_maintain(order_id, orders_snapshot=None):
+    """Per-cycle upkeep for one tracked trade's 2-stage exit. Never raises.
+    orders_snapshot: {symbol: [orders]} from one account-wide lookup, shared across all tracked trades in
+    this cycle. Without it this method fell back to one open-orders call per trade every 15s."""
     try:
         st = _st(order_id)
         if not st or not st.get("tp1"):
@@ -9391,7 +9416,7 @@ def _tp1_maintain(order_id):
             if now - st.get("tp1_last_check", 0) < 15:
                 return
             _set(order_id, tp1_last_check=now)
-            orders = _open_orders_or_none(st["symbol"])
+            orders = orders_snapshot.get(st["symbol"], []) if orders_snapshot is not None else _open_orders_or_none(st["symbol"])
             if orders is None or any(o.get("orderId") == st["tp1_order_id"] for o in orders):
                 return                                       # lookup failed, or still resting
             _tp1_finalize(order_id)
@@ -9554,6 +9579,20 @@ def _trail_watcher():
         try:
             with _trail_lock:
                 tracked = dict(_trail_state)
+            # ONE ticker snapshot and (at most every 15s) ONE open-orders snapshot for the whole cycle,
+            # shared by every tracked trade. Previously this was one ticker call per trade every 5s plus one
+            # open-orders call per trade every 15s — with 8 open trades, about 2 requests a second, forever.
+            if tracked and not api_is_blocked():
+                tick_all = _all_tickers_or_none()
+                now_c = time.time()
+                if now_c - _watch_cache["orders_at"] >= 15:
+                    oo = _all_open_orders_or_none()
+                    if oo is not None:
+                        _watch_cache["orders"] = oo
+                        _watch_cache["orders_at"] = now_c
+            else:
+                tick_all = None
+            orders_all = _watch_cache["orders"] if (time.time() - _watch_cache["orders_at"]) < 60 else None
             for order_id, state in tracked.items():
                 try:
                     symbol  = state["symbol"]; side = state["side"]
@@ -9563,7 +9602,7 @@ def _trail_watcher():
 
                     # Resting TP1 order upkeep (place / verify / book the fill) and BE-on-TP1. Runs before the
                     # tp_removed skip below so it keeps working after the trailing stop has taken over.
-                    _tp1_maintain(order_id)
+                    _tp1_maintain(order_id, orders_snapshot=orders_all)
                     state = _st(order_id)
                     if not state: continue          # deregistered meanwhile
 
@@ -9571,11 +9610,17 @@ def _trail_watcher():
                     if state.get("tp_removed"):
                         continue
 
-                    resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
-                    tickers = resp.get("result", {}).get("list", [])
-                    if not tickers: continue
-                    mark    = float(tickers[0].get("markPrice", 0))
-                    last    = float(tickers[0].get("lastPrice", 0) or 0)
+                    tk = (tick_all or {}).get(symbol)
+                    if tk is None:
+                        if tick_all is not None:
+                            continue                 # snapshot was fine, this symbol simply is not in it
+                        resp    = _api_call(session.get_tickers, category="linear", symbol=symbol)
+                        tickers = resp.get("result", {}).get("list", [])
+                        if not tickers: continue
+                        tk = {"mark": float(tickers[0].get("markPrice", 0) or 0),
+                              "last": float(tickers[0].get("lastPrice", 0) or 0)}
+                    mark    = tk["mark"]
+                    last    = tk["last"]
                     if mark <= 0: continue
                     current_r = (mark - entry) / risk if is_long else (entry - mark) / risk
                     # BE trigger and the polling-fallback partial use the more favourable of mark/last price: the
