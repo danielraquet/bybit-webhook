@@ -2892,6 +2892,127 @@ def journal_cooldown_status():
     })
 
 
+@app.route("/debug/resync", methods=["GET"])
+def debug_resync():
+    """Report-only walk of exactly what _trail_resync sees, and for every open journal row the reason it is or is
+    not adopted. Changes nothing. Built because 'tracked_trades: 0 against N open positions' has now happened
+    twice with no way to see inside the decision."""
+    import psycopg2.extras as _pgr
+    out = {"checked_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S") + " UTC",
+           "gates": {"journal_only": bool(get_config().get("journal_only")),
+                     "resync_enabled": TRAIL_RESYNC_ENABLED,
+                     "api_blocked": api_is_blocked()},
+           "verdict": [], "open_rows": [], "tracked": [], "per_symbol": [], "would_register": []}
+    try:
+        for name, bad in (("journal_only is ON — resync never runs", out["gates"]["journal_only"]),
+                          ("TRAIL_RESYNC_ENABLED is false — resync never runs", not TRAIL_RESYNC_ENABLED),
+                          ("the API circuit breaker is open — resync is standing down", out["gates"]["api_blocked"])):
+            if bad:
+                out["verdict"].append(name)
+
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+                cur.execute(_RESYNC_OPEN_ROWS_SQL)
+                rows = [dict(r) for r in cur.fetchall()]
+                # Rows the main query cannot see at all — the commonest reason nothing gets adopted.
+                cur.execute("SELECT count(*) AS n FROM trades WHERE status='open' AND order_id IS NULL")
+                out["open_rows_without_order_id"] = int(cur.fetchone()["n"])
+                cur.execute("SELECT status, count(*) AS n FROM trades GROUP BY status ORDER BY n DESC")
+                out["journal_status_counts"] = {r["status"]: int(r["n"]) for r in cur.fetchall()}
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"could not read the journal: {e}"}), 500
+
+    with _trail_lock:
+        tracked = {k: dict(v) for k, v in _trail_state.items()}
+    out["tracked"] = [{"order_id": k, "symbol": v["symbol"], "side": v["side"],
+                       "entry_filled": v.get("entry_filled"), "partial_done": v.get("partial_done"),
+                       "tp1_order_id": v.get("tp1_order_id")} for k, v in tracked.items()]
+
+    cands_all = []
+    for r in rows:
+        ok, why = _resync_eligible(r)
+        already = r["order_id"] in tracked
+        out["open_rows"].append({"id": r["id"], "symbol": r["symbol"], "side": r["side"],
+                                 "order_id": r["order_id"], "entry": r["entry"], "sl": r["sl"],
+                                 "source": r.get("source"), "eligible": ok,
+                                 "reason": "already tracked" if already else (why or "eligible")})
+        if ok and not already:
+            cands_all.append(r)
+
+    all_orders = _all_open_orders_or_none()
+    all_pos    = _all_positions_or_none()
+    out["snapshot"] = {"orders_lookup_ok": all_orders is not None,
+                       "positions_lookup_ok": all_pos is not None,
+                       "live_positions": sorted((all_pos or {}).keys()),
+                       "symbols_with_pending_orders": sorted((all_orders or {}).keys())}
+    if all_orders is None or all_pos is None:
+        out["verdict"].append("the Bybit account snapshot failed — resync skips the whole cycle")
+        return jsonify(out), 200
+
+    symbols = sorted({r["symbol"] for r in cands_all} | {v["symbol"] for v in tracked.values()})
+    for sym in symbols:
+        pend = all_orders.get(sym, [])
+        pos  = all_pos.get(sym, {})
+        pending_ids = {o.get("orderId") for o in pend}
+        entry = {"symbol": sym, "live_position": (pos.get("side") if pos else None),
+                 "position_size": (pos.get("size") if pos else None),
+                 "pending_order_ids": sorted(x for x in pending_ids if x), "candidates": []}
+        cands = [r for r in cands_all if r["symbol"] == sym]
+        if not cands:
+            entry["note"] = "no untracked open journal row for this symbol"
+        for r in cands:
+            c = {"id": r["id"], "order_id": r["order_id"], "journal_side": r["side"]}
+            if r["order_id"] in pending_ids:
+                c["blocked_by"] = "its entry order is still PENDING — not filled yet, nothing to track"
+            elif not pos:
+                c["blocked_by"] = "Bybit shows NO live position for this symbol — the journal row is stale and should be closed"
+            elif r["side"] != pos.get("side"):
+                c["blocked_by"] = f"journal says {r['side']} but the live position is {pos.get('side')}"
+            else:
+                h = _order_history_or_none(sym, order_id=r["order_id"])
+                if h is None:
+                    c["blocked_by"] = "order-history lookup FAILED (API error)"
+                elif not h:
+                    c["blocked_by"] = "order id not found in Bybit's order history at all"
+                else:
+                    o = h[0]
+                    st, cum = o.get("orderStatus", ""), float(o.get("cumExecQty") or 0)
+                    c["order_status"] = st
+                    c["cum_exec_qty"] = cum
+                    if st == "Filled" or (cum > 0 and st in ("Cancelled", "PartiallyFilledCanceled", "Deactivated")):
+                        # _trail_register declines a trade it would have nothing to do: no TP extension, no BE
+                        # trigger and no partial. Mirrored here so this report can never promise a registration
+                        # that the registrar then drops on the floor.
+                        if not EXTEND_BEYOND_TP and BE_TRIGGER_R <= 0 and not r.get("tp1"):
+                            c["blocked_by"] = ("entry is filled, but with EXTEND_BEYOND_TP off, BE_TRIGGER_R=0 and no "
+                                               "partial exit there is nothing for the watcher to manage — _trail_register declines it")
+                        else:
+                            c["would_register"] = True
+                            out["would_register"].append(r["id"])
+                    else:
+                        c["blocked_by"] = f"entry order status is '{st}' with {cum} filled — resync only adopts filled entries"
+            entry["candidates"].append(c)
+        out["per_symbol"].append(entry)
+
+    live = set(out["snapshot"]["live_positions"])
+    rows_by_symbol = {r["symbol"] for r in rows}
+    orphan_positions = sorted(live - rows_by_symbol - {v["symbol"] for v in tracked.values()})
+    if orphan_positions:
+        out["verdict"].append("these symbols have a LIVE POSITION on Bybit but no open journal row, so the resync "
+                              "has nothing to adopt them from — the journal row was closed or never created: "
+                              + ", ".join(orphan_positions))
+    if not rows:
+        out["verdict"].append("there are NO journal rows with status='open' and an order_id — nothing to adopt")
+    if not out["verdict"]:
+        out["verdict"].append("nothing is blocking the resync at the moment this ran" if out["would_register"]
+                              else "every open row is accounted for; see per_symbol for the per-row reason")
+    return jsonify(out), 200
+
+
 @app.route("/debug/trail")
 def debug_trail():
     """Show current trail watcher state."""
@@ -9430,6 +9551,34 @@ def _tp1_maintain(order_id, orders_snapshot=None):
         log.warning(f"TP1 maintain failed for {order_id}: {e}")
 
 
+_RESYNC_OPEN_ROWS_SQL = ("SELECT id, order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, "
+                         "realized_pnl_partial, exit_tp1_price, source FROM trades "
+                         "WHERE status='open' AND order_id IS NOT NULL ORDER BY id DESC")
+
+
+def _resync_eligible(r):
+    """Can this journal row be adopted by the trail watcher? Returns (ok, reason). Shared by the live resync and
+    /debug/resync so the diagnostic can never disagree with what actually runs."""
+    oid = str(r.get("order_id") or "")
+    if r.get("source") == "manual":
+        return False, "source is 'manual'"
+    if oid.startswith(("bybit_native_", "manual_")):
+        return False, f"order_id '{oid[:24]}' is not a bot order"
+    try:
+        entry, sl = float(r.get("entry") or 0), float(r.get("sl") or 0)
+    except (TypeError, ValueError):
+        return False, "entry/sl are not numbers"
+    if entry <= 0 or sl <= 0:
+        return False, f"entry={entry} sl={sl} must both be > 0"
+    if entry == sl:
+        return False, "entry equals sl (zero risk)"
+    return True, ""
+
+
+def _eligible(r):
+    return _resync_eligible(r)[0]
+
+
 def _trail_resync():
     """Self-healing: (1) register journal rows that are open, whose entry order has FILLED, and which the trail
     watcher is not tracking (missed WS fill event, startup recovery failure, ...); (2) mark trackers whose entry has
@@ -9447,8 +9596,7 @@ def _trail_resync():
         conn = get_db()
         try:
             with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
-                cur.execute("SELECT id, order_id, symbol, side, entry, sl, tp1, tp1_pct, partial_done, realized_pnl_partial, "
-                            "exit_tp1_price, source FROM trades WHERE status='open' AND order_id IS NOT NULL ORDER BY id DESC")
+                cur.execute(_RESYNC_OPEN_ROWS_SQL)
                 rows = [dict(r) for r in cur.fetchall()]
             conn.commit()                 # no transaction is held open during the Bybit calls below
         finally:
@@ -9456,15 +9604,6 @@ def _trail_resync():
     except Exception as e:
         log.warning(f"Trail resync: could not read open rows: {e}")
         return
-
-    def _eligible(r):
-        oid = str(r.get("order_id") or "")
-        if r.get("source") == "manual" or oid.startswith(("bybit_native_", "manual_")):
-            return False
-        try:
-            return float(r.get("entry") or 0) > 0 and float(r.get("sl") or 0) > 0 and float(r["entry"]) != float(r["sl"])
-        except (TypeError, ValueError):
-            return False
 
     with _trail_lock:
         tracked = {k: dict(v) for k, v in _trail_state.items()}
