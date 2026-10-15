@@ -231,7 +231,7 @@ var SHOW_SKIPPED   = false;
 // Render table headers
 document.getElementById('thead-row').innerHTML = [
   '#','Symbol','Side','TF','Status','Qty','Entry','Exit TP1','Exit TP','SL','TP',
-  'PnL','PnL%','R','Outcome','Source','Variant','Size','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
+  'PnL','PnL%','R','Outcome','Source','Variant','Size','Age','Impulse','Struct','KL','KL Dist','EMA','Opened','Closed','Notes','My Notes','Links'
 ].map(function(h){ return '<th>'+h+'</th>'; }).join('');
 
 // Helpers
@@ -368,7 +368,7 @@ function renderTrades(trades){
     var num = visible.length - i;
     if(t.status === 'note'){
       rows += '<tr class="note-row">'
-        + '<td colspan="27"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
+        + '<td colspan="28"> ' + num + '  ' + utcToLocal(t.opened_at||'') + ' — '
         + '<span class="note-row-text" data-id="'+t.id+'" style="cursor:pointer;border-bottom:1px dashed rgba(96,165,250,0.4)">' + esc(t.notes||'') + '</span>'
         + '<span class="note-row-del" data-id="'+t.id+'" style="margin-left:10px;color:var(--red);cursor:pointer;font-size:11px;opacity:0.5" title="Delete note">✕</span>'
         + '</td></tr>';
@@ -395,11 +395,14 @@ function renderTrades(trades){
     var klNear         = notesObj.klNear;
     var klDistAtr      = notesObj.klDistAtr;
     var emaOk          = notesObj.emaOk;
+    // Zone age in bars at the moment the signal fired (S&D indicator sd-1.5+). Older trades have no value.
+    var zoneAgeBars    = notesObj.zoneAgeBars;
     // Size column is shared: OB indicator sends obSizeAtr (x ATR), S&D indicator sends zoneSizePct (% of price).
     var sizeParts = [];
     if (obSizeAtr   != null && !isNaN(obSizeAtr))   sizeParts.push(parseFloat(obSizeAtr).toFixed(2)+'x');
     if (zoneSizePct != null && !isNaN(zoneSizePct)) sizeParts.push(parseFloat(zoneSizePct).toFixed(2)+'%');
     var obSizeStr   = sizeParts.length ? sizeParts.join(' · ') : '—';
+    var ageStr      = (zoneAgeBars  != null && !isNaN(zoneAgeBars))  ? parseInt(zoneAgeBars,10)+'b' : '—';
     var impulseStr  = (impulseActual!= null && !isNaN(impulseActual))? parseFloat(impulseActual).toFixed(2)+'x': '—';
     var klDistStr   = (klDistAtr    != null && !isNaN(klDistAtr))    ? parseFloat(klDistAtr).toFixed(2)+'x'    : '—';
     var structHtml  = structureOk===true ? '<span style="color:var(--green)">✓</span>' : structureOk===false ? '<span style="color:var(--red)">✗</span>' : '—';
@@ -438,6 +441,7 @@ function renderTrades(trades){
       + '<td class="dim">'+esc(t.source||'—')+'</td>'
       + '<td class="dim">'+esc(t.variant||'—')+'</td>'
       + '<td class="dim">'+obSizeStr+'</td>'
+      + '<td class="dim">'+ageStr+'</td>'
       + '<td class="dim">'+impulseStr+'</td>'
       + '<td>'+structHtml+'</td>'
       + '<td>'+klHtml+'</td>'
@@ -2520,6 +2524,7 @@ def webhook():
                                      "entryOffset":       data.get("entryOffset"),
                                      "obSizeAtr":         data.get("obSizeAtr"),
                                      "zoneSizePct":       data.get("zoneSizePct"),
+                                     "zoneAgeBars":       data.get("zoneAgeBars"),
                                      "impulseRatioActual":data.get("impulseRatioActual"),
                                      "structureOk":       data.get("structureOk"),
                                      "klNear":            data.get("klNear"),
@@ -7675,6 +7680,14 @@ function summarise(){
       h+='<table style="margin-bottom:12px"><tr><th>Avg score (1\\u20135)</th><th>Winners</th><th>Losers</th></tr>';
       keys.forEach(function(k){ h+='<tr><td>'+k.replace(/_/g,' ')+'</td><td>'+(w[k]==null?'\\u2014':w[k])+'</td><td>'+(l[k]==null?'\\u2014':l[k])+'</td></tr>'; });
       h+='</table>';
+      if(j.stats.zone_age && j.stats.zone_age.length){
+        h+='<table style="margin-bottom:12px"><tr><th>Zone age at entry</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
+        j.stats.zone_age.forEach(function(a){
+          h+='<tr><td>'+esc(a.bucket)+'</td><td>'+a.n+(a.n<5?' <span class="dim">(small)</span>':'')+'</td><td>'+(a.win_rate==null?'\\u2014':a.win_rate+'%')+'</td><td class="'+(a.total_r>=0?'green':'red')+'">'+(a.total_r==null?'\\u2014':fmtR(a.total_r))+'</td><td>'+(a.avg_r==null?'\\u2014':fmtR(a.avg_r))+'</td></tr>';
+        });
+        h+='</table>';
+        if(j.stats.zone_age_missing) h+='<div class="muted" style="margin-bottom:10px">'+j.stats.zone_age_missing+' trade(s) predate the zone-age field and are not in the table above.</div>';
+      }
       if(j.stats.tags.length){
         h+='<table><tr><th>Tag</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
         j.stats.tags.forEach(function(t){
@@ -7971,7 +7984,7 @@ def _review_trade_text(t):
         lines.append(f"partial exit: {f(t.get('tp1_pct'))}% at {f(t.get('tp1'))}")
     lines.append(f"result: outcome={f(t.get('outcome'))}   pnl={f(t.get('pnl'))} USDT   R={'n/a' if r is None else f'{r:+.2f}'}   exit price={f(t.get('exit_price'))}")
     lines.append(f"opened (UTC): {f(t.get('opened_at'))}   closed (UTC): {f(t.get('closed_at'))}")
-    ind = {k: notes.get(k) for k in ("zoneSizePct", "obSizeAtr", "impulseRatioActual", "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
+    ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneAgeBars", "obSizeAtr", "impulseRatioActual", "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
     if ind:
         lines.append("indicator readings at signal time: " + ", ".join(f"{k}={v}" for k, v in ind.items()))
     if t.get("user_notes"):
@@ -8265,7 +8278,17 @@ def _review_stats(records):
         return out
     wins = [x for x in records if (x["pnl"] or 0) > 0]
     losses = [x for x in records if (x["pnl"] or 0) <= 0]
-    return {"overall": agg(records), "tags": tag_rows, "trend": trend_rows,
+    # Zone age at entry, in bars, bucketed. Computed from the stored alert field, not from the model's
+    # reading of the chart — this is the evidence for or against an age cut-off.
+    age_rows = []
+    buckets = [(0, 10, "0-10 bars"), (11, 25, "11-25"), (26, 50, "26-50"), (51, 100, "51-100"), (101, 10 ** 9, "100+")]
+    for lo, hi, label in buckets:
+        rs = [x for x in records if x.get("zone_age") is not None and lo <= x["zone_age"] <= hi]
+        if rs:
+            age_rows.append({"bucket": label, **agg(rs)})
+    n_no_age = sum(1 for x in records if x.get("zone_age") is None)
+    return {"overall": agg(records), "tags": tag_rows, "trend": trend_rows, "zone_age": age_rows,
+            "zone_age_missing": n_no_age,
             "avg_scores": {"winners": avg_scores(wins), "losers": avg_scores(losses)}}
 
 
@@ -8288,8 +8311,14 @@ def review_summary():
             t, rv = trades.get(tid), reviews.get(tid)
             if not t or not rv or rv["status"] != "ok" or not rv["review"] or not rv["review"].get("image_usable", True):
                 continue
+            try:
+                _n = json.loads(t.get("notes") or "{}")
+                _age = int(_n["zoneAgeBars"]) if isinstance(_n, dict) and _n.get("zoneAgeBars") is not None else None
+            except (ValueError, TypeError):
+                _age = None
             records.append({"id": tid, "symbol": t.get("symbol"), "side": t.get("side"), "variant": t.get("variant"),
-                            "outcome": t.get("outcome"), "pnl": float(t.get("pnl") or 0), "r": _trade_r(t), "review": rv["review"]})
+                            "outcome": t.get("outcome"), "pnl": float(t.get("pnl") or 0), "r": _trade_r(t),
+                            "zone_age": _age, "review": rv["review"]})
         stats = _review_stats(records) if records else None
         out = {"status": "ok", "n_requested": len(ids), "n_used": len(records), "stats": stats, "text": "",
                "truncated": len(all_ids) - len(ids)}
@@ -8302,13 +8331,14 @@ def review_summary():
             lines.append(json.dumps({
                 "id": x["id"], "symbol": x["symbol"], "dir": "long" if x["side"] == "Buy" else "short", "variant": x["variant"],
                 "outcome": x["outcome"], "R": None if x["r"] is None else round(x["r"], 2), "pnl": round(x["pnl"], 2),
-                "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"],
+                "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"], "zone_age_bars": x.get("zone_age"),
                 "scores": [rv["zone_quality"]["score"], rv["entry_quality"]["score"], rv["stop_placement"]["score"], rv["target_realism"]["score"]],
                 "tags": rv["tags"], "mistakes": rv["mistakes"], "driver": rv["outcome_driver"]}))
         system = ("You analyse a set of per-trade chart reviews for an automated supply & demand zone strategy. Be blunt and specific. "
                   "Every claim must cite counts from the statistics (for example '3 of 4'). Do not draw conclusions from buckets with fewer than 5 trades; "
                   "say they are too small instead. The per-trade reviews were produced by a vision model from one screenshot each, so they are subjective, "
                   "and screenshot timing varies (a pre-entry screenshot cannot explain an outcome). Do not flatter and do not give generic trading advice. "
+                  "zone_age_bars is how many bars old the zone was when the trade fired, taken from the indicator, not from the image \u2014 treat the zone_age buckets in the statistics as the only reliable evidence about stale zones. "
                   "Write plain text with exactly these four sections, each starting with its heading on its own line: "
                   "WHAT SEPARATES WINNERS FROM LOSERS / RECURRING MISTAKES (cite trade ids) / WHAT TO TEST NEXT (concrete indicator settings or filters, each labelled as a hypothesis) / HOW MUCH TO TRUST THIS.")
         user = ("STATISTICS (computed in code, not by a model):\n" + json.dumps(stats) +
