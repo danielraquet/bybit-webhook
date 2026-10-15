@@ -134,6 +134,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <a href="/journal" style="color:var(--blue);text-decoration:none">Journal</a>
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
   <a href="/journal/review" style="color:var(--dim);text-decoration:none">Review</a>
+  <a href="/journal/zone-age" style="color:var(--dim);text-decoration:none">Zone Age</a>
   <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
   <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
   <a href="/backtest/configs" style="color:var(--dim);text-decoration:none">Backtest</a>
@@ -7513,7 +7514,7 @@ pre.summary{white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:
 </head>
 <body>
 <div class="nav">
-  <a href="/journal">Journal</a><a href="/analysis">Analysis</a><a href="/recommendations">Recommendations</a><a href="/status">Status</a>
+  <a href="/journal">Journal</a><a href="/journal/zone-age">Zone Age</a><a href="/analysis">Analysis</a><a href="/recommendations">Recommendations</a><a href="/status">Status</a>
 </div>
 <h1>Screenshot Review</h1>
 <div class="sub">Reads the chart screenshots linked in the journal's Links column against each trade's record, then summarises what the selection has in common. Costs money per trade &mdash; see the estimate before running.</div>
@@ -8347,6 +8348,338 @@ def review_summary():
         return jsonify(out), 200
     except Exception as e:
         log.error(f"Review summary error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+
+
+ZONE_AGE_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zone Age Check</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--dim:#6b7280;--blue:#60a5fa;--green:#4ade80;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:16px}
+h1{font-size:18px;font-weight:500;margin-bottom:2px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px;max-width:900px;line-height:1.6}
+a{color:var(--blue);text-decoration:none}
+.nav{display:flex;gap:12px;margin-bottom:12px;font-size:12px}
+.nav a{color:var(--dim)}
+.panel{background:var(--card);border:0.5px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.lbl{font-size:11px;color:var(--dim)}
+input,select{background:#0f1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit}
+button{background:#232735;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit}
+button:hover{border-color:var(--blue);color:var(--blue)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:400;font-size:11px;padding:6px 8px 6px 0;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:5px 8px 5px 0;border-bottom:1px solid rgba(42,45,58,0.5);vertical-align:middle}
+tr.done{background:rgba(74,222,128,0.04)}
+.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.dim{color:var(--dim)}
+.age-in{width:64px}
+.src{font-size:10px;padding:1px 5px;border-radius:8px;background:rgba(96,165,250,0.12);color:var(--blue);margin-left:5px}
+.src.manual{background:rgba(251,191,36,0.14);color:var(--amber)}
+.bucket{display:flex;gap:16px;flex-wrap:wrap;margin-top:10px}
+.bcard{background:#0f1117;border:1px solid var(--border);border-radius:6px;padding:8px 12px;min-width:120px}
+.bcard .b-l{font-size:10px;color:var(--dim)}
+.bcard .b-v{font-size:15px;font-weight:500}
+.hint{font-size:11px;color:var(--dim);line-height:1.6}
+.ok-flash{outline:1px solid var(--green)}
+</style>
+</head>
+<body>
+<div class="nav"><a href="/journal">Journal</a><a href="/journal/review">Screenshot Review</a><a href="/analysis">Analysis</a><a href="/status">Status</a></div>
+<h1>Zone Age Check</h1>
+<div class="sub">
+Trades taken before indicator version sd-1.5 carry no zone age, because nothing sent one. The indicator draws its
+base-candle highlight permanently and redraws it over history, so each zone's origin is still visible on your chart.
+Open the chart, count the bars from the highlight to the entry, and type it here &mdash; it is written into the same
+field the indicator now fills, so these trades join the same age statistics as new ones.
+</div>
+
+<div class="panel">
+  <div class="row">
+    <span class="lbl">Window</span>
+    <select id="days"><option value="14">last 14 days</option><option value="7">last 7 days</option><option value="30">last 30 days</option><option value="90">last 90 days</option></select>
+    <span class="lbl">Show</span>
+    <select id="filter"><option value="sl">losers only</option><option value="missing">missing an age</option><option value="all">all closed</option></select>
+    <span class="lbl">Symbol</span><select id="symbol"><option value="">All</option></select>
+    <button id="reload">Reload</button>
+    <span class="lbl" id="count"></span>
+  </div>
+  <div class="bucket" id="buckets"></div>
+</div>
+
+<div class="panel hint">
+  <b>How to read the age off a chart.</b> Open the symbol at the trade's timeframe, go to the entry time, then look
+  left for the nearest coloured base-candle highlight on the correct side (demand below for a long, supply above for a
+  short) whose price band matches the trade's entry and stop. Count candles from that highlight to the entry candle.
+  Enter the number and press Tab or Enter &mdash; it saves immediately. Leave it blank if you cannot identify the zone
+  with confidence; a guess is worse than a gap.
+</div>
+
+<div class="panel" style="padding:12px 14px 4px">
+  <table>
+    <thead><tr><th>#</th><th>Opened (UTC)</th><th>Symbol</th><th>Side</th><th>TF</th><th>Outcome</th><th>R</th><th>Entry</th><th>SL</th><th>Zone size</th><th>Chart</th><th>Zone age (bars)</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+<div id="msg" class="hint" style="margin-top:8px"></div>
+
+<script>
+var ALL=[], SAVING={};
+function el(id){ return document.getElementById(id); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function fmtR(v){ var x=Math.round(v*100)/100; return (x>=0?'+':'')+x.toFixed(2)+'R'; }
+
+function load(){
+  el('msg').textContent='Loading\\u2026';
+  fetch('/journal/zone-age/data?days='+el('days').value).then(function(r){return r.json();}).then(function(j){
+    if(j.status!=='ok'){ el('msg').innerHTML='<span class="red">'+esc(j.message||'failed')+'</span>'; return; }
+    ALL=j.trades||[];
+    var ss={}; ALL.forEach(function(t){ if(t.symbol) ss[t.symbol]=1; });
+    var sel=el('symbol'), cur=sel.value;
+    sel.innerHTML='<option value="">All</option>';
+    Object.keys(ss).sort().forEach(function(s){ var o=document.createElement('option'); o.value=s; o.textContent=s; sel.appendChild(o); });
+    sel.value=cur;
+    el('msg').textContent='';
+    render();
+  }).catch(function(e){ el('msg').innerHTML='<span class="red">'+esc(e)+'</span>'; });
+}
+function shown(){
+  var f=el('filter').value, sy=el('symbol').value;
+  return ALL.filter(function(t){
+    if(sy && t.symbol!==sy) return false;
+    if(f==='sl')      return (t.pnl||0)<=0;
+    if(f==='missing') return t.zone_age==null;
+    return true;
+  });
+}
+function buckets(list){
+  var defs=[[0,10,'0-10'],[11,25,'11-25'],[26,50,'26-50'],[51,100,'51-100'],[101,1e9,'100+']];
+  var withAge=list.filter(function(t){ return t.zone_age!=null; });
+  var h='';
+  if(!withAge.length){ h='<div class="hint">No ages recorded yet in this selection.</div>'; }
+  else defs.forEach(function(d){
+    var rs=withAge.filter(function(t){ return t.zone_age>=d[0] && t.zone_age<=d[1]; });
+    if(!rs.length) return;
+    var wins=rs.filter(function(t){ return (t.pnl||0)>0; }).length;
+    var rr=rs.filter(function(t){ return t.r!=null; }).map(function(t){ return t.r; });
+    var tot=rr.reduce(function(a,b){ return a+b; },0);
+    h+='<div class="bcard"><div class="b-l">'+d[2]+' bars</div><div class="b-v '+(tot>=0?'green':'red')+'">'+(rr.length?fmtR(tot):'\\u2014')+'</div>'
+      +'<div class="b-l">'+rs.length+' trades \\u00b7 '+Math.round(wins/rs.length*100)+'% WR'+(rs.length<5?' (small)':'')+'</div></div>';
+  });
+  var missing=list.length-withAge.length;
+  if(missing) h+='<div class="bcard"><div class="b-l">no age yet</div><div class="b-v dim">'+missing+'</div><div class="b-l">of '+list.length+' trades</div></div>';
+  el('buckets').innerHTML=h;
+}
+function render(){
+  var list=shown(), h='';
+  list.forEach(function(t){
+    var links=(t.media||'').match(/https?:\\/\\/[^\\s|,;<>"']+/g)||[];
+    h+='<tr class="'+(t.zone_age!=null?'done':'')+'">'
+      +'<td class="dim">'+t.id+'</td>'
+      +'<td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td>'
+      +'<td>'+esc(t.symbol)+'</td>'
+      +'<td class="'+(t.side==='Buy'?'green':'red')+'">'+(t.side==='Buy'?'LONG':'SHORT')+'</td>'
+      +'<td class="dim">'+esc(t.timeframe)+'</td>'
+      +'<td class="'+((t.pnl||0)>0?'green':'red')+'">'+esc(t.outcome||'')+'</td>'
+      +'<td class="'+((t.r||0)>=0?'green':'red')+'">'+(t.r==null?'\\u2014':fmtR(t.r))+'</td>'
+      +'<td class="dim">'+t.entry+'</td><td class="dim">'+t.sl+'</td>'
+      +'<td class="dim">'+(t.zone_size_pct==null?'\\u2014':parseFloat(t.zone_size_pct).toFixed(2)+'%')+'</td>'
+      +'<td>'+(links.length?links.map(function(u,i){ return '<a href="'+esc(u)+'" target="_blank" rel="noopener">chart'+(links.length>1?(' '+(i+1)):'')+'</a>'; }).join(' '):'<span class="dim">\\u2014</span>')+'</td>'
+      +'<td><input class="age-in" type="number" min="0" step="1" data-id="'+t.id+'" value="'+(t.zone_age==null?'':t.zone_age)+'">'
+      +(t.zone_age!=null?('<span class="src'+(t.zone_age_source==='manual'?' manual':'')+'">'+esc(t.zone_age_source||'')+'</span>'):'')
+      +'</td></tr>';
+  });
+  el('rows').innerHTML=h||'<tr><td colspan="12" class="dim" style="padding:10px 0">Nothing matches this filter.</td></tr>';
+  el('count').textContent=list.length+' trades';
+  buckets(list);
+}
+function save(input){
+  var id=parseInt(input.dataset.id,10), raw=input.value.trim();
+  if(SAVING[id]) return;
+  var t=ALL.filter(function(x){ return x.id===id; })[0];
+  if(t && String(t.zone_age==null?'':t.zone_age)===raw) return;     // unchanged
+  SAVING[id]=true;
+  var body={id:id, age: raw===''?null:parseInt(raw,10)};
+  var go=function(b){
+    return fetch('/journal/zone-age/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})
+      .then(function(r){ return r.json().then(function(j){ j._code=r.status; return j; }); });
+  };
+  go(body).then(function(j){
+    if(j.needs_overwrite){
+      if(confirm(j.message+'.\\n\\nReplace it with '+body.age+'?')) return go(Object.assign({overwrite:true},body));
+      input.value = t&&t.zone_age!=null ? t.zone_age : '';
+      return null;
+    }
+    return j;
+  }).then(function(j){
+    SAVING[id]=false;
+    if(!j) return;
+    if(j.status!=='ok'){ el('msg').innerHTML='<span class="red">Trade '+id+': '+esc(j.message||'failed')+'</span>'; return; }
+    el('msg').textContent='';
+    if(t){ t.zone_age=j.age; t.zone_age_source = j.age==null ? null : 'manual'; }
+    input.classList.add('ok-flash');
+    setTimeout(function(){ input.classList.remove('ok-flash'); }, 600);
+    buckets(shown());
+  }).catch(function(e){ SAVING[id]=false; el('msg').innerHTML='<span class="red">'+esc(e)+'</span>'; });
+}
+document.addEventListener('change', function(e){ if(e.target.classList.contains('age-in')) save(e.target); });
+document.addEventListener('keydown', function(e){ if(e.key==='Enter' && e.target.classList.contains('age-in')){ e.target.blur(); } });
+el('days').addEventListener('change', load);
+el('reload').addEventListener('click', load);
+el('filter').addEventListener('change', render);
+el('symbol').addEventListener('change', render);
+load();
+</script>
+</body>
+</html>
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ZONE AGE CHECK — retro-fills zoneAgeBars for trades taken before sd-1.5, which never sent it.
+# The indicator draws its base-candle highlight permanently and redraws it over history, so the zone's
+# origin bar is still visible on the chart: this page lists the trades, you read the bar count off the
+# chart, and the number is written into the SAME notes field the indicator now fills, so old and new
+# trades land in one dataset. Manually entered values are marked zoneAgeSource="manual".
+#   /journal/zone-age                  the page
+#   GET  /journal/zone-age/data        candidate trades for a date range
+#   POST /journal/zone-age/set         store one trade's age (or clear it)
+# ═══════════════════════════════════════════════════════════════════════════════
+ZONE_AGE_MAX = 100000
+
+
+def _notes_dict(raw):
+    """The notes column is indicator JSON for bot trades, but can be plain text (manual rows, skip reasons)."""
+    try:
+        d = json.loads(raw or "{}")
+        return d if isinstance(d, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _zone_age_of(raw):
+    d = _notes_dict(raw)
+    v = d.get("zoneAgeBars")
+    if v is None:
+        return None, None
+    try:
+        return int(v), (d.get("zoneAgeSource") or "indicator")
+    except (TypeError, ValueError):
+        return None, None
+
+
+@app.route("/journal/zone-age")
+def zone_age_page():
+    from flask import Response
+    return Response(ZONE_AGE_HTML, mimetype="text/html")
+
+
+@app.route("/journal/zone-age/data", methods=["GET"])
+def zone_age_data():
+    """Closed trades in a window, with whatever zone age is on record. Newest first."""
+    import psycopg2.extras as _pgr
+    try:
+        days = request.args.get("days", "14")
+        try:
+            days = max(1, min(365, int(days)))
+        except ValueError:
+            days = 14
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+                cur.execute("""SELECT id, symbol, side, status, outcome, qty, entry, sl, tp, exit_price, pnl,
+                                      opened_at, closed_at, timeframe, variant, source, notes, media
+                               FROM trades
+                               WHERE status='closed' AND outcome IS NOT NULL
+                                 AND opened_at::timestamp >= (NOW() AT TIME ZONE 'UTC') - make_interval(days => %s)
+                               ORDER BY opened_at DESC LIMIT 500""", (days,))
+                rows = [dict(r) for r in cur.fetchall()]
+            conn.commit()
+        finally:
+            conn.close()
+        out = []
+        for r in rows:
+            age, src = _zone_age_of(r.get("notes"))
+            n = _notes_dict(r.get("notes"))
+            out.append({
+                "id": r["id"], "symbol": r["symbol"], "side": r["side"], "outcome": r["outcome"],
+                "entry": float(r["entry"] or 0), "sl": float(r["sl"] or 0), "tp": float(r["tp"] or 0),
+                "exit_price": float(r["exit_price"]) if r.get("exit_price") is not None else None,
+                "pnl": float(r["pnl"] or 0), "r": _trade_r(r),
+                "opened_at": str(r.get("opened_at") or ""), "closed_at": str(r.get("closed_at") or ""),
+                "timeframe": r.get("timeframe") or "", "variant": r.get("variant") or "",
+                "source": r.get("source") or "", "media": r.get("media") or "",
+                "zone_age": age, "zone_age_source": src,
+                "zone_size_pct": n.get("zoneSizePct"),
+            })
+        return jsonify({"status": "ok", "trades": out, "days": days}), 200
+    except Exception as e:
+        log.error(f"Zone-age data error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/journal/zone-age/set", methods=["POST"])
+def zone_age_set():
+    """Write one trade's zone age into its notes JSON. Send age=null to clear it again.
+    Read-modify-write on a single row: the notes column also carries the indicator's own fields, which
+    must survive untouched."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            trade_id = int(body.get("id", 0))
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "bad trade id"}), 400
+        raw_age = body.get("age", None)
+        if raw_age in (None, ""):
+            age = None
+        else:
+            try:
+                age = int(raw_age)
+            except (TypeError, ValueError):
+                return jsonify({"status": "error", "message": "age must be a whole number of bars"}), 400
+            if not (0 <= age <= ZONE_AGE_MAX):
+                return jsonify({"status": "error", "message": f"age must be between 0 and {ZONE_AGE_MAX} bars"}), 400
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout = '3s'")
+                cur.execute("SELECT notes FROM trades WHERE id=%s FOR UPDATE", (trade_id,))
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return jsonify({"status": "error", "message": f"trade {trade_id} not found"}), 404
+                raw = row[0]
+                d = _notes_dict(raw)
+                if not d and (raw or "").strip():
+                    # Plain-text notes (a manual row, or a skip reason) — refuse rather than destroy them.
+                    conn.rollback()
+                    return jsonify({"status": "error", "message": "this trade's notes are free text, not indicator data — not touching them"}), 400
+                existing = d.get("zoneAgeBars")
+                existing_src = d.get("zoneAgeSource") or ("indicator" if existing is not None else None)
+                if age is None:
+                    d.pop("zoneAgeBars", None)
+                    d.pop("zoneAgeSource", None)
+                else:
+                    if existing is not None and existing_src == "indicator" and not body.get("overwrite"):
+                        conn.rollback()
+                        return jsonify({"status": "error", "needs_overwrite": True,
+                                        "message": f"the indicator already recorded {existing} bars for this trade"}), 409
+                    d["zoneAgeBars"] = age
+                    d["zoneAgeSource"] = "manual"
+                cur.execute("UPDATE trades SET notes=%s WHERE id=%s", (json.dumps(d), trade_id))
+            conn.commit()
+        finally:
+            conn.close()
+        log.info(f"Zone age for trade {trade_id} set to {age}")
+        return jsonify({"status": "ok", "id": trade_id, "age": age}), 200
+    except Exception as e:
+        log.error(f"Zone-age set error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
