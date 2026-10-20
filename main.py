@@ -152,8 +152,11 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <button class="btn filter-status" data-status="open">Open</button>
   <span style="margin-left:8px;color:var(--dim);font-size:11px">Outcome:</span>
   <button class="btn filter-outcome" data-outcome="all" style="border-color:var(--blue);color:var(--blue)">All</button>
-  <button class="btn filter-outcome" data-outcome="tp">TP</button>
-  <button class="btn filter-outcome" data-outcome="sl">SL</button>
+  <button class="btn filter-outcome" data-outcome="tp" title="Trades that finished at a profit target — includes tp1_tp2 (partial taken, runner reached target)">TP</button>
+  <button class="btn filter-outcome" data-outcome="sl" title="Trades that finished at the stop — includes tp1_sl (partial taken, runner stopped out), which can still be net profitable">SL</button>
+  <button class="btn filter-outcome" data-outcome="tp1" title="Every trade that took a partial exit at TP1, whatever the runner did">Partial</button>
+  <button class="btn filter-outcome" data-outcome="win" title="Net profitable, by PnL — the honest 'did this trade make money'. A tp1_sl trade with a big enough partial lands here.">Win</button>
+  <button class="btn filter-outcome" data-outcome="loss" title="Net zero or negative, by PnL, whatever the exit label says">Loss</button>
   <label style="margin-left:8px;font-size:11px;color:var(--dim);cursor:pointer">
     <input type="checkbox" id="show-skipped" style="margin-right:4px">Skipped
   </label>
@@ -361,7 +364,24 @@ function renderTrades(trades){
   var rows = '';
   var visible = trades.filter(function(t){
     if(t.status === 'skipped' && !SHOW_SKIPPED) return false;
-    if(OUTCOME_FILTER !== 'all' && t.status !== 'note' && t.outcome !== OUTCOME_FILTER) return false;
+    // Outcome families, not exact strings. A two-stage trade is labelled tp1_tp2 or tp1_sl, so an exact
+    // match on 'tp' silently hid every partial-exit trade from the TP filter.
+    if(OUTCOME_FILTER !== 'all' && t.status !== 'note'){
+      var oc = String(t.outcome || '');
+      var hit;
+      // TP / SL describe WHERE the trade finished. Win / Loss describe WHETHER IT MADE MONEY, which is not
+      // the same question once partial exits exist: with a 75% partial at 2.5R, a tp1_sl trade nets about
+      // +1.9R even though its last leg hit the stop. Classifying by PnL stays true if PARTIAL_R or
+      // PARTIAL_PCT is ever changed; classifying by label would not.
+      if      (OUTCOME_FILTER === 'tp')   hit = (oc === 'tp' || oc === 'tp1_tp2');
+      else if (OUTCOME_FILTER === 'sl')   hit = (oc === 'sl' || oc === 'tp1_sl');
+      else if (OUTCOME_FILTER === 'tp1')  hit = (oc.indexOf('tp1_') === 0);
+      // Only closed trades have a settled PnL — an open trade sits at 0 and must not be counted a loss.
+      else if (OUTCOME_FILTER === 'win')  hit = (t.status === 'closed' && (parseFloat(t.pnl) || 0) > 0);
+      else if (OUTCOME_FILTER === 'loss') hit = (t.status === 'closed' && (parseFloat(t.pnl) || 0) <= 0);
+      else                                hit = (oc === OUTCOME_FILTER);
+      if(!hit) return false;
+    }
     return true;
   });
   for(var i=0; i<visible.length; i++){
@@ -4631,7 +4651,9 @@ ANALYSIS_HTML = """
   tl.forEach(function(d, i) {
     wCtx.beginPath();
     wCtx.arc(wrX(i), wrY(d.roll_wr), 3, 0, Math.PI * 2);
-    wCtx.fillStyle = d.outcome === 'tp' ? '#4caf50' : '#ef5350';
+    // Colour by the PnL sign, not the outcome label: the win-rate line on this same chart is computed
+    // from PnL, so painting a profitable tp1_tp2 trade as a red LOSS made the chart contradict itself.
+    wCtx.fillStyle = (d.pnl_r || 0) > 0 ? '#4caf50' : '#ef5350';
     wCtx.fill();
   });
 
@@ -4656,7 +4678,8 @@ ANALYSIS_HTML = """
     var d = data[idx];
     if (!d) return;
     tooltip.innerHTML = '<strong>#' + d.i + ' — ' + d.date + '</strong><br>'
-      + d.symbol + ' ' + d.side + ' <span style="color:' + (d.outcome==='tp'?'#4caf50':'#ef5350') + '">' + (d.outcome==='tp'?'WIN':'LOSS') + '</span>'
+      + d.symbol + ' ' + d.side + ' <span style="color:' + ((d.pnl_r||0)>0?'#4caf50':'#ef5350') + '">' + ((d.pnl_r||0)>0?'WIN':'LOSS') + '</span>'
+      + (d.outcome ? ' <span style="color:#888">' + String(d.outcome).toUpperCase().replace(/_/g,'-') + '</span>' : '')
       + (d.variant ? ' &nbsp; <span style="color:#ab47bc">v' + d.variant + '</span>' : '') + '<br>'
       + 'Roll WR: <strong>' + d.roll_wr + '%</strong> &nbsp; Cum WR: ' + d.cum_wr + '%<br>'
       + 'PnL: <span style="color:' + (d.pnl_r>=0?'#4caf50':'#ef5350') + '">' + (d.pnl_r>=0?'+':'') + d.pnl_r + '</span>'
