@@ -2660,6 +2660,11 @@ def webhook():
                                      "obSizeAtr":         data.get("obSizeAtr"),
                                      "zoneSizePct":       data.get("zoneSizePct"),
                                      "zoneAgeBars":       data.get("zoneAgeBars"),
+                                     "zoneScore":         data.get("zoneScore"),
+                                     "zoneSweep":         data.get("zoneSweep"),
+                                     "zoneInducement":    data.get("zoneInducement"),
+                                     "structure":         data.get("structure"),
+                                     "structureAligned":  data.get("structureAligned"),
                                      "impulseRatioActual":data.get("impulseRatioActual"),
                                      "structureOk":       data.get("structureOk"),
                                      "klNear":            data.get("klNear"),
@@ -7953,6 +7958,15 @@ function summarise(){
       h+='<table style="margin-bottom:12px"><tr><th>Avg score (1\\u20135)</th><th>Winners</th><th>Losers</th></tr>';
       keys.forEach(function(k){ h+='<tr><td>'+k.replace(/_/g,' ')+'</td><td>'+(w[k]==null?'\\u2014':w[k])+'</td><td>'+(l[k]==null?'\\u2014':l[k])+'</td></tr>'; });
       h+='</table>';
+      [['structure_align','Structure at entry'],['zone_score','Zone score (indicator rating)']].forEach(function(sec){
+        var rows=j.stats[sec[0]];
+        if(!rows || !rows.length) return;
+        h+='<table style="margin-bottom:12px"><tr><th>'+sec[1]+'</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
+        rows.forEach(function(a){
+          h+='<tr><td>'+esc(a.bucket)+'</td><td>'+a.n+(a.n<5?' <span class="dim">(small)</span>':'')+'</td><td>'+(a.win_rate==null?'\\u2014':a.win_rate+'%')+'</td><td class="'+(a.total_r>=0?'green':'red')+'">'+(a.total_r==null?'\\u2014':fmtR(a.total_r))+'</td><td>'+(a.avg_r==null?'\\u2014':fmtR(a.avg_r))+'</td></tr>';
+        });
+        h+='</table>';
+      });
       if(j.stats.zone_age && j.stats.zone_age.length){
         h+='<table style="margin-bottom:12px"><tr><th>Zone age at entry</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
         j.stats.zone_age.forEach(function(a){
@@ -8257,7 +8271,9 @@ def _review_trade_text(t):
         lines.append(f"partial exit: {f(t.get('tp1_pct'))}% at {f(t.get('tp1'))}")
     lines.append(f"result: outcome={f(t.get('outcome'))}   pnl={f(t.get('pnl'))} USDT   R={'n/a' if r is None else f'{r:+.2f}'}   exit price={f(t.get('exit_price'))}")
     lines.append(f"opened (UTC): {f(t.get('opened_at'))}   closed (UTC): {f(t.get('closed_at'))}")
-    ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneAgeBars", "obSizeAtr", "impulseRatioActual", "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
+    ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneAgeBars", "zoneScore", "zoneSweep", "zoneInducement",
+                                     "structure", "structureAligned", "obSizeAtr", "impulseRatioActual",
+                                     "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
     if ind:
         lines.append("indicator readings at signal time: " + ", ".join(f"{k}={v}" for k, v in ind.items()))
     if t.get("user_notes"):
@@ -8560,8 +8576,21 @@ def _review_stats(records):
         if rs:
             age_rows.append({"bucket": label, **agg(rs)})
     n_no_age = sum(1 for x in records if x.get("zone_age") is None)
+    # Structure alignment at entry, straight from the indicator — the evidence for or against the
+    # "only trade with the trend" filter, before it is switched on.
+    align_rows = []
+    for key, label in ((True, "structure aligned"), (False, "counter-structure")):
+        rs = [x for x in records if x.get("aligned") is key]
+        if rs:
+            align_rows.append({"bucket": label, **agg(rs)})
+    # The indicator's own zone rating, bucketed. Does a higher score actually win more?
+    score_rows = []
+    for lo, hi, label in ((0, 1.999, "< 2.0"), (2.0, 2.999, "2.0-3.0"), (3.0, 3.999, "3.0-4.0"), (4.0, 10 ** 9, "4.0+")):
+        rs = [x for x in records if x.get("zone_score") is not None and lo <= x["zone_score"] <= hi]
+        if rs:
+            score_rows.append({"bucket": label, **agg(rs)})
     return {"overall": agg(records), "tags": tag_rows, "trend": trend_rows, "zone_age": age_rows,
-            "zone_age_missing": n_no_age,
+            "zone_age_missing": n_no_age, "structure_align": align_rows, "zone_score": score_rows,
             "avg_scores": {"winners": avg_scores(wins), "losers": avg_scores(losses)}}
 
 
@@ -8589,9 +8618,15 @@ def review_summary():
                 _age = int(_n["zoneAgeBars"]) if isinstance(_n, dict) and _n.get("zoneAgeBars") is not None else None
             except (ValueError, TypeError):
                 _age = None
+            _aligned = _n.get("structureAligned") if isinstance(_n, dict) else None
+            try:
+                _zscore = float(_n["zoneScore"]) if isinstance(_n, dict) and _n.get("zoneScore") is not None else None
+            except (TypeError, ValueError):
+                _zscore = None
             records.append({"id": tid, "symbol": t.get("symbol"), "side": t.get("side"), "variant": t.get("variant"),
                             "outcome": t.get("outcome"), "pnl": float(t.get("pnl") or 0), "r": _trade_r(t),
-                            "zone_age": _age, "review": rv["review"]})
+                            "zone_age": _age, "aligned": _aligned if isinstance(_aligned, bool) else None,
+                            "zone_score": _zscore, "review": rv["review"]})
         stats = _review_stats(records) if records else None
         out = {"status": "ok", "n_requested": len(ids), "n_used": len(records), "stats": stats, "text": "",
                "truncated": len(all_ids) - len(ids)}
@@ -8604,7 +8639,8 @@ def review_summary():
             lines.append(json.dumps({
                 "id": x["id"], "symbol": x["symbol"], "dir": "long" if x["side"] == "Buy" else "short", "variant": x["variant"],
                 "outcome": x["outcome"], "R": None if x["r"] is None else round(x["r"], 2), "pnl": round(x["pnl"], 2),
-                "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"], "zone_age_bars": x.get("zone_age"),
+                "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"],
+                "zone_age_bars": x.get("zone_age"), "structure_aligned": x.get("aligned"), "zone_score": x.get("zone_score"),
                 "scores": [rv["zone_quality"]["score"], rv["entry_quality"]["score"], rv["stop_placement"]["score"], rv["target_realism"]["score"]],
                 "tags": rv["tags"], "mistakes": rv["mistakes"], "driver": rv["outcome_driver"]}))
         system = ("You analyse a set of per-trade chart reviews for an automated supply & demand zone strategy. Be blunt and specific. "
