@@ -2665,6 +2665,9 @@ def webhook():
                                      "zoneInducement":    data.get("zoneInducement"),
                                      "structure":         data.get("structure"),
                                      "structureAligned":  data.get("structureAligned"),
+                                     "hasImbalance":      data.get("hasImbalance"),
+                                     "imbalanceFillPct":  data.get("imbalanceFillPct"),
+                                     "imbalanceAtr":      data.get("imbalanceAtr"),
                                      "impulseRatioActual":data.get("impulseRatioActual"),
                                      "structureOk":       data.get("structureOk"),
                                      "klNear":            data.get("klNear"),
@@ -7958,7 +7961,7 @@ function summarise(){
       h+='<table style="margin-bottom:12px"><tr><th>Avg score (1\\u20135)</th><th>Winners</th><th>Losers</th></tr>';
       keys.forEach(function(k){ h+='<tr><td>'+k.replace(/_/g,' ')+'</td><td>'+(w[k]==null?'\\u2014':w[k])+'</td><td>'+(l[k]==null?'\\u2014':l[k])+'</td></tr>'; });
       h+='</table>';
-      [['structure_align','Structure at entry'],['zone_score','Zone score (indicator rating)']].forEach(function(sec){
+      [['structure_align','Structure at entry'],['imbalance_fill','Imbalance filled at entry'],['zone_score','Zone score (indicator rating)']].forEach(function(sec){
         var rows=j.stats[sec[0]];
         if(!rows || !rows.length) return;
         h+='<table style="margin-bottom:12px"><tr><th>'+sec[1]+'</th><th>Trades</th><th>WR</th><th>Total R</th><th>Avg R</th></tr>';
@@ -8272,7 +8275,8 @@ def _review_trade_text(t):
     lines.append(f"result: outcome={f(t.get('outcome'))}   pnl={f(t.get('pnl'))} USDT   R={'n/a' if r is None else f'{r:+.2f}'}   exit price={f(t.get('exit_price'))}")
     lines.append(f"opened (UTC): {f(t.get('opened_at'))}   closed (UTC): {f(t.get('closed_at'))}")
     ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneAgeBars", "zoneScore", "zoneSweep", "zoneInducement",
-                                     "structure", "structureAligned", "obSizeAtr", "impulseRatioActual",
+                                     "structure", "structureAligned", "hasImbalance", "imbalanceFillPct",
+                                     "imbalanceAtr", "obSizeAtr", "impulseRatioActual",
                                      "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
     if ind:
         lines.append("indicator readings at signal time: " + ", ".join(f"{k}={v}" for k, v in ind.items()))
@@ -8583,6 +8587,18 @@ def _review_stats(records):
         rs = [x for x in records if x.get("aligned") is key]
         if rs:
             align_rows.append({"bucket": label, **agg(rs)})
+    # How far the zone's imbalance had already been filled at entry. Sent as a NUMBER rather than a
+    # yes/no because the cut-off is the whole question: the gap sits against the zone's near border, so
+    # a "fully filled" test is almost the same test as "already tapped", which is enforced separately.
+    fill_rows = []
+    for lo, hi, label in ((0, 10, "0-10% filled"), (10.01, 33, "10-33%"), (33.01, 66, "33-66%"),
+                          (66.01, 99.99, "66-99%"), (100, 100, "fully filled")):
+        rs = [x for x in records if x.get("imb_fill") is not None and lo <= x["imb_fill"] <= hi]
+        if rs:
+            fill_rows.append({"bucket": label, **agg(rs)})
+    no_gap = [x for x in records if x.get("has_imb") is False]
+    if no_gap:
+        fill_rows.append({"bucket": "no gap at all", **agg(no_gap)})
     # The indicator's own zone rating, bucketed. Does a higher score actually win more?
     score_rows = []
     for lo, hi, label in ((0, 1.999, "< 2.0"), (2.0, 2.999, "2.0-3.0"), (3.0, 3.999, "3.0-4.0"), (4.0, 10 ** 9, "4.0+")):
@@ -8591,6 +8607,7 @@ def _review_stats(records):
             score_rows.append({"bucket": label, **agg(rs)})
     return {"overall": agg(records), "tags": tag_rows, "trend": trend_rows, "zone_age": age_rows,
             "zone_age_missing": n_no_age, "structure_align": align_rows, "zone_score": score_rows,
+            "imbalance_fill": fill_rows,
             "avg_scores": {"winners": avg_scores(wins), "losers": avg_scores(losses)}}
 
 
@@ -8623,10 +8640,16 @@ def review_summary():
                 _zscore = float(_n["zoneScore"]) if isinstance(_n, dict) and _n.get("zoneScore") is not None else None
             except (TypeError, ValueError):
                 _zscore = None
+            _has_imb = _n.get("hasImbalance") if isinstance(_n, dict) else None
+            try:
+                _fill = float(_n["imbalanceFillPct"]) if isinstance(_n, dict) and _n.get("imbalanceFillPct") is not None else None
+            except (TypeError, ValueError):
+                _fill = None
             records.append({"id": tid, "symbol": t.get("symbol"), "side": t.get("side"), "variant": t.get("variant"),
                             "outcome": t.get("outcome"), "pnl": float(t.get("pnl") or 0), "r": _trade_r(t),
                             "zone_age": _age, "aligned": _aligned if isinstance(_aligned, bool) else None,
-                            "zone_score": _zscore, "review": rv["review"]})
+                            "zone_score": _zscore, "has_imb": _has_imb if isinstance(_has_imb, bool) else None,
+                            "imb_fill": _fill if (_has_imb is True) else None, "review": rv["review"]})
         stats = _review_stats(records) if records else None
         out = {"status": "ok", "n_requested": len(ids), "n_used": len(records), "stats": stats, "text": "",
                "truncated": len(all_ids) - len(ids)}
@@ -8641,6 +8664,7 @@ def review_summary():
                 "outcome": x["outcome"], "R": None if x["r"] is None else round(x["r"], 2), "pnl": round(x["pnl"], 2),
                 "timing": rv["screenshot_timing"], "trend": rv["trend_context"], "conf": rv["confidence"],
                 "zone_age_bars": x.get("zone_age"), "structure_aligned": x.get("aligned"), "zone_score": x.get("zone_score"),
+                "has_imbalance": x.get("has_imb"), "imbalance_filled_pct": x.get("imb_fill"),
                 "scores": [rv["zone_quality"]["score"], rv["entry_quality"]["score"], rv["stop_placement"]["score"], rv["target_realism"]["score"]],
                 "tags": rv["tags"], "mistakes": rv["mistakes"], "driver": rv["outcome_driver"]}))
         system = ("You analyse a set of per-trade chart reviews for an automated supply & demand zone strategy. Be blunt and specific. "
