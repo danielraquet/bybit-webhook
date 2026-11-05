@@ -135,6 +135,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
   <a href="/analysis" style="color:var(--dim);text-decoration:none">Analysis</a>
   <a href="/journal/review" style="color:var(--dim);text-decoration:none">Review</a>
   <a href="/journal/zone-age" style="color:var(--dim);text-decoration:none">Zone Age</a>
+  <a href="/journal/zone-size" style="color:var(--dim);text-decoration:none">Zone Size</a>
   <a href="/recommendations" style="color:var(--dim);text-decoration:none">Recommendations</a>
   <a href="/watchlist" style="color:var(--dim);text-decoration:none">Watchlist</a>
   <a href="/backtest/configs" style="color:var(--dim);text-decoration:none">Backtest</a>
@@ -4282,7 +4283,7 @@ function renderResults(results, symbol, tfLabel) {
         : '<span class="badge badge-fail">❌ Blocked: '+r.gate+'</span>';
 
     html+='<div class="bar-result '+cardCls+'">';
-    html+='<div class="bar-header" onclick="toggleEl(\''+uid+'\')"><span style="font-size:13px;font-weight:500">'+r.timestamp+'</span>';
+    html+='<div class="bar-header" onclick="toggleEl(\\''+uid+'\\')"><span style="font-size:13px;font-weight:500">'+r.timestamp+'</span>';
     html+=obBadge+statusBadge;
     html+='<span style="font-size:10px;color:var(--dim)">ATR='+r.atr+'</span>';
     html+='<span class="expand-btn">▼</span></div>';
@@ -7334,7 +7335,7 @@ function toggleScheduler(enabled) {
     body: JSON.stringify({enabled: enabled})
   }).then(r => r.json()).then(d => {
     document.getElementById('scheduler-sub').textContent = enabled
-      ? 'Uses a large number of API calls each run — turn off if you\'re not actively using it.'
+      ? 'Uses a large number of API calls each run — turn off if you\\'re not actively using it.'
       : 'Off — the daily 02:00 UTC run will be skipped until you switch this back on.';
   }).catch(e => alert('Could not update setting: ' + e));
 }
@@ -7794,7 +7795,7 @@ pre.summary{white-space:pre-wrap;font-family:inherit;font-size:12px;line-height:
 </head>
 <body>
 <div class="nav">
-  <a href="/journal">Journal</a><a href="/journal/zone-age">Zone Age</a><a href="/analysis">Analysis</a><a href="/recommendations">Recommendations</a><a href="/status">Status</a>
+  <a href="/journal">Journal</a><a href="/journal/zone-age">Zone Age</a><a href="/journal/zone-size">Zone Size</a><a href="/analysis">Analysis</a><a href="/recommendations">Recommendations</a><a href="/status">Status</a>
 </div>
 <h1>Screenshot Review</h1>
 <div class="sub">Reads the chart screenshots linked in the journal's Links column against each trade's record, then summarises what the selection has in common. Costs money per trade &mdash; see the estimate before running.</div>
@@ -9014,6 +9015,563 @@ def zone_age_set():
         log.error(f"Zone-age set error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+
+ZONE_SIZE_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Zone Size: % vs ATR</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--dim:#6b7280;--blue:#60a5fa;--green:#4ade80;--red:#f87171;--amber:#fbbf24}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;padding:16px}
+h1{font-size:18px;font-weight:500;margin-bottom:2px}
+h2{font-size:13px;font-weight:500;margin-bottom:4px}
+.sub{color:var(--dim);font-size:12px;margin-bottom:14px;max-width:960px;line-height:1.6}
+a{color:var(--blue);text-decoration:none}
+.nav{display:flex;gap:12px;margin-bottom:12px;font-size:12px}
+.nav a{color:var(--dim)}
+.panel{background:var(--card);border:0.5px solid var(--border);border-radius:6px;padding:12px 14px;margin-bottom:12px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.lbl{font-size:11px;color:var(--dim)}
+input,select{background:#0f1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit}
+button{background:#232735;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 12px;font-size:11px;cursor:pointer;font-family:inherit}
+button:hover{border-color:var(--blue);color:var(--blue)}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;color:var(--dim);font-weight:400;font-size:11px;padding:6px 8px 6px 0;border-bottom:1px solid var(--border);white-space:nowrap}
+td{padding:5px 8px 5px 0;border-bottom:1px solid rgba(42,45,58,0.5);vertical-align:middle;white-space:nowrap}
+.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.dim{color:var(--dim)}
+.thin{opacity:0.38}
+.bucket{display:flex;gap:12px;flex-wrap:wrap;margin-top:4px}
+.bcard{background:#0f1117;border:1px solid var(--border);border-radius:6px;padding:8px 12px;min-width:132px}
+.bcard .b-l{font-size:10px;color:var(--dim)}
+.bcard .b-v{font-size:15px;font-weight:500}
+.hint{font-size:11px;color:var(--dim);line-height:1.6;margin-top:8px;max-width:960px}
+tr.allrow td{border-top:1px solid var(--border);font-weight:500}
+.cell{font-size:11px}
+.cell .c-n{color:var(--dim)}
+.caveat{border-left:2px solid var(--amber);padding-left:10px;color:var(--dim);font-size:11px;line-height:1.6;margin-top:8px;max-width:960px}
+</style>
+</head>
+<body>
+<div class="nav"><a href="/journal">Journal</a><a href="/journal/zone-age">Zone Age</a><a href="/journal/zone-size">Zone Size</a><a href="/journal/review">Screenshot Review</a><a href="/analysis">Analysis</a><a href="/status">Status</a></div>
+<h1>Zone Size: % vs ATR</h1>
+<div class="sub">
+Min Zone Height is gated on a <b>percentage</b> of price, which is blind to volatility and timeframe: 0.5% is a
+normal zone where ATR is 0.6% of price and a noise-sized sliver where ATR is 3%. Nothing on this page changes
+that gate &mdash; it reconstructs the ATR at entry for trades already taken, from <code>entry</code>,
+<code>sl</code>, <code>zoneSizePct</code>, <code>slBuf</code> and <code>entryOffset</code>, all of which are
+already stored. So the comparison runs on your existing history instead of waiting for a new sample.
+</div>
+
+<div class="panel">
+  <div class="row">
+    <span class="lbl">Window</span>
+    <select id="days"><option value="30">30 days</option><option value="90" selected>90 days</option><option value="180">180 days</option><option value="365">365 days</option><option value="730">All</option></select>
+    <span class="lbl">Source</span>
+    <select id="source"><option value="sd" selected>sd (S&amp;D)</option><option value="all">all</option></select>
+    <button onclick="load()">Reload</button>
+    <span id="meta" class="lbl"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Which measure tracks your results?</h2>
+  <div class="bucket" id="tiles"></div>
+  <div class="hint" id="corrhint"></div>
+</div>
+
+<div class="panel">
+  <h2>Is the % threshold timeframe-blind for you?</h2>
+  <div class="hint">If <b>median size %</b> is roughly flat across timeframes while <b>median size (ATR)</b> swings,
+  one % threshold is admitting very different trades per chart. <b>Span (ATR)</b> is the whole SL-to-TP distance in
+  ATR &mdash; under about 1.5 the entire trade fits inside one average candle.</div>
+  <table id="tftab"></table>
+</div>
+
+<div class="panel">
+  <h2>Outcome by zone size (%) &mdash; what the filter gates on today</h2>
+  <table id="pcttab"></table>
+</div>
+
+<div class="panel">
+  <h2>Outcome by zone size (x ATR) &mdash; what it would gate on instead</h2>
+  <table id="atrtab"></table>
+  <div class="caveat" id="caveat"></div>
+</div>
+
+<div class="panel">
+  <h2>Trades</h2>
+  <table id="rawtab"></table>
+</div>
+
+<script>
+function el(i){return document.getElementById(i);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function num(v,d){return (v==null||isNaN(v))?'&mdash;':Number(v).toFixed(d==null?2:d);}
+function rcol(v){return v==null?'dim':(v>0?'green':(v<0?'red':'dim'));}
+
+function cellHtml(c,minCell){
+  if(!c) return '<td class="dim">&mdash;</td>';
+  var cls = c.thin ? 'cell thin' : 'cell';
+  return '<td class="'+cls+'"><span class="'+rcol(c.avg_r)+'">'+num(c.avg_r,2)+'R</span>'
+       + ' <span class="c-n">'+c.n+'t '+num(c.win_pct,0)+'%</span></td>';
+}
+
+function buildCross(tabId,buckets,cells,tfRows,minCell){
+  var h = '<tr><th>Timeframe</th>';
+  for(var b=0;b<buckets.length;b++) h += '<th>'+esc(buckets[b])+'</th>';
+  h += '</tr>';
+  var tfs = tfRows.map(function(r){return r.tf;});
+  tfs.push('ALL');
+  for(var i=0;i<tfs.length;i++){
+    var tf = tfs[i];
+    h += '<tr'+(tf==='ALL'?' class="allrow"':'')+'><td>'+esc(tf)+'</td>';
+    for(var b=0;b<buckets.length;b++) h += cellHtml(cells[tf+'|'+b],minCell);
+    h += '</tr>';
+  }
+  el(tabId).innerHTML = h;
+}
+
+function load(){
+  el('meta').innerHTML = 'loading...';
+  fetch('/journal/zone-size/data?days='+el('days').value+'&source='+el('source').value)
+  .then(function(r){return r.json();})
+  .then(function(j){
+    if(j.status!=='ok'){el('meta').innerHTML='<span class="red">'+esc(j.message||'error')+'</span>';return;}
+    var sk = [], tot = 0;
+    for(var k in j.skipped){sk.push(esc(k)+': '+j.skipped[k]);tot += j.skipped[k];}
+    el('meta').innerHTML = j.usable+' of '+j.considered+' closed trades usable'
+      + ' &middot; <span class="dim">ATR recovered to &plusmn;'+num(j.med_imprecision_pct,3)
+      + '% median, &plusmn;'+num(j.worst_imprecision_pct,2)+'% worst</span>'
+      + (tot? ' &middot; <span class="dim">excluded &mdash; '+sk.join(' &middot; ')+'</span>':'');
+
+    var c = j.corr||{};
+    el('tiles').innerHTML =
+        '<div class="bcard"><div class="b-l">Trades analysed</div><div class="b-v">'+j.usable+'</div></div>'
+      + '<div class="bcard"><div class="b-l">corr(R, size %)</div><div class="b-v">'+num(c.size_pct,3)+'</div></div>'
+      + '<div class="bcard"><div class="b-l">corr(R, size ATR)</div><div class="b-v">'+num(c.size_atr,3)+'</div></div>'
+      + '<div class="bcard"><div class="b-l">corr(R, span ATR)</div><div class="b-v">'+num(c.span_atr,3)+'</div></div>';
+
+    var a = c.size_atr, p = c.size_pct;
+    var msg;
+    if(a==null||p==null){ msg = 'Not enough usable trades to correlate anything yet.'; }
+    else if(Math.abs(a) < 0.10 && Math.abs(p) < 0.10){
+      msg = 'Neither measure tracks your results (both |r| &lt; 0.10). On this sample zone size is not what '
+          + 'decides your outcomes, and swapping the unit would be cosmetic. Look elsewhere before changing the filter.';
+    } else if(Math.abs(a) > Math.abs(p) * 1.3){
+      msg = 'ATR size tracks R more closely than % size (|'+num(a,3)+'| vs |'+num(p,3)+'|) &mdash; the switch has '
+          + 'something behind it. Confirm it in the two cross-tabs below before changing the gate.';
+    } else if(Math.abs(p) > Math.abs(a) * 1.3){
+      msg = 'The % measure tracks R more closely than ATR size here (|'+num(p,3)+'| vs |'+num(a,3)+'|). That argues '
+          + 'against the switch on this sample.';
+    } else {
+      msg = 'The two measures track R about equally (|'+num(p,3)+'| vs |'+num(a,3)+'|). No edge either way yet.';
+    }
+    el('corrhint').innerHTML = msg + ' <span class="dim">Correlation is descriptive only &mdash; with '
+      + (c.n||0) + ' trades and several telemetry dimensions in play, treat any |r| under about 0.2 as noise.</span>';
+
+    var h = '<tr><th>Timeframe</th><th>Trades</th><th>Median size %</th><th>Median size (ATR)</th>'
+          + '<th>Median ATR (% of price)</th><th>Median span (ATR)</th><th>Win %</th><th>Total R</th><th>Avg R</th></tr>';
+    for(var i=0;i<j.tf_rows.length;i++){
+      var t = j.tf_rows[i];
+      h += '<tr><td>'+esc(t.tf)+'</td><td>'+t.n+'</td><td>'+num(t.med_size_pct,3)+'%</td>'
+        +  '<td>'+num(t.med_size_atr,2)+'x</td><td>'+num(t.med_atr_pct,2)+'%</td>'
+        +  '<td'+(t.med_span_atr<1.5?' class="amber"':'')+'>'+num(t.med_span_atr,2)+'</td>'
+        +  '<td>'+num(t.win_pct,0)+'%</td><td class="'+rcol(t.sum_r)+'">'+num(t.sum_r,2)+'</td>'
+        +  '<td class="'+rcol(t.avg_r)+'">'+num(t.avg_r,2)+'</td></tr>';
+    }
+    el('tftab').innerHTML = h;
+
+    buildCross('pcttab', j.pct_buckets, j.pct_cells, j.tf_rows, j.min_cell);
+    buildCross('atrtab', j.atr_buckets, j.atr_cells, j.tf_rows, j.min_cell);
+    el('caveat').innerHTML = 'Each cell is avg R, then trade count and win %. Cells under '+j.min_cell
+      + ' trades are faded &mdash; do not read them. <b>One-directional limit:</b> the % filter is a hard floor, so '
+      + 'this sample contains no zones below your Min Zone Height. It can tell you whether low-ATR zones you DID '
+      + 'take underperform; it cannot tell you whether an ATR gate would admit good zones the % gate rejects. '
+      + 'For that you would have to lower Min Zone Height toward 0 for a while and let both error types through.';
+
+    var rows = j.trades.slice(0,400);
+    h = '<tr><th>Opened</th><th>Symbol</th><th>Side</th><th>TF</th><th>Size %</th><th>Size ATR</th>'
+      + '<th>ATR %</th><th>Risk ATR</th><th>Span ATR</th><th>&plusmn;err</th><th>Score</th><th>Age</th><th>Outcome</th><th>R</th></tr>';
+    for(var i=0;i<rows.length;i++){
+      var t = rows[i];
+      h += '<tr><td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td><td>'+esc(t.symbol)+'</td>'
+        +  '<td class="dim">'+esc(t.side)+'</td><td class="dim">'+esc(t.timeframe)+'</td>'
+        +  '<td>'+num(t.size_pct,2)+'%</td><td'+(t.size_atr<0.3?' class="amber"':'')+'>'+num(t.size_atr,2)+'x</td>'
+        +  '<td class="dim">'+num(t.atr_pct,2)+'%</td><td class="dim">'+num(t.risk_atr,2)+'</td>'
+        +  '<td class="dim">'+num(t.span_atr,2)+'</td>'
+        +  '<td class="'+(t.imprecision_pct>0.5?'amber':'dim')+'">'+num(t.imprecision_pct,2)+'%</td>'
+        +  '<td class="dim">'+num(t.zone_score,2)+'</td>'
+        +  '<td class="dim">'+(t.zone_age==null?'&mdash;':t.zone_age)+'</td>'
+        +  '<td class="dim">'+esc(t.outcome)+'</td>'
+        +  '<td class="'+rcol(t.r)+'">'+num(t.r,2)+'</td></tr>';
+    }
+    el('rawtab').innerHTML = h;
+  })
+  .catch(function(e){el('meta').innerHTML='<span class="red">'+esc(e)+'</span>';});
+}
+load();
+</script>
+</body>
+</html>"""
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ZONE SIZE: % vs ATR  (added sd-journal 1.18)
+#
+# The indicator gates zone creation on Min Zone Height (%), measured as the zone's
+# top-to-bottom height relative to its own midpoint. A percentage is volatility- and
+# timeframe-BLIND: 0.5% is a normal-sized zone on a 15m chart where ATR is ~0.6% of
+# price, and a noise-sized sliver on a 4h chart where ATR is ~3% of price. Same number,
+# completely different trade.
+#
+# This page answers whether switching that gate to an ATR multiple would help, WITHOUT
+# needing a new indicator field, because the ATR at entry time is recoverable from data
+# already on record. The indicator computes, for demand (mirrored for supply):
+#
+#     h     = zone height            = dTop - dBot
+#     entry = dTop - entryOffset * h
+#     sl    = dBot - slBuf * atr14
+#     risk  = |entry - sl|           = h * (1 - entryOffset) + slBuf * atr14
+#
+# entry, sl, zoneSizePct, entryOffset and slBuf are ALL stored per trade (zoneSizePct
+# since sd-1.6, slBuf/entryOffset since the first webhook). So:
+#
+#     h    = recovered from zoneSizePct and entry (the midpoint algebra below)
+#     atr  = (risk - h * (1 - entryOffset)) / slBuf
+#
+# which yields the zone's height in ATR for every historical trade.
+#
+# PRECISION — the catch, and why rows get dropped. atr is recovered by dividing the
+# residual (risk - zone height) by slBuf, so with the default slBuf=0.1 it is a 10x
+# amplification of a small difference between two rounded numbers. entry and sl are
+# stored rounded to 6dp and zoneSizePct to 4dp. On a $30k instrument that rounding is
+# nothing; on a $0.018 coin with slBuf=0.05 and ATR at 0.4% of price, the 1e-6 quantum
+# is the same size as the residual itself and the recovered ATR is off by 15%+.
+# Synthetic round-trips (test_zonesize.py) put the median error at 0.005% above $1 and
+# 0.24% below $0.10, with a long tail. So each row carries its own error estimate and
+# anything above ZS_MAX_ATR_IMPRECISION is dropped rather than quietly believed. The
+# estimate was checked against 4000 randomised round-trips: zero cases exceeded 3x it.
+# If too many rows get dropped the fix is in the indicator, not here — send atr14
+# directly and the whole reconstruction becomes unnecessary.
+#
+# NOTHING here changes how zones are gated. The % filter stays as the trigger; this is
+# measurement only, same discipline as zone age, structure alignment and imbalance.
+#
+#   /journal/zone-size                 the page
+#   GET  /journal/zone-size/data       per-trade geometry + cross-tabs for a date range
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Bucket edges. Upper bound is exclusive; the last bucket is open-ended.
+ZS_PCT_BUCKETS = [(0.0, 0.5), (0.5, 0.75), (0.75, 1.0), (1.0, 1.5), (1.5, 2.5), (2.5, 4.0), (4.0, None)]
+ZS_ATR_BUCKETS = [(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (0.75, 1.0), (1.0, 1.5), (1.5, None)]
+ZS_MIN_CELL = 5          # below this a cell is shown but greyed — too few trades to read
+ZS_SANE_ATR_PCT = 40.0   # ATR above this share of price means the recovery went wrong
+ZS_SANE_SIZE_ATR = 50.0
+ZS_MAX_ATR_IMPRECISION = 0.02   # drop a row whose recovered ATR could be >2% off
+ZS_Q_PRICE = 5e-7        # half-step of entry/sl, stored rounded to 6dp
+ZS_Q_PCT = 5e-5          # half-step of zoneSizePct, stored rounded to 4dp (in percent)
+
+
+def _zs_bucket_label(lo, hi, unit):
+    if hi is None:
+        return f"{lo:g}{unit}+"
+    return f"{lo:g}-{hi:g}{unit}"
+
+
+def _zs_bucket_of(v, buckets):
+    if v is None:
+        return None
+    for idx, (lo, hi) in enumerate(buckets):
+        if v >= lo and (hi is None or v < hi):
+            return idx
+    return None
+
+
+def _zs_median(vals):
+    s = sorted(v for v in vals if v is not None)
+    if not s:
+        return None
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _zs_pearson(xs, ys):
+    """Plain correlation coefficient. Descriptive only — no significance claim attached."""
+    pts = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+    n = len(pts)
+    if n < 3:
+        return None, n
+    mx = sum(p[0] for p in pts) / n
+    my = sum(p[1] for p in pts) / n
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pts)
+    sxx = sum((p[0] - mx) ** 2 for p in pts)
+    syy = sum((p[1] - my) ** 2 for p in pts)
+    if sxx <= 0 or syy <= 0:
+        return None, n
+    return sxy / ((sxx ** 0.5) * (syy ** 0.5)), n
+
+
+def _zs_tf_minutes(label):
+    """Sort key for timeframe labels ('15m', '4h', '1D', or a bare minute count)."""
+    t = (label or "").strip().lower()
+    if not t:
+        return 10 ** 9
+    try:
+        if t.endswith("m"):
+            return float(t[:-1])
+        if t.endswith("h"):
+            return float(t[:-1]) * 60.0
+        if t.endswith("d"):
+            return float(t[:-1]) * 1440.0
+        if t.endswith("w"):
+            return float(t[:-1]) * 10080.0
+        return float(t)
+    except ValueError:
+        return 10 ** 9 - 1
+
+
+def _zone_geometry(trade, notes):
+    """Recover zone height, ATR at entry, and the derived ATR-relative measures.
+
+    Returns a dict, or {'ok': False, 'why': <reason>} when the row can't be reconstructed.
+    Pure arithmetic on stored fields — no new indicator data required."""
+    def bad(why):
+        return {"ok": False, "why": why}
+
+    try:
+        entry = float(trade.get("entry") or 0)
+        sl = float(trade.get("sl") or 0)
+    except (TypeError, ValueError):
+        return bad("entry/sl unreadable")
+    if entry <= 0 or sl <= 0:
+        return bad("no entry/sl")
+
+    p = notes.get("zoneSizePct")
+    if p is None:
+        return bad("predates zoneSizePct (sd-1.6)")
+    try:
+        p = float(p)
+    except (TypeError, ValueError):
+        return bad("zoneSizePct unreadable")
+    if p <= 0:
+        return bad("zoneSizePct is zero")
+
+    sb = notes.get("slBuf")
+    try:
+        sb = float(sb) if sb is not None else None
+    except (TypeError, ValueError):
+        sb = None
+    if not sb or sb <= 0:
+        # With no SL buffer the ATR leaves no trace in the stop distance: risk == zone
+        # height exactly, and there is nothing left to solve for.
+        return bad("slBuf missing or zero — ATR not recoverable")
+
+    eo = notes.get("entryOffset")
+    try:
+        eo = float(eo) if eo is not None else 0.0
+    except (TypeError, ValueError):
+        eo = 0.0
+    if not (0.0 <= eo < 1.0):
+        return bad("entryOffset out of range")
+
+    side = (trade.get("side") or "").strip()
+    s = 1.0 if side == "Buy" else (-1.0 if side == "Sell" else None)
+    if s is None:
+        return bad("side unknown")
+
+    # mid = entry + s*h*(entryOffset - 0.5); zoneSizePct = h / mid * 100.
+    # Solving for h gives the expression below (denominator is 1 for a zone measured
+    # from its own midpoint with no offset, and stays comfortably positive for sane p).
+    k = p / 100.0
+    denom = 1.0 - s * k * (eo - 0.5)
+    if denom <= 0:
+        return bad("zone geometry inconsistent")
+    h = k * entry / denom
+    if h <= 0:
+        return bad("zone height solved non-positive")
+
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return bad("zero risk distance")
+    residual = risk - h * (1.0 - eo)
+    if residual <= 0:
+        # The stop is no further from the zone than the zone is tall: either the SL was
+        # edited by hand after the fact, or slBuf/zoneSizePct disagree with this row.
+        return bad("stop distance inconsistent with zone height (SL edited?)")
+    atr = residual / sb
+    if atr <= 0:
+        return bad("ATR solved non-positive")
+
+    atr_pct = atr / entry * 100.0
+    size_atr = h / atr
+    if atr_pct > ZS_SANE_ATR_PCT or size_atr > ZS_SANE_SIZE_ATR:
+        return bad("recovered values implausible")
+
+    # How much the stored rounding could have moved the recovered ATR. Both entry and sl
+    # contribute one half-step to the residual; zoneSizePct's half-step propagates through
+    # h. Dividing by the residual gives the relative error on atr (and on size_atr, which
+    # is h/atr with h far better determined than atr).
+    # The 1.5 is a deliberate safety factor: denom itself depends on the rounded
+    # zoneSizePct, so the naked half-step model is a shade optimistic (measured
+    # overshoot was 0.4% on the worst of 4000 round-trips). Better that this number
+    # errs conservative — it is the one deciding which rows get believed.
+    eps = 1.5 * (2.0 * ZS_Q_PRICE + (ZS_Q_PCT / 100.0) * entry / denom * (1.0 - eo))
+    imprecision = eps / residual
+    if imprecision > ZS_MAX_ATR_IMPRECISION:
+        return bad(f"ATR recovery too imprecise at this price/slBuf (>{ZS_MAX_ATR_IMPRECISION*100:g}%)")
+
+    try:
+        rr = float(notes.get("rr") or 0) or None
+    except (TypeError, ValueError):
+        rr = None
+
+    return {
+        "ok": True,
+        "zone_height": h,
+        "atr": atr,
+        "atr_pct": atr_pct,            # ATR as a % of entry price — the volatility yardstick
+        "size_pct": p,                 # what the filter currently gates on
+        "size_atr": size_atr,          # what it would gate on instead
+        "risk_atr": risk / atr,        # stop distance in ATR
+        "span_atr": (risk * (1.0 + rr) / atr) if rr else None,  # SL-to-TP range in ATR
+        "rr": rr,
+        "imprecision": imprecision,    # relative error bound on atr / size_atr
+    }
+
+
+def _zs_cells(rows, key, buckets):
+    """timeframe x bucket -> {n, wins, sum_r}. Also an 'ALL' timeframe row."""
+    cells = {}
+    for r in rows:
+        b = _zs_bucket_of(r.get(key), buckets)
+        if b is None or r.get("r") is None:
+            continue
+        for tf in ((r.get("timeframe") or "?"), "ALL"):
+            c = cells.setdefault((tf, b), {"n": 0, "wins": 0, "sum_r": 0.0})
+            c["n"] += 1
+            c["wins"] += 1 if r["r"] > 0 else 0
+            c["sum_r"] += r["r"]
+    out = {}
+    for (tf, b), c in cells.items():
+        out[f"{tf}|{b}"] = {
+            "tf": tf, "bucket": b, "n": c["n"], "wins": c["wins"],
+            "win_pct": round(c["wins"] / c["n"] * 100.0, 1) if c["n"] else None,
+            "sum_r": round(c["sum_r"], 2),
+            "avg_r": round(c["sum_r"] / c["n"], 3) if c["n"] else None,
+            "thin": c["n"] < ZS_MIN_CELL,
+        }
+    return out
+
+
+@app.route("/journal/zone-size")
+def zone_size_page():
+    from flask import Response
+    return Response(ZONE_SIZE_HTML, mimetype="text/html")
+
+
+@app.route("/journal/zone-size/data", methods=["GET"])
+def zone_size_data():
+    """Closed trades in a window with zone geometry recovered, plus the two cross-tabs."""
+    import psycopg2.extras as _pgr
+    try:
+        days = request.args.get("days", "90")
+        try:
+            days = max(1, min(730, int(days)))
+        except ValueError:
+            days = 90
+        src = (request.args.get("source") or "sd").strip().lower()
+
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=_pgr.RealDictCursor) as cur:
+                cur.execute("""SELECT id, symbol, side, status, outcome, qty, entry, sl, tp, exit_price, pnl,
+                                      opened_at, closed_at, timeframe, variant, source, notes
+                               FROM trades
+                               WHERE status='closed' AND outcome IS NOT NULL
+                                 AND opened_at::timestamp >= (NOW() AT TIME ZONE 'UTC') - make_interval(days => %s)
+                               ORDER BY opened_at DESC LIMIT 3000""", (days,))
+                raw_rows = [dict(r) for r in cur.fetchall()]
+            conn.commit()
+        finally:
+            conn.close()
+
+        trades, skipped = [], {}
+        for r in raw_rows:
+            if src != "all" and (r.get("source") or "").strip().lower() != src:
+                continue
+            n = _notes_dict(r.get("notes"))
+            g = _zone_geometry(r, n)
+            if not g.get("ok"):
+                why = g.get("why") or "unknown"
+                skipped[why] = skipped.get(why, 0) + 1
+                continue
+            trades.append({
+                "id": r["id"], "symbol": r["symbol"], "side": r["side"], "outcome": r["outcome"],
+                "timeframe": r.get("timeframe") or "?", "variant": r.get("variant") or "",
+                "source": r.get("source") or "", "opened_at": str(r.get("opened_at") or ""),
+                "pnl": float(r["pnl"] or 0), "r": _trade_r(r),
+                "size_pct": round(g["size_pct"], 4),
+                "size_atr": round(g["size_atr"], 3),
+                "atr_pct": round(g["atr_pct"], 4),
+                "risk_atr": round(g["risk_atr"], 3),
+                "span_atr": round(g["span_atr"], 2) if g["span_atr"] else None,
+                "imprecision_pct": round(g["imprecision"] * 100.0, 3),
+                "zone_age": n.get("zoneAgeBars"),
+                "zone_score": n.get("zoneScore"),
+            })
+
+        # Per-timeframe medians — this table alone shows whether % is timeframe-blind
+        # for THIS account: if median size_pct is flat across timeframes while median
+        # size_atr swings, the single % threshold is doing different jobs per chart.
+        by_tf = {}
+        for t in trades:
+            by_tf.setdefault(t["timeframe"], []).append(t)
+        tf_rows = []
+        for tf, ts in by_tf.items():
+            rs = [t["r"] for t in ts if t["r"] is not None]
+            tf_rows.append({
+                "tf": tf, "n": len(ts),
+                "med_size_pct": round(_zs_median([t["size_pct"] for t in ts]) or 0, 3),
+                "med_size_atr": round(_zs_median([t["size_atr"] for t in ts]) or 0, 3),
+                "med_atr_pct": round(_zs_median([t["atr_pct"] for t in ts]) or 0, 3),
+                "med_span_atr": round(_zs_median([t["span_atr"] for t in ts]) or 0, 2),
+                "win_pct": round(sum(1 for x in rs if x > 0) / len(rs) * 100.0, 1) if rs else None,
+                "sum_r": round(sum(rs), 2) if rs else None,
+                "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
+            })
+        tf_rows.sort(key=lambda x: _zs_tf_minutes(x["tf"]))
+
+        rs_all = [t["r"] for t in trades]
+        corr_pct, n_pct = _zs_pearson([t["size_pct"] for t in trades], rs_all)
+        corr_atr, n_atr = _zs_pearson([t["size_atr"] for t in trades], rs_all)
+        corr_span, n_span = _zs_pearson([t["span_atr"] for t in trades], rs_all)
+
+        return jsonify({
+            "status": "ok", "days": days, "source": src,
+            "trades": trades,
+            "considered": len(raw_rows), "usable": len(trades), "skipped": skipped,
+            "worst_imprecision_pct": round(max([t["imprecision_pct"] for t in trades] or [0]), 3),
+            "med_imprecision_pct": round(_zs_median([t["imprecision_pct"] for t in trades]) or 0, 3),
+            "tf_rows": tf_rows,
+            "pct_buckets": [_zs_bucket_label(lo, hi, "%") for lo, hi in ZS_PCT_BUCKETS],
+            "atr_buckets": [_zs_bucket_label(lo, hi, "x") for lo, hi in ZS_ATR_BUCKETS],
+            "pct_cells": _zs_cells(trades, "size_pct", ZS_PCT_BUCKETS),
+            "atr_cells": _zs_cells(trades, "size_atr", ZS_ATR_BUCKETS),
+            "corr": {
+                "size_pct": round(corr_pct, 3) if corr_pct is not None else None,
+                "size_atr": round(corr_atr, 3) if corr_atr is not None else None,
+                "span_atr": round(corr_span, 3) if corr_span is not None else None,
+                "n": max(n_pct, n_atr, n_span),
+            },
+            "min_cell": ZS_MIN_CELL,
+        }), 200
+    except Exception as e:
+        log.error(f"Zone-size data error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/analysis")
