@@ -412,6 +412,9 @@ function renderTrades(trades){
     try{ notesObj = JSON.parse(t.notes||'{}'); }catch(e){}
     var obSizeAtr      = notesObj.obSizeAtr;
     var zoneSizePct    = notesObj.zoneSizePct;
+    // Zone height in ATR, measured at zone creation (S&D indicator sd-1.18+). Sent on EVERY
+    // trade regardless of which unit the indicator is gating on, so the two are comparable.
+    var zoneSizeAtr    = notesObj.zoneSizeAtr;
     var impulseActual  = notesObj.impulseRatioActual;
     var structureOk    = notesObj.structureOk;
     var klNear         = notesObj.klNear;
@@ -419,10 +422,14 @@ function renderTrades(trades){
     var emaOk          = notesObj.emaOk;
     // Zone age in bars at the moment the signal fired (S&D indicator sd-1.5+). Older trades have no value.
     var zoneAgeBars    = notesObj.zoneAgeBars;
-    // Size column is shared: OB indicator sends obSizeAtr (x ATR), S&D indicator sends zoneSizePct (% of price).
+    // Size column is shared across indicators, so every value carries its own unit suffix —
+    // '%' for a percentage of price, 'x' for an ATR multiple. Units are NEVER distinguished by
+    // magnitude (a 1.5% zone and a 1.5x zone are both '1.5' and would be indistinguishable).
+    // OB sends obSizeAtr; S&D sends zoneSizePct and, from sd-1.18, zoneSizeAtr as well.
     var sizeParts = [];
     if (obSizeAtr   != null && !isNaN(obSizeAtr))   sizeParts.push(parseFloat(obSizeAtr).toFixed(2)+'x');
     if (zoneSizePct != null && !isNaN(zoneSizePct)) sizeParts.push(parseFloat(zoneSizePct).toFixed(2)+'%');
+    if (zoneSizeAtr != null && !isNaN(zoneSizeAtr) && parseFloat(zoneSizeAtr) > 0) sizeParts.push(parseFloat(zoneSizeAtr).toFixed(2)+'x');
     var obSizeStr   = sizeParts.length ? sizeParts.join(' · ') : '—';
     var ageStr      = (zoneAgeBars  != null && !isNaN(zoneAgeBars))  ? parseInt(zoneAgeBars,10)+'b' : '—';
     var impulseStr  = (impulseActual!= null && !isNaN(impulseActual))? parseFloat(impulseActual).toFixed(2)+'x': '—';
@@ -2354,6 +2361,8 @@ def webhook():
                 "entryOffset":       data.get("entryOffset"),
                 "obSizeAtr":         data.get("obSizeAtr"),
                 "zoneSizePct":       data.get("zoneSizePct"),
+                "zoneSizeAtr":       data.get("zoneSizeAtr"),
+                "zoneHeightMode":    data.get("zoneHeightMode"),
                 "impulseRatioActual":data.get("impulseRatioActual"),
                 "structureOk":       data.get("structureOk"),
                 "klNear":            data.get("klNear"),
@@ -2477,6 +2486,8 @@ def webhook():
             "entryOffset":       data.get("entryOffset"),
             "obSizeAtr":         data.get("obSizeAtr"),
             "zoneSizePct":       data.get("zoneSizePct"),
+                "zoneSizeAtr":       data.get("zoneSizeAtr"),
+                "zoneHeightMode":    data.get("zoneHeightMode"),
             "impulseRatioActual":data.get("impulseRatioActual"),
             "structureOk":       data.get("structureOk"),
             "klNear":            data.get("klNear"),
@@ -2660,6 +2671,8 @@ def webhook():
                                      "entryOffset":       data.get("entryOffset"),
                                      "obSizeAtr":         data.get("obSizeAtr"),
                                      "zoneSizePct":       data.get("zoneSizePct"),
+                "zoneSizeAtr":       data.get("zoneSizeAtr"),
+                "zoneHeightMode":    data.get("zoneHeightMode"),
                                      "zoneAgeBars":       data.get("zoneAgeBars"),
                                      "zoneScore":         data.get("zoneScore"),
                                      "zoneSweep":         data.get("zoneSweep"),
@@ -8275,7 +8288,7 @@ def _review_trade_text(t):
         lines.append(f"partial exit: {f(t.get('tp1_pct'))}% at {f(t.get('tp1'))}")
     lines.append(f"result: outcome={f(t.get('outcome'))}   pnl={f(t.get('pnl'))} USDT   R={'n/a' if r is None else f'{r:+.2f}'}   exit price={f(t.get('exit_price'))}")
     lines.append(f"opened (UTC): {f(t.get('opened_at'))}   closed (UTC): {f(t.get('closed_at'))}")
-    ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneAgeBars", "zoneScore", "zoneSweep", "zoneInducement",
+    ind = {k: notes.get(k) for k in ("zoneSizePct", "zoneSizeAtr", "zoneHeightMode", "zoneAgeBars", "zoneScore", "zoneSweep", "zoneInducement",
                                      "structure", "structureAligned", "hasImbalance", "imbalanceFillPct",
                                      "imbalanceAtr", "obSizeAtr", "impulseRatioActual",
                                      "structureOk", "klNear", "klDistAtr", "emaOk", "rr") if notes.get(k) is not None}
@@ -9059,11 +9072,14 @@ tr.allrow td{border-top:1px solid var(--border);font-weight:500}
 <div class="nav"><a href="/journal">Journal</a><a href="/journal/zone-age">Zone Age</a><a href="/journal/zone-size">Zone Size</a><a href="/journal/review">Screenshot Review</a><a href="/analysis">Analysis</a><a href="/status">Status</a></div>
 <h1>Zone Size: % vs ATR</h1>
 <div class="sub">
-Min Zone Height is gated on a <b>percentage</b> of price, which is blind to volatility and timeframe: 0.5% is a
-normal zone where ATR is 0.6% of price and a noise-sized sliver where ATR is 3%. Nothing on this page changes
-that gate &mdash; it reconstructs the ATR at entry for trades already taken, from <code>entry</code>,
-<code>sl</code>, <code>zoneSizePct</code>, <code>slBuf</code> and <code>entryOffset</code>, all of which are
-already stored. So the comparison runs on your existing history instead of waiting for a new sample.
+A <b>percentage</b> of price is blind to volatility and timeframe: 0.5% is a normal zone where ATR is 0.6% of
+price and a noise-sized sliver where ATR is 3%. This page compares the two units on your own trades.
+From indicator <b>sd-1.18</b> the zone's height in ATR is measured at the zone's creation bar &mdash; the bar
+the height gate actually runs on &mdash; and sent in every webhook as <code>zoneSizeAtr</code> whichever unit
+the gate is set to, so both units land on every trade. Trades taken before sd-1.18 fall back to a
+reconstruction from <code>entry</code>, <code>sl</code>, <code>zoneSizePct</code>, <code>slBuf</code> and
+<code>entryOffset</code>; that recovers the ATR at <i>entry</i>, not at creation, so it is a proxy whose bias
+grows with zone age. The <b>Src</b> column says which each row is.
 </div>
 
 <div class="panel">
@@ -9143,9 +9159,14 @@ function load(){
     if(j.status!=='ok'){el('meta').innerHTML='<span class="red">'+esc(j.message||'error')+'</span>';return;}
     var sk = [], tot = 0;
     for(var k in j.skipped){sk.push(esc(k)+': '+j.skipped[k]);tot += j.skipped[k];}
+    var modes = [];
+    for(var mk in (j.modes||{})) modes.push(mk+': '+j.modes[mk]);
     el('meta').innerHTML = j.usable+' of '+j.considered+' closed trades usable'
-      + ' &middot; <span class="dim">ATR recovered to &plusmn;'+num(j.med_imprecision_pct,3)
-      + '% median, &plusmn;'+num(j.worst_imprecision_pct,2)+'% worst</span>'
+      + ' &middot; <span class="dim">'+(j.n_indicator||0)+' measured by the indicator, '
+      + (j.n_derived||0)+' reconstructed'
+      + ((j.n_derived||0)? ' (&plusmn;'+num(j.med_imprecision_pct,3)+'% median, &plusmn;'
+         +num(j.worst_imprecision_pct,2)+'% worst)':'')+'</span>'
+      + (modes.length? ' &middot; <span class="dim">gate mode &mdash; '+modes.join(', ')+'</span>':'')
       + (tot? ' &middot; <span class="dim">excluded &mdash; '+sk.join(' &middot; ')+'</span>':'');
 
     var c = j.corr||{};
@@ -9174,12 +9195,13 @@ function load(){
       + (c.n||0) + ' trades and several telemetry dimensions in play, treat any |r| under about 0.2 as noise.</span>';
 
     var h = '<tr><th>Timeframe</th><th>Trades</th><th>Median size %</th><th>Median size (ATR)</th>'
-          + '<th>Median ATR (% of price)</th><th>Median span (ATR)</th><th>Win %</th><th>Total R</th><th>Avg R</th></tr>';
+          + '<th>Median ATR (% of price)</th><th>Median span (ATR)</th><th>Measured</th><th>Win %</th><th>Total R</th><th>Avg R</th></tr>';
     for(var i=0;i<j.tf_rows.length;i++){
       var t = j.tf_rows[i];
       h += '<tr><td>'+esc(t.tf)+'</td><td>'+t.n+'</td><td>'+num(t.med_size_pct,3)+'%</td>'
         +  '<td>'+num(t.med_size_atr,2)+'x</td><td>'+num(t.med_atr_pct,2)+'%</td>'
         +  '<td'+(t.med_span_atr<1.5?' class="amber"':'')+'>'+num(t.med_span_atr,2)+'</td>'
+        +  '<td class="dim">'+(t.n_indicator||0)+'/'+t.n+'</td>'
         +  '<td>'+num(t.win_pct,0)+'%</td><td class="'+rcol(t.sum_r)+'">'+num(t.sum_r,2)+'</td>'
         +  '<td class="'+rcol(t.avg_r)+'">'+num(t.avg_r,2)+'</td></tr>';
     }
@@ -9195,7 +9217,7 @@ function load(){
 
     var rows = j.trades.slice(0,400);
     h = '<tr><th>Opened</th><th>Symbol</th><th>Side</th><th>TF</th><th>Size %</th><th>Size ATR</th>'
-      + '<th>ATR %</th><th>Risk ATR</th><th>Span ATR</th><th>&plusmn;err</th><th>Score</th><th>Age</th><th>Outcome</th><th>R</th></tr>';
+      + '<th>ATR %</th><th>Risk ATR</th><th>Span ATR</th><th>Src</th><th>&plusmn;err</th><th>Score</th><th>Age</th><th>Outcome</th><th>R</th></tr>';
     for(var i=0;i<rows.length;i++){
       var t = rows[i];
       h += '<tr><td class="dim">'+esc((t.opened_at||'').slice(0,16))+'</td><td>'+esc(t.symbol)+'</td>'
@@ -9203,7 +9225,9 @@ function load(){
         +  '<td>'+num(t.size_pct,2)+'%</td><td'+(t.size_atr<0.3?' class="amber"':'')+'>'+num(t.size_atr,2)+'x</td>'
         +  '<td class="dim">'+num(t.atr_pct,2)+'%</td><td class="dim">'+num(t.risk_atr,2)+'</td>'
         +  '<td class="dim">'+num(t.span_atr,2)+'</td>'
-        +  '<td class="'+(t.imprecision_pct>0.5?'amber':'dim')+'">'+num(t.imprecision_pct,2)+'%</td>'
+        +  '<td class="dim">'+(t.size_atr_source==='indicator'?'ind':'derived')+'</td>'
+        +  '<td class="'+(t.size_atr_source!=='indicator'&&t.imprecision_pct>0.5?'amber':'dim')+'">'
+        +  (t.size_atr_source==='indicator'?'&mdash;':num(t.imprecision_pct,2)+'%')+'</td>'
         +  '<td class="dim">'+num(t.zone_score,2)+'</td>'
         +  '<td class="dim">'+(t.zone_age==null?'&mdash;':t.zone_age)+'</td>'
         +  '<td class="dim">'+esc(t.outcome)+'</td>'
@@ -9505,20 +9529,44 @@ def zone_size_data():
                 continue
             n = _notes_dict(r.get("notes"))
             g = _zone_geometry(r, n)
+            sent_atr = n.get("zoneSizeAtr")
+            try:
+                sent_atr = float(sent_atr) if sent_atr is not None else None
+            except (TypeError, ValueError):
+                sent_atr = None
+            if sent_atr is not None and sent_atr <= 0:
+                sent_atr = None          # the indicator's nz() fallback, not a real measurement
             if not g.get("ok"):
-                why = g.get("why") or "unknown"
-                skipped[why] = skipped.get(why, 0) + 1
-                continue
+                # A row the indicator measured for us is still usable even when the ATR cannot be
+                # reconstructed — but only the size is known, not the ATR-relative stop or span.
+                if sent_atr is None:
+                    why = g.get("why") or "unknown"
+                    skipped[why] = skipped.get(why, 0) + 1
+                    continue
+                g = {"ok": True, "size_pct": float(n.get("zoneSizePct") or 0) or None,
+                     "size_atr": sent_atr, "atr": None, "atr_pct": None, "risk_atr": None,
+                     "span_atr": None, "zone_height": None, "rr": None, "imprecision": 0.0,
+                     "partial": True}
+                if g["size_pct"] is None:
+                    skipped["zoneSizeAtr present but zoneSizePct missing"] = \
+                        skipped.get("zoneSizeAtr present but zoneSizePct missing", 0) + 1
+                    continue
             trades.append({
                 "id": r["id"], "symbol": r["symbol"], "side": r["side"], "outcome": r["outcome"],
                 "timeframe": r.get("timeframe") or "?", "variant": r.get("variant") or "",
                 "source": r.get("source") or "", "opened_at": str(r.get("opened_at") or ""),
                 "pnl": float(r["pnl"] or 0), "r": _trade_r(r),
                 "size_pct": round(g["size_pct"], 4),
-                "size_atr": round(g["size_atr"], 3),
-                "atr_pct": round(g["atr_pct"], 4),
-                "risk_atr": round(g["risk_atr"], 3),
-                "span_atr": round(g["span_atr"], 2) if g["span_atr"] else None,
+                # Indicator-sent value wins: measured at the creation bar, which is the bar the
+                # height gate runs on. The reconstruction is the entry-bar ATR, a biased proxy
+                # whose bias grows with zone age — kept only for trades predating sd-1.18.
+                "size_atr": round(sent_atr if sent_atr is not None else g["size_atr"], 3),
+                "size_atr_source": "indicator" if sent_atr is not None else "derived",
+                "size_atr_derived": round(g["size_atr"], 3) if g.get("size_atr") is not None else None,
+                "height_mode": n.get("zoneHeightMode") or "pct",
+                "atr_pct": round(g["atr_pct"], 4) if g.get("atr_pct") is not None else None,
+                "risk_atr": round(g["risk_atr"], 3) if g.get("risk_atr") is not None else None,
+                "span_atr": round(g["span_atr"], 2) if g.get("span_atr") else None,
                 "imprecision_pct": round(g["imprecision"] * 100.0, 3),
                 "zone_age": n.get("zoneAgeBars"),
                 "zone_score": n.get("zoneScore"),
@@ -9539,6 +9587,7 @@ def zone_size_data():
                 "med_size_atr": round(_zs_median([t["size_atr"] for t in ts]) or 0, 3),
                 "med_atr_pct": round(_zs_median([t["atr_pct"] for t in ts]) or 0, 3),
                 "med_span_atr": round(_zs_median([t["span_atr"] for t in ts]) or 0, 2),
+                "n_indicator": sum(1 for t in ts if t["size_atr_source"] == "indicator"),
                 "win_pct": round(sum(1 for x in rs if x > 0) / len(rs) * 100.0, 1) if rs else None,
                 "sum_r": round(sum(rs), 2) if rs else None,
                 "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
@@ -9554,8 +9603,12 @@ def zone_size_data():
             "status": "ok", "days": days, "source": src,
             "trades": trades,
             "considered": len(raw_rows), "usable": len(trades), "skipped": skipped,
-            "worst_imprecision_pct": round(max([t["imprecision_pct"] for t in trades] or [0]), 3),
-            "med_imprecision_pct": round(_zs_median([t["imprecision_pct"] for t in trades]) or 0, 3),
+            "worst_imprecision_pct": round(max([t["imprecision_pct"] for t in trades if t["size_atr_source"] == "derived"] or [0]), 3),
+            "med_imprecision_pct": round(_zs_median([t["imprecision_pct"] for t in trades if t["size_atr_source"] == "derived"]) or 0, 3),
+            "n_indicator": sum(1 for t in trades if t["size_atr_source"] == "indicator"),
+            "n_derived": sum(1 for t in trades if t["size_atr_source"] == "derived"),
+            "modes": {m: sum(1 for t in trades if t["height_mode"] == m)
+                      for m in {t["height_mode"] for t in trades}},
             "tf_rows": tf_rows,
             "pct_buckets": [_zs_bucket_label(lo, hi, "%") for lo, hi in ZS_PCT_BUCKETS],
             "atr_buckets": [_zs_bucket_label(lo, hi, "x") for lo, hi in ZS_ATR_BUCKETS],
