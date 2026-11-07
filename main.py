@@ -209,6 +209,12 @@ tr:hover td{background:rgba(255,255,255,0.02)}
       <option value="">All</option>
     </select>
   </div>
+  <div style="display:flex;align-items:center;gap:6px">
+    <span style="font-size:11px;color:var(--dim)">Timeframe</span>
+    <select id="range-timeframe" style="font-size:11px;min-width:80px">
+      <option value="">All</option>
+    </select>
+  </div>
   <button onclick="calcRange()" style="font-size:11px;padding:4px 12px">Calculate</button>
   <button onclick="clearRange()" style="font-size:11px;padding:4px 8px;opacity:0.5">Clear</button>
   <span id="range-result" style="font-size:12px;margin-left:4px"></span>
@@ -345,18 +351,11 @@ function loadTrades(){
     var closedCount = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; }).length;
     var hint = document.getElementById('range-hint');
     if(hint) hint.textContent = closedCount ? '1 – '+closedCount : '';
-    // Populate variant dropdown
-    var variants = {};
-    _allTrades.forEach(function(t){ if(t.variant) variants[t.variant] = true; });
-    var sel = document.getElementById('range-variant');
-    var cur = sel.value;
-    sel.innerHTML = '<option value="">All</option>';
-    Object.keys(variants).sort().forEach(function(v){
-      var o = document.createElement('option');
-      o.value = v; o.textContent = v;
-      if(v === cur) o.selected = true;
-      sel.appendChild(o);
-    });
+    // Populate the Variant and Timeframe dropdowns from whatever is actually loaded.
+    // Both filter by exact string match, so the sort order below is cosmetic only and a
+    // label this code cannot parse still filters correctly — it just sorts last.
+    fillRangeSelect('range-variant', 'variant', null);
+    fillRangeSelect('range-timeframe', 'timeframe', tfSortKey);
   }).catch(function(e){ console.error('Load failed',e); });
 }
 
@@ -565,12 +564,57 @@ function updateStats(trades){
 }
 
 var _allTrades = [];
+
+// Timeframe labels come from the indicator via the server and the cell is hand-editable, so
+// the set is open-ended ('15m', '1h', '4h', '1D', or a bare TradingView period like '240').
+// A bare number is minutes when small and seconds when large — nobody charts a 10-hour bar,
+// so 600 is a safe split. Used ONLY for ordering the dropdown; filtering is exact-match.
+function tfSortKey(label){
+  var t = String(label==null?'':label).trim().toLowerCase();
+  if(!t) return 1e9;
+  // Written without backslash escapes on purpose: this lives inside a Python triple-quoted
+  // string, where an unrecognised regex escape raises a SyntaxWarning (and is
+  // slated to become an error). Character classes express the same pattern with no escapes.
+  var m = t.match(/^([0-9]*[.]?[0-9]+)[ ]*(m|h|d|w|min|hour|day|week)?$/);
+  if(!m) return 1e9 - 1;
+  var n = parseFloat(m[1]);
+  if(isNaN(n)) return 1e9 - 1;
+  var u = m[2] || '';
+  if(u === 'h' || u === 'hour') return n * 60;
+  if(u === 'd' || u === 'day')  return n * 1440;
+  if(u === 'w' || u === 'week') return n * 10080;
+  if(u === 'm' || u === 'min')  return n;
+  return n > 600 ? n / 60 : n;   // bare number: seconds if large, minutes if small
+}
+
+// Rebuild one of the range-stats dropdowns, keeping the current selection if it still exists.
+function fillRangeSelect(selId, field, sortKey){
+  var sel = document.getElementById(selId);
+  if(!sel) return;
+  var seen = {};
+  _allTrades.forEach(function(t){ if(t[field]) seen[t[field]] = true; });
+  var vals = Object.keys(seen);
+  vals.sort(sortKey ? function(a,b){
+    var ka = sortKey(a), kb = sortKey(b);
+    return ka === kb ? (a < b ? -1 : a > b ? 1 : 0) : ka - kb;
+  } : undefined);
+  var cur = sel.value;
+  sel.innerHTML = '<option value="">All</option>';
+  vals.forEach(function(v){
+    var o = document.createElement('option');
+    o.value = v; o.textContent = v;
+    if(v === cur) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
 function calcRange(){
   var fromNum  = parseInt(document.getElementById('range-from').value);
   var toNum    = parseInt(document.getElementById('range-to').value);
   var fromDate = document.getElementById('range-date-from').value;
   var toDate   = document.getElementById('range-date-to').value;
   var variant  = document.getElementById('range-variant').value;
+  var timefrm  = document.getElementById('range-timeframe').value;
   var result   = document.getElementById('range-result');
 
   // Get closed trades sorted by trade number (descending in UI = ascending by index)
@@ -599,12 +643,26 @@ function calcRange(){
     });
   }
 
+  // The trade-number range above is counted over ALL closed trades, so the variant and
+  // timeframe filters below SELECT WITHIN that range — "the 1h trades among trades 1-50",
+  // not "the first 50 1h trades". The result line reports both counts so this is visible.
+  var inRange = filtered.length;
+
   // Filter by variant
   if(variant){
     filtered = filtered.filter(function(t){ return t.variant === variant; });
   }
 
-  if(!filtered.length){ result.textContent = 'No trades in range'; result.style.color='var(--dim)'; return; }
+  // Filter by timeframe
+  if(timefrm){
+    filtered = filtered.filter(function(t){ return t.timeframe === timefrm; });
+  }
+
+  if(!filtered.length){
+    result.textContent = 'No trades in range'
+      + ((variant||timefrm) ? ' matching '+[variant,timefrm].filter(Boolean).join(' + ') : '');
+    result.style.color='var(--dim)'; return;
+  }
 
   var wins=0, losses=0, pnl=0;
   filtered.forEach(function(t){
@@ -622,8 +680,13 @@ function calcRange(){
   var wr    = total>0 ? Math.round(wins/total*100) : 0;
   var wrCol = wr>=50?'var(--green)':wr>=35?'var(--amber)':'var(--red)';
   var pnlCol = pnl>=0?'var(--green)':'var(--red)';
+  var countHtml = (filtered.length === inRange)
+    ? filtered.length + ' trades'
+    : filtered.length + ' of ' + inRange + ' trades'
+      + ' <span style="color:var(--dim);font-size:11px">('
+      + [variant, timefrm].filter(Boolean).join(' + ') + ')</span>';
   result.innerHTML =
-    filtered.length + ' trades &nbsp;|&nbsp; ' +
+    countHtml + ' &nbsp;|&nbsp; ' +
     '<span style="color:'+wrCol+';font-weight:500">WR: '+wr+'%</span>' +
     ' &nbsp;|&nbsp; ' + wins + 'W / ' + losses + 'L' +
     ' &nbsp;|&nbsp; PnL: <span style="color:'+pnlCol+';font-weight:500">'+(pnl>=0?'+':'')+pnl.toFixed(2)+' USDT</span>' + rHtml;
@@ -635,6 +698,7 @@ function clearRange(){
   document.getElementById('range-date-from').value = '';
   document.getElementById('range-date-to').value   = '';
   document.getElementById('range-variant').value   = '';
+  document.getElementById('range-timeframe').value = '';
   document.getElementById('range-result').textContent = '';
 }
 
