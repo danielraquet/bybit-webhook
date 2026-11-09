@@ -168,6 +168,7 @@ tr:hover td{background:rgba(255,255,255,0.02)}
 <div id="restricted-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(239,83,80,0.15);border:1px solid rgba(239,83,80,0.4);color:#ef5350">
   🚫 <strong>Trading restricted</strong> — <span id="restricted-reason"></span>
 </div>
+<div id="trunc-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(255,167,38,0.15);border:1px solid rgba(255,167,38,0.4);color:#ffa726"></div>
 <div id="cooldown-banner" style="display:none;margin:8px 0;padding:10px 14px;border-radius:6px;font-size:12px;background:rgba(255,167,38,0.15);border:1px solid rgba(255,167,38,0.4);color:#ffa726">
   ⏸ <strong>Drawdown pause active</strong> — <span id="cooldown-reason"></span>
 </div>
@@ -347,6 +348,9 @@ function loadTrades(){
     _allTrades = d.trades || [];
     renderTrades(_allTrades);
     updateStats(_allTrades);
+    // The stat tiles are computed from this payload, so if it is a subset the tiles describe a
+    // subset. Say so loudly rather than showing a confident number over partial data.
+    showTruncation(d.meta);
     // Update range hint
     var closedCount = _allTrades.filter(function(t){ return t.status==='closed' && t.outcome; }).length;
     var hint = document.getElementById('range-hint');
@@ -525,6 +529,24 @@ function sumR(trades){
   });
   return {sum:sum, n:n, missing:missing};
 }
+function showTruncation(meta){
+  var el = document.getElementById('trunc-banner');
+  if(!el) return;
+  if(!meta || !meta.truncated || (!meta.truncated.trades && !meta.truncated.skipped)){
+    el.style.display = 'none'; el.innerHTML = ''; return;
+  }
+  var bits = [];
+  if(meta.truncated.trades)
+    bits.push('<b>'+meta.returned.trades+' of '+meta.totals.trades+' trades</b> loaded (row limit '
+            + meta.limits.trades + ') &mdash; the stat tiles and range stats describe only these');
+  if(meta.truncated.skipped)
+    bits.push(meta.returned.skipped+' of '+meta.totals.skipped+' skipped signals loaded (row limit '
+            + meta.limits.skipped + ')');
+  el.innerHTML = '\u26a0 <strong>Showing a subset</strong> &mdash; ' + bits.join('; ')
+               + '. Raise JOURNAL_TRADE_LIMIT in Railway to load more.';
+  el.style.display = 'block';
+}
+
 function updateStats(trades){
   var total=0,wins=0,losses=0,pnlSum=0,open=0;
   trades.forEach(function(t){
@@ -4530,39 +4552,84 @@ def journal_data():
             days = int(days) if days else None
         except:
             days = None
-        trades = get_all_trades(500, days=days)
-        # Fetch skipped trades separately (get_all_trades may exclude them)
+        # Real trades and skipped signals get SEPARATE row budgets.
+        #
+        # This used to be get_all_trades(500), whose 500 rows covered every status. Skipped
+        # signals outnumber real trades roughly 942 to 731 in practice, so they consumed most
+        # of the budget — and because the table hides skipped rows by default, the page showed
+        # only the non-skipped remainder of those 500 (about 212 of 695 closed trades). Worse,
+        # updateStats() computes the tiles from this same payload, so win rate, PnL, Total R and
+        # Avg 1R were all being calculated over the most recent third of the history.
+        #
+        # Skipped rows are now capped on their own and cannot crowd out real trades, the limits
+        # are env-tunable, and the true per-status row counts go back with the payload so the
+        # page can say plainly when it is showing a subset instead of failing silently.
+        trade_limit   = int(os.getenv("JOURNAL_TRADE_LIMIT", "3000"))
+        skipped_limit = int(os.getenv("JOURNAL_SKIPPED_LIMIT", "500"))
+        counts, trades, skipped = {}, None, []
         try:
             conn = get_db()
             with conn.cursor() as cur:
+                cur.execute("SELECT status, COUNT(*) FROM trades GROUP BY status")
+                counts = {r[0]: r[1] for r in cur.fetchall()}
                 if days:
                     cur.execute(
-                        "SELECT * FROM trades WHERE status='skipped' AND opened_at::timestamp >= NOW() - INTERVAL %s ORDER BY opened_at DESC LIMIT 500",
-                        (f"{days} days",)
-                    )
+                        "SELECT * FROM trades WHERE status <> 'skipped' AND opened_at::timestamp >= NOW() - INTERVAL %s"
+                        " ORDER BY opened_at DESC LIMIT %s", (f"{days} days", trade_limit))
                 else:
-                    cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT 500")
+                    cur.execute("SELECT * FROM trades WHERE status <> 'skipped' ORDER BY opened_at DESC LIMIT %s",
+                                (trade_limit,))
+                cols   = [d[0] for d in cur.description]
+                trades = [dict(zip(cols, row)) for row in cur.fetchall()]
+                if days:
+                    cur.execute(
+                        "SELECT * FROM trades WHERE status='skipped' AND opened_at::timestamp >= NOW() - INTERVAL %s"
+                        " ORDER BY opened_at DESC LIMIT %s", (f"{days} days", skipped_limit))
+                else:
+                    cur.execute("SELECT * FROM trades WHERE status='skipped' ORDER BY opened_at DESC LIMIT %s",
+                                (skipped_limit,))
                 cols    = [d[0] for d in cur.description]
                 skipped = [dict(zip(cols, row)) for row in cur.fetchall()]
             conn.close()
-            import json as _j
-            skipped = _j.loads(_j.dumps(skipped, default=str))
-            trades_j = _j.loads(_j.dumps(trades, default=str))
-            existing_ids = {t.get("id") for t in trades_j}
-            for t in skipped:
-                if t.get("id") not in existing_ids:
-                    trades_j.append(t)
-            trades_j.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
-            trades = trades_j
-            log.info(f"Journal data: {len(trades)} total trades incl. {len(skipped)} skipped")
         except Exception as e:
-            log.warning(f"Could not fetch skipped trades separately: {e}")
+            # Never leave the journal blank over this — fall back to the old path.
+            log.warning(f"Journal data: own query failed ({e}), falling back to get_all_trades")
+            trades = None
+
+        if trades is None:
+            trades = get_all_trades(trade_limit, days=days)
+            skipped = []
+
+        import json as _j
+        trades_j = _j.loads(_j.dumps(trades, default=str))
+        skipped_j = _j.loads(_j.dumps(skipped, default=str))
+        existing_ids = {t.get("id") for t in trades_j}
+        for t in skipped_j:
+            if t.get("id") not in existing_ids:
+                trades_j.append(t)
+        trades_j.sort(key=lambda t: str(t.get("opened_at") or ""), reverse=True)
+        trades = trades_j
+
+        n_real    = sum(1 for t in trades if t.get("status") != "skipped")
+        n_skipped = sum(1 for t in trades if t.get("status") == "skipped")
+        total_real    = sum(v for k, v in counts.items() if k != "skipped") if counts else None
+        total_skipped = counts.get("skipped") if counts else None
+        meta = {
+            "counts": counts,
+            "returned":  {"trades": n_real, "skipped": n_skipped},
+            "totals":    {"trades": total_real, "skipped": total_skipped},
+            "limits":    {"trades": trade_limit, "skipped": skipped_limit},
+            "truncated": {"trades":  bool(total_real    is not None and n_real    < total_real and not days),
+                          "skipped": bool(total_skipped is not None and n_skipped < total_skipped and not days)},
+        }
+        log.info(f"Journal data: {n_real} real trades (of {total_real}) + {n_skipped} skipped "
+                 f"(of {total_skipped}), limits {trade_limit}/{skipped_limit}, days={days}")
         # Apply status filter
         if status_filter == "closed":
             trades = [t for t in trades if t.get("status") in ("closed", "note")]
         elif status_filter == "open":
             trades = [t for t in trades if t.get("status") in ("open", "note")]
-        resp = jsonify({"trades": trades, "stats": get_stats()})
+        resp = jsonify({"trades": trades, "stats": get_stats(), "meta": meta})
         resp.headers["Access-Control-Allow-Origin"] = "*"
         return resp
     except Exception as e:
@@ -9008,7 +9075,7 @@ def zone_age_data():
                                FROM trades
                                WHERE status='closed' AND outcome IS NOT NULL
                                  AND opened_at::timestamp >= (NOW() AT TIME ZONE 'UTC') - make_interval(days => %s)
-                               ORDER BY opened_at DESC LIMIT 500""", (days,))
+                               ORDER BY opened_at DESC LIMIT 3000""", (days,))
                 rows = [dict(r) for r in cur.fetchall()]
             conn.commit()
         finally:
